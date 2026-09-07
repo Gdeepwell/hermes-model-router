@@ -41,24 +41,278 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 </style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
 </head>
 <body><main>
-<div class="lab-header"><div><div class="lab-kicker">HERMES · LOCAL OBSERVABILITY</div><div class="lab-title">AI Home Lab</div><div class="sub">Modellek, háttéragentek és élő munkafolyamatok egy helyen</div></div><nav class="tabs" aria-label="AI Home Lab nézetek"><button class="tab active" data-tab="router">Model Router</button><button class="tab" data-tab="settings">Beállítások</button><button class="tab" data-tab="command">Hermes Command Center</button></nav></div>
-<section id="router-panel" class="panel" hidden><h2 class="panel-heading">Model Router</h2><div class="sub">Élő JSONL routing napló · automatikus frissítés 3 másodpercenként</div>
+<div class="lab-header"><div><div class="lab-kicker" data-i18n="lab.kicker">HERMES · LOCAL OBSERVABILITY</div><div class="lab-title" data-i18n="lab.title">AI Home Lab</div><div class="sub" data-i18n="lab.sub">Modellek, háttéragentek és élő munkafolyamatok egy helyen</div></div><nav class="tabs" aria-label="AI Home Lab nézetek"><button class="tab active" data-tab="router"><span data-i18n="tab.router">Model Router</span></button><button class="tab" data-tab="settings"><span data-i18n="tab.settings">Beállítások</span></button><button class="tab" data-tab="command"><span data-i18n="tab.command">Hermes Command Center</span></button></nav></div>
+<section id="router-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="router.heading">Model Router</span></h2><div class="sub" data-i18n="router.sub">Élő JSONL routing napló · automatikus frissítés 3 másodpercenként</div>
 <div class="toolbar">
-<label>Modell<select id="tier"><option value="">Mind</option><option>luna</option><option>spark</option><option>terra</option><option>sol</option><option>opus5</option><option>qwen</option></select></label>
-<label>Keresés<input id="search" type="search" placeholder="prompt, modell vagy indok…"></label>
-<label>Utolsó root promptok<select id="last"><option>5</option><option selected>20</option><option>50</option></select></label>
-<label class="check"><input id="grouped" type="checkbox" checked> Promptonként összevonva</label>
-<label class="check"><input id="word-wrap" type="checkbox"> Sortörés</label>
-<label class="check"><input id="auto" type="checkbox" checked> Automatikus frissítés</label>
-<button id="refresh">Frissítés</button><span id="status" class="status">Betöltés…</span>
+<label><span data-i18n="router.tier.label">Modell</span><select id="tier"><option value="" data-i18n="router.tier.all">Mind</option><option>luna</option><option>spark</option><option>terra</option><option>sol</option><option>opus5</option><option>qwen</option></select></label>
+<label>Keresés<input id="search" type="search" data-i18n-placeholder="router.search.placeholder"></label>
+<label><span data-i18n="router.last.label">Utolsó root promptok</span><select id="last"><option>5</option><option selected>20</option><option>50</option></select></label>
+<label class="check"><input id="grouped" type="checkbox" checked> <span data-i18n="router.grouped">Promptonként összevonva</span></label>
+<label class="check"><input id="word-wrap" type="checkbox"> <span data-i18n="router.wordwrap">Sortörés</span></label>
+<label class="check"><input id="auto" type="checkbox" checked> <span data-i18n="router.auto">Automatikus frissítés</span></label>
+<button id="refresh" data-i18n="router.refresh">Frissítés</button><span id="status" class="status" data-i18n="router.loading">Betöltés…</span>
 </div>
-<div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k">GPT-5.6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k">GPT-5.6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k">Claude Opus 5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k">Qwen 3.7 Plus</div></div></div>
-<div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th>Dátum</th><th>Idő (CET/CEST)</th><th>Prompt</th><th class="calls">Hívások</th><th>Útvonal</th><th>Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<section id="settings-panel" class="panel" hidden><h2 class="panel-heading">Beállítások</h2><div class="sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3>Modellek hívhatósága</h3><div class="toggle-grid" id="callable-toggles"></div></div><div class="settings-section"><h3>Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label>Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört<select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div></div></section>
-<section id="command-panel" class="panel" hidden><h2 class="panel-heading">Hermes Command Center</h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
+<div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-5.6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-5.6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
+<div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
+<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.callable">Modellek hívhatósága</h3><div class="toggle-grid" id="callable-toggles"></div></div><div class="settings-section"><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
+<section id="command-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="tab.command">Hermes Command Center</span></h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
 </main>
 <script>
-const $=id=>document.getElementById(id);let entries=[];let selectedTab=localStorage.getItem('ai-home-lab-tab')||null;const expandedPrompts=new Set(),promptExpansionKey='model-router-expanded-prompts-v1';function persistedPromptExpansions(){try{return new Set(JSON.parse(localStorage.getItem(promptExpansionKey)||'[]'))}catch(e){return new Set()}}function isPromptExpanded(key){return expandedPrompts.has(key)||persistedPromptExpansions().has(key)}function setPromptExpanded(key,open){const persisted=persistedPromptExpansions();open?persisted.add(key):persisted.delete(key);localStorage.setItem(promptExpansionKey,JSON.stringify([...persisted]));open?expandedPrompts.add(key):expandedPrompts.delete(key)}const descriptionExpansionKey='model-router-description-expansion-v1';function descriptionExpansions(){try{return JSON.parse(localStorage.getItem(descriptionExpansionKey)||'{}')}catch(e){return {}}}function createDescriptionDetails(key,text){const node=document.createElement('details'),state=descriptionExpansions();node.className='agent-worker-goal-details';node.open=!!state[key];const summary=document.createElement('summary');summary.textContent='Feladatleírás';const body=document.createElement('div');body.className='agent-worker-goal';body.textContent=text||'Nincs megőrzött feladatleírás.';node.append(summary,body);node.addEventListener('toggle',()=>{const next=descriptionExpansions();next[key]=node.open;localStorage.setItem(descriptionExpansionKey,JSON.stringify(next))});return node}
+const $=id=>document.getElementById(id);
+// ── i18n ──────────────────────────────────────────────────────────
+const I18N = {
+  en: {
+    // Header
+    'lab.kicker': 'HERMES · LOCAL OBSERVABILITY',
+    'lab.title': 'AI Home Lab',
+    'lab.sub': 'Models, background agents and live workflows in one place',
+    // Tabs
+    'tab.router': 'Model Router',
+    'tab.settings': 'Settings',
+    'tab.command': 'Hermes Command Center',
+    // Router panel
+    'router.heading': 'Model Router',
+    'router.sub': 'Live JSONL routing log · auto-refresh every 3 seconds',
+    'router.tier.label': 'Model',
+    'router.tier.all': 'All',
+    'router.search.placeholder': 'prompt, model or reason…',
+    'router.last.label': 'Last root prompts',
+    'router.grouped': 'Grouped by prompt',
+    'router.wordwrap': 'Word wrap',
+    'router.auto': 'Auto refresh',
+    'router.refresh': 'Refresh',
+    'router.loading': 'Loading…',
+    // Cards
+    'card.total': 'Total routing decisions',
+    'card.luna': 'GPT-5.6 Luna',
+    'card.spark': 'GPT-5.3 Spark',
+    'card.terra': 'GPT-5.6 Terra',
+    'card.sol': 'GPT-5.6 Sol',
+    'card.opus5': 'Claude Opus 5',
+    'card.qwen': 'Qwen 3.7 Plus',
+    // Table headers
+    'th.date': 'Date',
+    'th.time': 'Time (CET/CEST)',
+    'th.prompt': 'Prompt',
+    'th.calls': 'Calls',
+    'th.route': 'Route',
+    'th.reason': 'Reason',
+    // Misc router
+    'no.entries': 'No matching entries.',
+    'not.recoverable': 'Not recoverable',
+    'details.close': 'Close details',
+    'details.open': 'Open API calls',
+    'related.missing': 'Related earlier message not found.',
+    'subagent.close': 'Close sub-agents',
+    'subagent.open': 'Open sub-agents',
+    'subagent.running': 'Sub-agent running',
+    'subagent.done': 'Finished',
+    'main.agent': 'Main agent',
+    'root.continuation': 'INTERNAL ROUTER CONTINUATIONS',
+    'root.continuation.title': 'Not a delegated worker: internal continuations and routing decisions of the main thread between calls.',
+    'close.router.steps': 'Close internal router steps',
+    'open.router.steps': 'Open internal router steps',
+    // Agent panel
+    'agents.heading': 'Delegated sub-agents',
+    'agents.running.done.error': 'running · completed · errors',
+    'agents.recent': 'recent runs',
+    'agents.none': 'No delegated sub-agents to display.',
+    'agents.main.thread': 'MAIN THREAD',
+    'agents.prev.task': 'Previous main task',
+    'agents.reason.default': 'Independent subtask',
+    'agents.calls': 'calls',
+    'agents.close.last': 'Last',
+    'agents.close.steps': 'tool events',
+    'agents.no.events': 'No stored tool events for this agent yet.',
+    'agents.recently.done': 'Recently completed',
+    'agents.main.task': 'Main task',
+    'agents.open.tasks': 'Open subtasks',
+    'agents.close.tasks': 'Close subtasks',
+    'agents.subtasks': 'subtasks',
+    'agents.running': 'Running',
+    'agents.done': 'Done',
+    'agents.task.desc': 'Task description',
+    'agents.no.desc': 'No saved task description.',
+    'agents.close.inner': 'Close inner tasks',
+    'agents.open.inner': 'Open inner tasks',
+    'agents.below.root': 'Below root',
+    'agents.requested.ro': 'Requested READ-ONLY',
+    'agents.requested.ro.title': 'The main agent explicitly requested this sub-agent for read-only/verification only.',
+    // Settings panel
+    'settings.heading': 'Settings',
+    'settings.sub': 'Model callability and default model',
+    'settings.callable': 'Model callability',
+    'settings.default.heading': 'Default model (Orchestrator)',
+    'settings.default.desc': 'This model handles default routing and the orchestrator role',
+    'settings.language': 'Language',
+    'settings.lang.en': 'English',
+    'settings.lang.hu': 'Magyar',
+    // Model descriptions
+    'model.desc.luna': 'Fast, simple tasks',
+    'model.desc.spark': 'Read-only delegated work',
+    'model.desc.terra': 'General orchestrator',
+    'model.desc.sol': 'Security-critical, design',
+    'model.desc.opus5': 'External Claude Code bridge',
+    'model.desc.qwen': 'Alternative model',
+    // Settings messages
+    'settings.saving': 'Saving...',
+    'settings.saved': 'Saved ✓',
+    'settings.error.unknown': 'Unknown error',
+    'settings.error.prefix': 'Error: ',
+    'settings.error.load': 'Failed to load settings:',
+    // Status
+    'status.refreshing': 'Refreshing…',
+    'status.loading': 'Loading…',
+    'status.error.prefix': 'Error: ',
+    'status.error.kept': ' · previous list kept',
+    // Execution tree
+    'exec.below.root': 'Below root',
+    'exec.open.subtasks': 'Open subtasks',
+    'exec.close.subtasks': 'Close subtasks',
+    'exec.no.desc': 'No saved task description.',
+    'exec.opus.review': 'Opus review',
+    'exec.internal.step': 'Internal router step',
+    'exec.read.only': 'READ-ONLY',
+    'exec.requested.ro': 'REQUESTED READ-ONLY',
+    // Misc
+    'internal.router.step': 'Internal router step',
+    'resizer.title': 'Drag to resize column · double-click: reset',
+    'play.running.agent': 'Currently running main agent',
+    'play.running.sub': 'AGENTS RUNNING NOW',
+  },
+  hu: {
+    'lab.kicker': 'HERMES · LOCAL OBSERVABILITY',
+    'lab.title': 'AI Home Lab',
+    'lab.sub': 'Modellek, háttéragentek és élő munkafolyamatok egy helyen',
+    'tab.router': 'Model Router',
+    'tab.settings': 'Beállítások',
+    'tab.command': 'Hermes Command Center',
+    'router.heading': 'Model Router',
+    'router.sub': 'Élő JSONL routing napló · automatikus frissítés 3 másodpercenként',
+    'router.tier.label': 'Modell',
+    'router.tier.all': 'Mind',
+    'router.search.placeholder': 'prompt, modell vagy indok…',
+    'router.last.label': 'Utolsó root promptok',
+    'router.grouped': 'Promptonként összevonva',
+    'router.wordwrap': 'Sortörés',
+    'router.auto': 'Automatikus frissítés',
+    'router.refresh': 'Frissítés',
+    'router.loading': 'Betöltés…',
+    'card.total': 'Összes routing döntés',
+    'card.luna': 'GPT-5.6 Luna',
+    'card.spark': 'GPT-5.3 Spark',
+    'card.terra': 'GPT-5.6 Terra',
+    'card.sol': 'GPT-5.6 Sol',
+    'card.opus5': 'Claude Opus 5',
+    'card.qwen': 'Qwen 3.7 Plus',
+    'th.date': 'Dátum',
+    'th.time': 'Idő (CET/CEST)',
+    'th.prompt': 'Prompt',
+    'th.calls': 'Hívások',
+    'th.route': 'Útvonal',
+    'th.reason': 'Indok',
+    'no.entries': 'Nincs a szűrésnek megfelelő bejegyzés.',
+    'not.recoverable': 'Nem visszakereshető',
+    'details.close': 'Részletek bezárása',
+    'details.open': 'API-hívások megnyitása',
+    'related.missing': 'A kapcsolódó korábbi üzenet nem található.',
+    'subagent.close': 'Mellékagentek bezárása',
+    'subagent.open': 'Mellékagentek megnyitása',
+    'subagent.running': 'Mellékagent fut',
+    'subagent.done': 'Kész',
+    'main.agent': 'Fő agent',
+    'root.continuation': 'BELSŐ ROUTER FOLYTATÁSOK',
+    'root.continuation.title': 'Nem delegált worker: a főszál belső, hívások közötti folytatásai és routing-döntései.',
+    'close.router.steps': 'Belső router-lépések bezárása',
+    'open.router.steps': 'Belső router-lépések megnyitása',
+    'agents.heading': 'Delegált mellékszálak',
+    'agents.running.done.error': 'fut · kész · hiba',
+    'agents.recent': 'legutóbbi futás',
+    'agents.none': 'Nincs megjeleníthető delegált mellékszál.',
+    'agents.main.thread': 'FŐSZÁL',
+    'agents.prev.task': 'Korábbi fő feladat',
+    'agents.reason.default': 'Önálló részfeladat',
+    'agents.calls': 'hívás',
+    'agents.close.last': 'Utolsó',
+    'agents.close.steps': 'lépés',
+    'agents.no.events': 'Még nincs tárolt tool-esemény ehhez az agenthez.',
+    'agents.recently.done': 'Legutóbb befejezett munkák',
+    'agents.main.task': 'Fő feladat',
+    'agents.open.tasks': 'Alfeladatok megnyitása',
+    'agents.close.tasks': 'Alfeladatok bezárása',
+    'agents.subtasks': 'mellékszál',
+    'agents.running': 'Fut',
+    'agents.done': 'Kész',
+    'agents.task.desc': 'Feladatleírás',
+    'agents.no.desc': 'Nincs megőrzött feladatleírás.',
+    'agents.close.inner': 'Belső feladatok bezárása',
+    'agents.open.inner': 'Belső feladatok megnyitása',
+    'agents.below.root': 'Gyökér alatt',
+    'agents.requested.ro': 'KÉRT READ-ONLY',
+    'agents.requested.ro.title': 'A fő agent kifejezetten csak olvasási/ellenőrzési feladatra kérte ezt a mellékszálat.',
+    'settings.heading': 'Beállítások',
+    'settings.sub': 'Modellek hívhatósága és alapértelmezett modell',
+    'settings.callable': 'Modellek hívhatósága',
+    'settings.default.heading': 'Alapértelmezett modell (Orchestrator)',
+    'settings.default.desc': 'Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört',
+    'settings.language': 'Nyelv',
+    'settings.lang.en': 'English',
+    'settings.lang.hu': 'Magyar',
+    'model.desc.luna': 'Gyors, egyszerű feladatok',
+    'model.desc.spark': 'Read-only delegált munkák',
+    'model.desc.terra': 'Általános orchestrator',
+    'model.desc.sol': 'Biztonságkritikus, design',
+    'model.desc.opus5': 'Külső Claude Code bridge',
+    'model.desc.qwen': 'Alternatív modell',
+    'settings.saving': 'Mentés...',
+    'settings.saved': 'Mentve ✓',
+    'settings.error.unknown': 'Ismeretlen hiba',
+    'settings.error.prefix': 'Hiba: ',
+    'settings.error.load': 'Nem sikerült betölteni:',
+    'status.refreshing': 'Frissítés…',
+    'status.loading': 'Betöltés…',
+    'status.error.prefix': 'Hiba: ',
+    'status.error.kept': ' · a korábbi lista megmaradt',
+    'exec.below.root': 'Gyökér alatt',
+    'exec.open.subtasks': 'Alfeladatok megnyitása',
+    'exec.close.subtasks': 'Alfeladatok bezárása',
+    'exec.no.desc': 'Nincs megőrzött feladatleírás.',
+    'exec.opus.review': 'Opus review',
+    'exec.internal.step': 'Belső router-lépés',
+    'exec.read.only': 'READ-ONLY',
+    'exec.requested.ro': 'KÉRT READ-ONLY',
+    'internal.router.step': 'Belső router-lépés',
+    'resizer.title': 'Húzd az oszlop szélességének módosításához · dupla kattintás: alaphelyzet',
+    'play.running.agent': 'Éppen futó fő agent',
+    'play.running.sub': 'ÉPPEN FUT ·',
+  }
+};
+let currentLang = localStorage.getItem('model-router-lang') || 'en';
+function t(key) { return (I18N[currentLang] && I18N[currentLang][key]) || (I18N.en[key]) || key; }
+function applyLanguage() {
+  document.documentElement.lang = currentLang === 'hu' ? 'hu' : 'en';
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    const attr = el.getAttribute('data-i18n-attr');
+    const val = t(key);
+    if (attr) { el.setAttribute(attr, val); }
+    else { el.textContent = val; }
+  });
+  // Update placeholders separately
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
+  });
+  // Update titles
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    el.title = t(el.getAttribute('data-i18n-title'));
+  });
+  // Re-render settings if visible
+  if (currentConfig) renderSettings();
+  // Re-render dynamic content
+  if (typeof render === 'function') { try { render(); } catch(e){} }
+  if (typeof renderAgents === 'function') { try { renderAgents(agentActivity); } catch(e){} }
+}
+let entries=[];let selectedTab=localStorage.getItem('ai-home-lab-tab')||null;const expandedPrompts=new Set(),promptExpansionKey='model-router-expanded-prompts-v1';function persistedPromptExpansions(){try{return new Set(JSON.parse(localStorage.getItem(promptExpansionKey)||'[]'))}catch(e){return new Set()}}function isPromptExpanded(key){return expandedPrompts.has(key)||persistedPromptExpansions().has(key)}function setPromptExpanded(key,open){const persisted=persistedPromptExpansions();open?persisted.add(key):persisted.delete(key);localStorage.setItem(promptExpansionKey,JSON.stringify([...persisted]));open?expandedPrompts.add(key):expandedPrompts.delete(key)}const descriptionExpansionKey='model-router-description-expansion-v1';function descriptionExpansions(){try{return JSON.parse(localStorage.getItem(descriptionExpansionKey)||'{}')}catch(e){return {}}}function createDescriptionDetails(key,text){const node=document.createElement('details'),state=descriptionExpansions();node.className='agent-worker-goal-details';node.open=!!state[key];const summary=document.createElement('summary');summary.textContent='Feladatleírás';const body=document.createElement('div');body.className='agent-worker-goal';body.textContent=text||'Nincs megőrzött feladatleírás.';node.append(summary,body);node.addEventListener('toggle',()=>{const next=descriptionExpansions();next[key]=node.open;localStorage.setItem(descriptionExpansionKey,JSON.stringify(next))});return node}
 function setTab(name,remember=true){if(name==='agents')name='router';selectedTab=name;if(remember)localStorage.setItem('ai-home-lab-tab',name);$('router-panel').hidden=name!=='router';$('settings-panel').hidden=name!=='settings';$('command-panel').hidden=name!=='command';document.querySelectorAll('.tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.tab===name));if(name==='settings')loadSettings();}
 
 // Settings management
@@ -139,7 +393,7 @@ function render(){const list=filtered(),body=$('rows');body.replaceChildren();fo
  for(const g of gs){const tr=document.createElement('tr'),first=g[0],[date,time]=dateAndTime(first.timestamp),key=$('grouped').checked?promptKey(first):`${promptKey(first)}::${first.timestamp}:${first.api_call_count}`,open=isPromptExpanded(key);let td=document.createElement('td');td.className='expand';const toggle=document.createElement('button');toggle.type='button';toggle.className='prompt-toggle';toggle.textContent=open?'▾':'▸';toggle.title=open?'Részletek bezárása':'API-hívások megnyitása';toggle.addEventListener('click',()=>togglePrompt(key));td.append(toggle);tr.append(td);appendCell(tr,date);appendCell(tr,time);td=appendCell(tr,first.prompt_preview||'Nem visszakereshető');td.title=first.prompt_preview||'A kapcsolódó korábbi üzenet nem található.';appendCell(tr,g.length,'calls');td=document.createElement('td');td.className='route';for(const [i,r] of compact(g.map(routeKey)).entries()){if(i)td.append(' → ');td.append(pill(r.v.split(' · ')[0],r.v));if(r.n>1)td.append(`×${r.n}`)}tr.append(td);appendCell(tr,compact(g.map(x=>x.reason)).map(r=>r.v+(r.n>1?` ×${r.n}`:'')).join(' → '),'reason');body.append(tr);if(open){const detail=document.createElement('tr'),detailCell=document.createElement('td');detail.className='detail';detailCell.colSpan=7;detailCell.append(detailsTable(g));detail.append(detailCell);body.append(detail)}}}
 function renderAgents(activity){const s=activity.summary||{},tree=$('agent-tree');$('agent-summary').textContent=`${s.running||0} fut · ${s.completed||0} kész · ${s.failed||0} hiba`;tree.replaceChildren();const finished=[];for(const parent of activity.parents||[]){const active=(parent.children||[]).filter(c=>c.state==='running');finished.push(...(parent.children||[]).filter(c=>c.state!=='running'));if(!active.length)continue;const wrap=document.createElement('div');wrap.className='agent-parent';const title=document.createElement('div');title.className='agent-session';title.textContent=`FŐ AGENT · ${parent.session_id}`;wrap.append(title);for(const child of active){const row=document.createElement('div');row.className='agent-child';const dot=document.createElement('span');dot.className='agent-dot running';const text=document.createElement('div');const goal=document.createElement('div');goal.className='agent-goal';goal.textContent=child.goal;const phase=document.createElement('div');phase.className='agent-activity';phase.textContent=child.activity;text.append(goal,phase);const meta=document.createElement('div');meta.className='agent-meta';meta.textContent=`FUT · ${child.age_seconds}s${child.model?`\n${child.model}`:''}`;row.append(dot,text,meta);wrap.append(row);const consoleBox=document.createElement('details');consoleBox.className='console';consoleBox.open=true;const summary=document.createElement('summary');summary.textContent=`Utolsó ${Math.min((child.console||[]).length,10)} lépés`;consoleBox.append(summary);const events=child.console||[];if(!events.length){const waiting=document.createElement('div');waiting.className='console-empty';waiting.textContent='Még nincs tárolt tool-esemény ehhez az agenthez.';consoleBox.append(waiting)}for(const event of events){const eventEl=document.createElement('div');eventEl.className='console-event compact';eventEl.textContent=`${new Date(event.timestamp*1000).toLocaleTimeString('hu-HU')} · ${event.tool}`;consoleBox.append(eventEl)}wrap.append(consoleBox)}tree.append(wrap)}if(finished.length){const history=document.createElement('details');history.className='agent-history';const summary=document.createElement('summary');summary.textContent=`Legutóbb befejezett munkák (${finished.length})`;history.append(summary);for(const child of finished.slice(0,20)){const item=document.createElement('div');item.className='history-item';item.textContent=`${child.goal} · ${child.age_seconds}s`;history.append(item)}tree.append(history)}if(!tree.childElementCount){const empty=document.createElement('div');empty.className='agent-empty';empty.textContent='Nincs aktív háttéragent.';tree.append(empty)}}
 function setWordWrap(){const enabled=$('word-wrap').checked;$('log-table').classList.toggle('word-wrap',enabled);localStorage.setItem('model-router-word-wrap',enabled?'1':'0')}
-document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setTab(tab.dataset.tab)));for(const id of ['tier','search','grouped'])$(id).addEventListener('input',render);$('word-wrap').checked=localStorage.getItem('model-router-word-wrap')==='1';$('word-wrap').addEventListener('input',setWordWrap);setWordWrap();initColumnResize();setTab(selectedTab||'router',false);
+document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setTab(tab.dataset.tab)));for(const id of ['tier','search','grouped'])$(id).addEventListener('input',render);$('word-wrap').checked=localStorage.getItem('model-router-word-wrap')==='1';$('word-wrap').addEventListener('input',setWordWrap);setWordWrap();initColumnResize();setTab(selectedTab||'router',false); applyLanguage();
 
 // Settings event listeners
 document.getElementById('callable-toggles').addEventListener('change',async(e)=>{
@@ -155,6 +409,13 @@ document.getElementById('default-model-select').addEventListener('change',async(
   currentConfig.default_model=e.target.value;
   await saveSettings();
 });
+document.getElementById('language-select').addEventListener('change',async(e)=>{
+  currentLang=e.target.value;
+  localStorage.setItem('model-router-lang',currentLang);
+  applyLanguage();
+});
+// Initialize language select value on load
+document.getElementById('language-select').value=currentLang;
 async function saveSettings(){
   if(!currentConfig)return;
   const statusEl=$('settings-status');

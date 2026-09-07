@@ -1082,10 +1082,6 @@ def _orchestration_forced_event(cfg: Dict[str, Any], parent_turn_id: str) -> Opt
 
 def _orchestration_eligible(kwargs: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision) -> bool:
     policy = cfg.get("orchestration") or {}
-    # Stable parent sessions may delegate deliberately, but middleware must never
-    # force a cold planner/preflight that changes who appears to answer the user.
-    if bool((cfg.get("session_policy") or {}).get("pin_root_parent", False)):
-        return False
     request = kwargs.get("request")
     sol_preflight = decision.tier == "sol" and _sol_opus5_preflight_enabled(cfg)
     # Orchestration is enabled for Sol (design preflight) and the configured
