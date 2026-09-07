@@ -42,16 +42,53 @@ The user-facing conversation stays on one durable parent model. Classifier resul
 ### Bounded Delegation
 
 - Max 2 concurrent child agents
-- Max 1 spawn depth (flat hierarchy — no recursive spawning)
+- Max 2 spawn depth: the parent delegates a conductor, the conductor delegates leaves, and leaves cannot delegate further
 - Max 16 child iterations
 - Handoff capsule required for every worker task
+
+### Claude review leaves
+
+Claude cannot be a `delegation.targets` entry: a delegation target is a
+provider/model pair a child's tool loop runs *on*, and the Claude Code OAuth
+credential is not usable from a third-party tool, so the only way to reach
+Claude is to hand a task to its own CLI. It is an external agent, not a model.
+
+The integration is therefore an execution swap. A delegated leaf whose goal
+begins `[sonnet-review]` or `[opus-review]` has its single LLM call replaced by
+a `claude -p` subprocess, and the verdict becomes that leaf's answer — so the
+work draws on the Claude subscription instead of the Codex account, while still
+running in parallel with the plan's other leaves.
+
+```yaml
+coding_agent:
+  delegated_review:
+    enabled: true
+    models: [opus, sonnet]
+```
+
+Deliberately separate from `coding_agent.enabled`, which also arms a
+label-free coding classifier that would capture the first call of a coding turn.
+Delegated workers only — a root turn is never diverted into a subprocess.
+Read-only (`--tools Read`, 16 turns, $5, 600s); writing is not offered because
+parallel leaves share one working tree.
 
 ### Live Dashboard
 
 ```bash
-python3 ~/.hermes/plugins/model-router/web_viewer.py
-# Opens at http://localhost:8765
+python3 ~/.hermes/plugins/model_router/web_viewer.py
+# http://localhost:8765
 ```
+
+Routing decisions grouped by prompt, each expandable into its individual API
+calls, with a grouped/raw toggle, tier filters and search. The Agents panel
+reads Hermes's durable delegation registry and shows running and recent child
+jobs nested under their parent session, with a privacy-safe task preview, state,
+age, selected model and call count. Everything refreshes every 3 seconds.
+
+The server binds to `127.0.0.1` only, so it is not reachable from the local
+network. Model callability and the default orchestrator can be changed from the
+Settings tab; those writes land in `router_config.yaml` and take effect on the
+next routed call, with no restart needed.
 
 ## Configuration
 

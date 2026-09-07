@@ -36,6 +36,12 @@ coding_agent:
   reviewer:
     enabled: true
     max_chars: 8000
+  delegated_review:
+    enabled: true
+    max_chars: 8000
+    models:
+    - opus
+    - sonnet
   repo_aliases:
     model router: /home/deepwell/.hermes/plugins/model_router
     modelrouter: /home/deepwell/.hermes/plugins/model_router

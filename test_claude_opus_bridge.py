@@ -110,6 +110,33 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
 
     @patch("claude_opus_bridge._log_decision")
     @patch("claude_opus_bridge.subprocess.run")
+    def test_the_review_label_selects_the_claude_tier(self, run, log):
+        """Two tiers exist so routine review can spend the cheaper one; a single
+        tier would burn the separate quota that is the reason to reach Claude."""
+        run.return_value.returncode = 0
+        run.return_value.stderr = ""
+        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}}, "result": "ok"})
+        with tempfile.TemporaryDirectory() as directory:
+            out = dispatch("[sonnet-review] Review only", Path(directory), review=True)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--model") + 1], "sonnet")
+        # Sonnet has no lower tier worth accepting: the result is trusted on the
+        # strength of the model that produced it, so a silent drop must not happen.
+        self.assertNotIn("--fallback-model", command)
+        self.assertEqual(out["effective_model"], "claude-sonnet-5")
+
+    @patch("claude_opus_bridge._log_decision")
+    @patch("claude_opus_bridge.subprocess.run")
+    def test_a_review_that_served_another_tier_is_rejected(self, run, log):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ""
+        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}}, "result": "ok"})
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(RuntimeError):
+                dispatch("[opus-review] Review only", Path(directory), review=True)
+
+    @patch("claude_opus_bridge._log_decision")
+    @patch("claude_opus_bridge.subprocess.run")
     def test_explicit_opus_review_accepts_canonical_opus_with_internal_subtask_usage(self, run, log):
         """The requested alias is satisfied by the canonical primary route, not a pure usage map."""
         run.return_value.returncode = 0

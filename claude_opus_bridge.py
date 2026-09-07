@@ -30,6 +30,11 @@ if str(_PLUGIN_PARENT) not in sys.path:
 from model_router import RouteDecision, _load_config, _log_decision, _normalise
 
 CANONICAL_OPUS_MODEL = "claude-opus-5"
+# The review label picks the Claude tier. Two are offered so a conductor can
+# spend the cheaper one on routine checks and reserve Opus for hard review --
+# the point of reaching Claude at all is that it draws on a separate quota, and
+# one tier would exhaust that quota on work Sonnet handles fine.
+CLAUDE_REVIEW_MODELS = {"opus": CANONICAL_OPUS_MODEL, "sonnet": "claude-sonnet-5"}
 DEFAULT_LIFECYCLE_PATH = Path("~/.hermes/logs/claude-code-bridge.jsonl").expanduser()
 # Eight turns repeatedly truncates read-only reviews before their verdict. A
 # bounded 16-turn review is cheaper than discarding and re-running an almost
@@ -54,7 +59,13 @@ DESIGN_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 OVERRIDE = re.compile(r"^\s*\[(opus5|opus)\](?:\s|$)", re.IGNORECASE)
-REVIEW_OVERRIDE = re.compile(r"^\s*\[(opus5?-review|opus-review)\](?:\s|$)", re.IGNORECASE)
+REVIEW_OVERRIDE = re.compile(r"^\s*\[(opus|sonnet)5?-review\](?:\s|$)", re.IGNORECASE)
+
+
+def review_model_alias(task: str) -> str | None:
+    """Which Claude tier an explicit review label asks for, if any."""
+    match = REVIEW_OVERRIDE.match(_normalise(task or ""))
+    return match.group(1).casefold() if match else None
 
 
 def classify_coding_dispatch(task: str) -> tuple[bool, str]:
@@ -83,14 +94,14 @@ def classify_review_dispatch(task: str) -> tuple[bool, str]:
     return False, "review dispatch requires an explicit [opus-review] or [opus5-review] prefix"
 
 
-def _effective_model(payload: dict[str, Any]) -> str:
+def _effective_model(payload: dict[str, Any], expected: str = CANONICAL_OPUS_MODEL) -> str:
     """Return Claude Code's actual served model, never the requested alias."""
     usage = payload.get("modelUsage") or {}
     if isinstance(usage, dict):
         # Claude Code can report small internal/helper usage alongside the main
         # agent model. Prefer the required canonical route when it is present.
-        if CANONICAL_OPUS_MODEL in usage:
-            return CANONICAL_OPUS_MODEL
+        if expected in usage:
+            return expected
         for model, details in usage.items():
             if isinstance(details, dict) or details is not None:
                 return str(model)
@@ -120,7 +131,7 @@ def _process_start_identity(pid: int) -> int | None:
 
 
 def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, malformed: bool = False,
-                    returncode: int = 0) -> str:
+                    returncode: int = 0, expected_model: str = CANONICAL_OPUS_MODEL) -> str:
     """Apply the fixed terminal precedence required by the bridge contract."""
     if timeout:
         return "timeout"
@@ -132,20 +143,25 @@ def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, ma
         return "max-turn"
     if "budget" in subtype:
         return "budget"
-    if _effective_model(payload) != CANONICAL_OPUS_MODEL:
+    if _effective_model(payload, expected_model) != expected_model:
         return "error"
     return "success" if subtype in {"success", ""} and not payload.get("is_error") else "error"
 
 
 def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False, timeout: int | None = None,
-             max_turns: int | None = None,
+             max_turns: int | None = None, model: str | None = None,
              parent_session_id: str | None = None, parent_turn_id: str | None = None,
              lifecycle_path: Path = DEFAULT_LIFECYCLE_PATH) -> dict[str, Any]:
     if review and write:
-        raise ValueError("an Opus review is always read-only")
+        raise ValueError("a Claude review is always read-only")
     eligible, reason = classify_review_dispatch(task) if review else classify_coding_dispatch(task)
     if not eligible:
         raise ValueError(reason)
+    # A review names its tier in the label; coding dispatch stays on Opus.
+    alias = (model or (review_model_alias(task) if review else None) or "opus").casefold()
+    if alias not in CLAUDE_REVIEW_MODELS:
+        raise ValueError(f"unknown Claude tier {alias!r}; expected one of {sorted(CLAUDE_REVIEW_MODELS)}")
+    expected_model = CLAUDE_REVIEW_MODELS[alias]
     if not repo.is_dir():
         raise ValueError(f"repository directory does not exist: {repo}")
     resolved_max_turns = max_turns if max_turns is not None else (DEFAULT_REVIEW_MAX_TURNS if review else DEFAULT_CODING_MAX_TURNS)
@@ -169,9 +185,14 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
     # E2BIG/"Argument list too long". Claude Code's print mode accepts text on
     # stdin when no positional prompt is supplied.
     command = [
-        "claude", "-p", "--model", "opus", "--fallback-model", "sonnet",
+        "claude", "-p", "--model", alias,
         "--max-turns", str(resolved_max_turns), "--max-budget-usd", "5.00", "--output-format", "json",
     ]
+    # Only Opus has a lower tier worth falling back to. Sonnet must not silently
+    # drop to a smaller model, because the result is accepted on the strength of
+    # the model that produced it.
+    if alias == "opus":
+        command += ["--fallback-model", "sonnet"]
     # Read-only runs override the available tool set and additionally deny every
     # mutating or shell-capable built-in. `--allowedTools Read` alone can be
     # widened by an existing Claude Code permission profile, so it is not a
@@ -207,8 +228,8 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
                                           "timestamp": time.time(), "duration_seconds": time.time() - started_at,
                                           "malformed": True})
         raise RuntimeError("Claude Code did not return JSON output") from exc
-    effective_model = _effective_model(payload)
-    state = _terminal_state(payload)
+    effective_model = _effective_model(payload, expected_model)
+    state = _terminal_state(payload, expected_model=expected_model)
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
     _append_lifecycle(lifecycle_path, {
         **base_event, "event": "terminal", "state": state, "timestamp": time.time(),
@@ -223,8 +244,8 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         raise RuntimeError("Claude Code reached max turns")
     if state == "budget":
         raise RuntimeError("Claude Code exhausted its budget")
-    if effective_model != CANONICAL_OPUS_MODEL:
-        raise RuntimeError(f"Claude Code did not serve {CANONICAL_OPUS_MODEL}; effective model was {effective_model or 'missing'}")
+    if effective_model != expected_model:
+        raise RuntimeError(f"Claude Code did not serve {expected_model}; effective model was {effective_model or 'missing'}")
     if state != "success":
         raise RuntimeError(f"Claude Code failed with subtype {payload.get('subtype') or 'unknown'}")
     cfg = _load_config()

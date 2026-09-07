@@ -1405,6 +1405,96 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(response.model, "claude-opus-5")
         self.assertEqual(response.output[0].content[0].text, "OPUS REVIEW COMPLETE")
 
+    def _delegated_review_cfg(self, repo, **overrides):
+        policy = {"enabled": True, "max_chars": 8000, "models": ["opus", "sonnet"]}
+        policy.update(overrides)
+        return {
+            "enabled": True,
+            "provider": "openai-codex",
+            "models": MODELS, "callable": CALLABLE,
+            "coding_agent": {
+                # Deliberately off: the delegated path must not depend on the
+                # switch that also arms the label-free coding classifier.
+                "enabled": False,
+                "canonical_model": "claude-opus-5",
+                "default_repo": repo,
+                "delegated_review": policy,
+            },
+        }
+
+    def test_delegated_sonnet_review_leaf_runs_on_claude(self):
+        """A read-only review leaf is the one job that can leave the Codex
+        account entirely: Claude is reachable only through its own CLI, so the
+        leaf's single call becomes a bridge subprocess and its verdict becomes
+        the leaf's answer."""
+        with tempfile.TemporaryDirectory() as repo:
+            result = {"result": "SONNET REVIEW COMPLETE", "effective_model": "claude-sonnet-5"}
+            prompt = "[sonnet-review] Review the pending calendar diff for regressions. Report only."
+            with patch("model_router._load_config", return_value=self._delegated_review_cfg(repo)), patch(
+                "model_router.shutil.which", return_value="/usr/bin/claude"
+            ), patch("model_router._run_opus5_bridge", return_value=result) as bridge:
+                response = run_llm_with_transient_failover(
+                    request=responses_request(prompt),
+                    original_request=responses_request(prompt),
+                    next_call=lambda _request: self.fail("the Codex downstream must not run"),
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    api_call_count=1,
+                    platform="subagent",
+                    turn_id="session:sa-1-child:turn",
+                )
+
+        bridge.assert_called_once()
+        self.assertEqual(bridge.call_args.kwargs["model"], "sonnet")
+        self.assertTrue(bridge.call_args.kwargs["review"])
+        self.assertFalse(bridge.call_args.kwargs["write"])
+        self.assertEqual(response.model, "claude-sonnet-5")
+
+    def test_a_root_turn_is_never_diverted_into_the_bridge(self):
+        """The documented hazard of this bridge is that it captures the first
+        call of a turn. That only matters for the parent that still has to plan,
+        so the delegated path admits delegated workers and nothing else."""
+        with tempfile.TemporaryDirectory() as repo:
+            prompt = "[opus-review] Review the access-control proposal. Report only."
+            sentinel = object()
+            with patch("model_router._load_config", return_value=self._delegated_review_cfg(repo)), patch(
+                "model_router.shutil.which", return_value="/usr/bin/claude"
+            ), patch("model_router._run_opus5_bridge") as bridge:
+                response = run_llm_with_transient_failover(
+                    request=responses_request(prompt),
+                    original_request=responses_request(prompt),
+                    next_call=lambda _request: sentinel,
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    api_call_count=1,
+                    turn_id="plain-root-turn",
+                )
+
+        bridge.assert_not_called()
+        self.assertIs(response, sentinel)
+
+    def test_a_claude_tier_left_out_of_the_config_is_not_reachable(self):
+        with tempfile.TemporaryDirectory() as repo:
+            cfg = self._delegated_review_cfg(repo, models=["opus"])
+            prompt = "[sonnet-review] Review the pending calendar diff. Report only."
+            sentinel = object()
+            with patch("model_router._load_config", return_value=cfg), patch(
+                "model_router.shutil.which", return_value="/usr/bin/claude"
+            ), patch("model_router._run_opus5_bridge") as bridge:
+                response = run_llm_with_transient_failover(
+                    request=responses_request(prompt),
+                    original_request=responses_request(prompt),
+                    next_call=lambda _request: sentinel,
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    api_call_count=1,
+                    platform="subagent",
+                    turn_id="session:sa-1-child:turn",
+                )
+
+        bridge.assert_not_called()
+        self.assertIs(response, sentinel)
+
     def test_runtime_opus_bridge_uses_the_real_dispatch_entrypoint(self):
         cfg = {"coding_agent": {"timeout_seconds": 300}}
         expected = {"result": "ok", "model": "claude-opus-5"}

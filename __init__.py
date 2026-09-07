@@ -95,6 +95,9 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "max_budget_usd": 5.0,
         "timeout_seconds": 300,
         "reviewer": {"enabled": False, "max_chars": 8000},
+        # Delegated read-only Claude review, off by default and independent of
+        # ``enabled`` above, which also arms the label-free coding classifier.
+        "delegated_review": {"enabled": False, "max_chars": 8000, "models": ["opus", "sonnet"]},
     },
     # A user-facing session has one durable parent.  The router may still
     # classify specialist *workers*, but it must not turn each user message into
@@ -1160,7 +1163,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier)} Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review]: those run on Claude through its own CLI and draw on a separate quota, so prefer them for review whenever the leaf writes nothing. Use [sonnet-review] for routine checks and reserve [opus-review] for consequential or hard review. Such a leaf must name the repository, receive every fact it needs in the goal, and never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -1902,7 +1905,40 @@ def _verified_explicit_opus5_review_repo(text: str, cfg: Dict[str, Any]) -> Opti
     return _opus5_repo_for_request(text, cfg) if eligible else None
 
 
-def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False, cfg: Dict[str, Any], **context: Any) -> Dict[str, Any]:
+def _verified_delegated_claude_review(text: str, cfg: Dict[str, Any]) -> Optional[Tuple[Path, str]]:
+    """Resolve a delegated, read-only Claude review leaf to (repo, Claude tier).
+
+    Deliberately independent of ``coding_agent.enabled``. That switch also arms
+    the conservative coding classifier, which fires with no explicit label and
+    would capture the first call of a coding turn -- the reason the whole bridge
+    is off. This path needs none of that: it requires an explicit review label
+    the planner had to write, and it is the caller's job to admit only delegated
+    workers, so a root turn can never be diverted into a subprocess.
+    """
+    coding_cfg = cfg.get("coding_agent") or {}
+    policy = coding_cfg.get("delegated_review") or {}
+    if (
+        not policy.get("enabled")
+        or len(text or "") > int(policy.get("max_chars", 8000) or 8000)
+        or shutil.which("claude") is None
+    ):
+        return None
+    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS, review_model_alias
+
+    alias = review_model_alias(text)
+    if alias is None:
+        return None
+    allowed = policy.get("models")
+    if isinstance(allowed, list) and alias not in [str(name).casefold() for name in allowed]:
+        return None
+    if alias not in CLAUDE_REVIEW_MODELS:
+        return None
+    repo = _opus5_repo_for_request(text, cfg)
+    return (repo, alias) if repo is not None else None
+
+
+def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False, cfg: Dict[str, Any],
+                      model: Optional[str] = None, **context: Any) -> Dict[str, Any]:
     """Lazy bridge import keeps the standalone CLI and package imports independent."""
     from .claude_opus_bridge import dispatch
 
@@ -1912,16 +1948,19 @@ def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False
         Path(repo),
         write=write,
         review=review,
+        model=model,
         timeout=int(coding_cfg.get("timeout_seconds", 300)),
     )
 
 
 def _opus5_response(result: Dict[str, Any]) -> Any:
     """Adapt a verified Claude Code result to Hermes' Codex Responses contract."""
+    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS
+
     text = str(result.get("result") or "").strip()
     model = str(result.get("effective_model") or result.get("model") or "")
-    if not text or model != "claude-opus-5":
-        raise RuntimeError("Claude Opus bridge returned no verified claude-opus-5 result")
+    if not text or model not in set(CLAUDE_REVIEW_MODELS.values()):
+        raise RuntimeError(f"Claude bridge returned no verified result; effective model was {model or 'missing'}")
     raw_usage = result.get("usage") or result.get("model_usage") or {}
     input_tokens = int(raw_usage.get("input_tokens", raw_usage.get("inputTokens", 0)) or 0)
     output_tokens = int(raw_usage.get("output_tokens", raw_usage.get("outputTokens", 0)) or 0)
@@ -1948,7 +1987,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     # Hard gate before any bridge import, auth probe, or subprocess launch.
     if not _is_callable_tier("opus5", cfg):
         return None
-    if not coding_cfg.get("enabled") or int(kwargs.get("api_call_count") or 1) != 1:
+    if int(kwargs.get("api_call_count") or 1) != 1:
         return None
     if str(kwargs.get("api_mode") or "") != "codex_responses":
         return None
@@ -1957,6 +1996,32 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     if not isinstance(source_request, dict):
         source_request = request
     text = _last_user_text_and_index(_request_items(source_request))[0]
+
+    # A delegated review leaf runs on Claude and returns its verdict as the
+    # leaf's answer. Restricted to delegated workers: the documented hazard of
+    # this bridge is that it captures the first call of a turn, which matters
+    # only for the parent that still has to plan.
+    if (
+        str(kwargs.get("platform", "")).casefold() == "subagent"
+        or ":sa-" in str(kwargs.get("turn_id", ""))
+    ):
+        delegated = _verified_delegated_claude_review(text, cfg)
+        if delegated is not None:
+            repo, alias = delegated
+            result = _run_opus5_bridge(
+                repo=str(repo),
+                task=text,
+                write=False,
+                review=True,
+                model=alias,
+                cfg=cfg,
+                turn_id=str(kwargs.get("turn_id") or ""),
+                provider=str(kwargs.get("provider") or ""),
+            )
+            return _opus5_response(result)
+
+    if not coding_cfg.get("enabled"):
+        return None
     review_repo = _verified_explicit_opus5_review_repo(text, cfg)
     if review_repo is not None:
         result = _run_opus5_bridge(
