@@ -899,14 +899,7 @@ def _prepare_shadow_delegation(request: Dict[str, Any], benchmark_id: str) -> Di
         "edits, commands, external messages, deploys, credentials, database/payment operations, and destructive "
         "actions. Request a concise evidence-based plan, risks, test/review checklist, and proposed answer.\n"
     )
-    items = _request_items(shadow)
-    _, index = _last_user_text_and_index(items)
-    if index >= 0 and isinstance(items[index], dict):
-        content = items[index].get("content")
-        if isinstance(content, str):
-            items[index]["content"] = content + instruction
-        elif isinstance(content, list):
-            items[index]["content"] = [*content, {"type": "input_text", "text": instruction}]
+    _append_user_instruction(shadow, instruction)
     delegate_tool = next(
         tool
         for tool in shadow.get("tools") or []
@@ -922,7 +915,96 @@ def _prepare_shadow_delegation(request: Dict[str, Any], benchmark_id: str) -> Di
     return shadow
 
 
-def _prepare_orchestration_delegation(request: Dict[str, Any], plan_id: str, max_tasks: int, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _append_user_instruction(request: Dict[str, Any], instruction: str) -> None:
+    """Append an internal instruction to the latest user turn in the request's
+    own wire shape.
+
+    ``input_text`` is a Responses-API part type.  Hermes converts to the
+    provider wire format in ``build_api_kwargs`` *before* llm_request
+    middleware runs, so an ``anthropic_messages`` route (the TokenPlan Qwen
+    endpoint) reaches this code already Anthropic-shaped, where ``input_text``
+    is not a valid content block.  Emitting it there either 400s the call or
+    gets the block dropped — which is how a "forced" preflight can arrive at
+    the model with its entire instruction missing.
+    """
+    items = _request_items(request)
+    _, index = _last_user_text_and_index(items)
+    if index < 0 or not isinstance(items[index], dict):
+        return
+    block_type = (
+        "input_text"
+        if not isinstance(request.get("messages"), list) and isinstance(request.get("input"), list)
+        else "text"
+    )
+    content = items[index].get("content")
+    if isinstance(content, str):
+        items[index]["content"] = content + instruction
+    elif isinstance(content, list):
+        items[index]["content"] = [*content, {"type": block_type, "text": instruction}]
+
+
+def _find_delegate_tool(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the delegate_task tool definition in either wire shape."""
+    for tool in request.get("tools") or []:
+        if isinstance(tool, dict) and (
+            tool.get("name") == "delegate_task"
+            or (tool.get("function") or {}).get("name") == "delegate_task"
+        ):
+            return tool
+    return None
+
+
+def _tool_schema_slot(tool: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """Return the (owner, key) pair holding a tool's JSON schema.
+
+    OpenAI/Codex tools keep it at ``function.parameters``; Anthropic Messages
+    tools keep it at ``input_schema``.  Reading only ``parameters`` silently
+    skipped every schema-hardening step on the Anthropic path, so the
+    ``role="orchestrator"`` constraint never reached a Qwen planner.
+    """
+    if isinstance(tool.get("function"), dict):
+        return tool["function"], "parameters"
+    if isinstance(tool.get("input_schema"), dict):
+        return tool, "input_schema"
+    return tool, "parameters"
+
+
+def _is_anthropic_shaped(request: Dict[str, Any]) -> bool:
+    """True when the request already carries the Anthropic Messages shape."""
+    if not isinstance(request.get("messages"), list):
+        return False
+    return any(
+        isinstance(tool, dict) and isinstance(tool.get("input_schema"), dict)
+        for tool in request.get("tools") or []
+    )
+
+
+def _supports_forced_tool_choice(kwargs: Dict[str, Any], decision: RouteDecision) -> bool:
+    """Whether this route can be made to call a tool by protocol.
+
+    TokenPlan's Anthropic-compatible Qwen endpoint rejects ``tool_choice``
+    outright — including ``{"type": "auto"}`` — so Hermes' Anthropic adapter
+    omits the field there.  A preflight on that route is therefore a prompt
+    contract, never an enforced one.  This matters because the preflight also
+    amputates the toolset to a single tool: without the matching
+    ``tool_choice`` the parent is left with one optional tool and no way to do
+    anything else, which is strictly worse than not preflighting at all.
+    """
+    if "qwen" in str(decision.model).casefold():
+        return False
+    if str(kwargs.get("provider") or "").casefold() == "qwen-token":
+        return False
+    return "token-plan." not in str(kwargs.get("base_url") or "").casefold()
+
+
+def _prepare_orchestration_delegation(
+    request: Dict[str, Any],
+    plan_id: str,
+    max_tasks: int,
+    cfg: Optional[Dict[str, Any]] = None,
+    *,
+    force_tools: bool = True,
+) -> Dict[str, Any]:
     """Force one real Terra-supervised Spark dispatch before parent execution.
 
     This is an operational delegation checkpoint, never a benchmark: the
@@ -950,14 +1032,7 @@ def _prepare_orchestration_delegation(request: Dict[str, Any], plan_id: str, max
         "It waits for delegated evidence, explicitly records SUPERVISOR DECISION: ACCEPT or REJECT for every worker, then completes the owned work. "
         f"The current parent must not perform normal implementation; the {orchestrator_tier} conductor owns the reviewed result.\n"
     )
-    items = _request_items(routed)
-    _, index = _last_user_text_and_index(items)
-    if index >= 0 and isinstance(items[index], dict):
-        content = items[index].get("content")
-        if isinstance(content, str):
-            items[index]["content"] = content + instruction
-        elif isinstance(content, list):
-            items[index]["content"] = [*content, {"type": "input_text", "text": instruction}]
+    _append_user_instruction(routed, instruction)
     delegate_tool = next(
         tool
         for tool in routed.get("tools") or []
@@ -970,8 +1045,8 @@ def _prepare_orchestration_delegation(request: Dict[str, Any], plan_id: str, max
     # a reliable control plane, as models can otherwise emit the default leaf
     # role and skip the planner layer altogether.
     planner_tool = deepcopy(delegate_tool)
-    schema_owner = planner_tool.get("function") if isinstance(planner_tool.get("function"), dict) else planner_tool
-    schema = schema_owner.get("parameters")
+    schema_owner, schema_key = _tool_schema_slot(planner_tool)
+    schema = schema_owner.get(schema_key)
     if isinstance(schema, dict):
         properties = schema.setdefault("properties", {})
         properties["role"] = {
@@ -994,9 +1069,24 @@ def _prepare_orchestration_delegation(request: Dict[str, Any], plan_id: str, max
             if name not in required:
                 required.append(name)
         schema["required"] = required
-    routed["tools"] = [planner_tool]
-    routed["tool_choice"] = "required"
-    routed["parallel_tool_calls"] = False
+    if force_tools:
+        # One tool plus a required choice is deterministic, and leaves the
+        # normal complete toolset untouched on the parent's next iteration.
+        routed["tools"] = [planner_tool]
+        if _is_anthropic_shaped(routed):
+            routed["tool_choice"] = {"type": "tool", "name": "delegate_task"}
+        else:
+            routed["tool_choice"] = "required"
+            routed["parallel_tool_calls"] = False
+    else:
+        # No protocol-level forcing on this route (TokenPlan Qwen). Keep the
+        # parent's full toolset — a lone optional tool would leave it unable to
+        # act — and swap in the hardened delegate_task schema so that *if* it
+        # delegates, it can only produce a role="orchestrator" planner child.
+        routed["tools"] = [
+            planner_tool if tool is delegate_tool else tool
+            for tool in (routed.get("tools") or [])
+        ]
     return routed
 
 
@@ -1030,14 +1120,7 @@ def _prepare_sol_opus5_preflight(request: Dict[str, Any], plan_id: str) -> Dict[
         "stop and report the unavailable bridge without falling back to Spark or Terra. Do not expose credentials or make writes, deploys, "
         "payments, or production changes during preflight. Spark and Terra are not preflight targets for this request.\n"
     )
-    items = _request_items(routed)
-    _, index = _last_user_text_and_index(items)
-    if index >= 0 and isinstance(items[index], dict):
-        content = items[index].get("content")
-        if isinstance(content, str):
-            items[index]["content"] = content + instruction
-        elif isinstance(content, list):
-            items[index]["content"] = [*content, {"type": "input_text", "text": instruction}]
+    _append_user_instruction(routed, instruction)
     delegate_tool = next(
         tool for tool in routed.get("tools") or []
         if isinstance(tool, dict)
@@ -1117,7 +1200,7 @@ def _orchestration_eligible(kwargs: Dict[str, Any], cfg: Dict[str, Any], decisio
     # forced a fan-out dispatch, the dominant source of perceived latency. Scoped
     # to the Terra path: the Sol preflight is a design-safety review whose value
     # does not depend on the request being long enough to split into workers.
-    if decision.tier == "terra":
+    if decision.tier == str(cfg.get("default_model", "terra")) and not sol_preflight:
         min_chars = max(0, int(policy.get("min_chars", 180) or 0))
         if len(user_text) < min_chars:
             return False
@@ -1191,7 +1274,11 @@ def _force_terra_supervisor_preflight(
     if decision.tier == "sol":
         return _prepare_sol_opus5_preflight(kwargs["request"], plan_id)
     return _prepare_orchestration_delegation(
-        kwargs["request"], plan_id, min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))), cfg=cfg
+        kwargs["request"],
+        plan_id,
+        min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
+        cfg=cfg,
+        force_tools=_supports_forced_tool_choice(kwargs, decision),
     )
 
 

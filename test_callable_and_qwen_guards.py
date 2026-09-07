@@ -218,3 +218,140 @@ def test_route_log_uses_bounded_redacted_preview_when_policy_enabled(tmp_path):
     record = __import__("json").loads(path.read_text())
     assert "super-secret-value" not in record["prompt_preview"]
     assert len(record["prompt_preview"]) <= 24
+
+
+# ── Qwen orchestrator delegation ─────────────────────────────────────────────
+#
+# Hermes converts to the provider wire format in ``build_api_kwargs`` *before*
+# llm_request middleware runs, so an ``anthropic_messages`` route reaches the
+# router already Anthropic-shaped: ``tools[].input_schema`` instead of
+# ``function.parameters``, and ``text`` content blocks instead of
+# ``input_text``.  The orchestration preflight was written for the Codex
+# Responses shape only, which is why selecting Qwen as the orchestrator
+# produced ``preflight_forced`` events with no delegated child.
+
+ORCH_PROMPT = (
+    "Nézd meg, mi a baj. Tegnap óta más az eredmény, és nem tudom eldönteni, hogy a bemenet "
+    "változott-e meg vagy a feldolgozás. Nézd át a vonatkozó részeket, és mondd meg, mit találsz, "
+    "mielőtt bármit módosítanánk rajta."
+)
+
+TOKENPLAN_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+
+
+def anthropic_request(text):
+    """A request in the shape the middleware actually sees for a Qwen route."""
+    return {
+        "model": MODELS["qwen"],
+        "max_tokens": 8192,
+        "system": "You are Hermes.",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}],
+        "tools": [
+            {
+                "name": "delegate_task",
+                "description": "Delegate a bounded task.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"goal": {"type": "string"}},
+                    "required": ["goal"],
+                },
+            },
+            {"name": "read_file", "description": "Read", "input_schema": {"type": "object", "properties": {}}},
+            {"name": "bash", "description": "Run", "input_schema": {"type": "object", "properties": {}}},
+        ],
+    }
+
+
+def orchestration_config(default_model, path):
+    return config(
+        default_model=default_model,
+        tier_providers={
+            "qwen": "qwen-token", "terra": "openai-codex", "sol": "openai-codex",
+            "spark": "openai-codex", "luna": "openai-codex", "opus5": "openai-codex",
+        },
+        orchestration={"enabled": True, "min_chars": 40, "max_tasks": 1, "path": str(path)},
+        shadow={"enabled": False},
+        session_policy={"pin_root_parent": True},
+    )
+
+
+def route_qwen_preflight(tmp_path, turn_id):
+    with patch("model_router._load_config", return_value=orchestration_config("qwen", tmp_path)):
+        return route_llm_request(
+            request=anthropic_request(ORCH_PROMPT),
+            provider="qwen-token",
+            model=MODELS["qwen"],
+            api_mode="anthropic_messages",
+            base_url=TOKENPLAN_URL,
+            api_call_count=1,
+            turn_id=turn_id,
+        )
+
+
+def test_qwen_preflight_keeps_the_full_toolset(tmp_path):
+    """TokenPlan rejects ``tool_choice`` entirely, so the preflight cannot be
+    enforced there. Amputating the toolset to a single *optional* tool left the
+    parent unable to act at all — it answered in prose and delegated nothing."""
+    routed = route_qwen_preflight(tmp_path / "orch.jsonl", "qwen-preflight-toolset")["request"]
+    assert [tool["name"] for tool in routed["tools"]] == ["delegate_task", "read_file", "bash"]
+    assert "tool_choice" not in routed
+    assert "parallel_tool_calls" not in routed
+
+
+def test_qwen_preflight_hardens_the_anthropic_input_schema(tmp_path):
+    """The planner contract lives in ``input_schema`` on this wire shape; a
+    ``parameters``-only lookup silently skipped it and produced a plain leaf."""
+    routed = route_qwen_preflight(tmp_path / "orch.jsonl", "qwen-preflight-schema")["request"]
+    delegate = next(tool for tool in routed["tools"] if tool["name"] == "delegate_task")
+    schema = delegate["input_schema"]
+    assert schema["properties"]["role"]["enum"] == ["orchestrator"]
+    assert "planning conductor" in schema["properties"]["context"]["enum"][0]
+    assert set(schema["required"]) == {"goal", "role", "context"}
+
+
+def test_qwen_preflight_appends_a_valid_anthropic_content_block(tmp_path):
+    """``input_text`` is a Responses-API part type. Sending it to an Anthropic
+    endpoint either 400s the call or drops the block, so the orchestrator
+    instruction never reached the model."""
+    routed = route_qwen_preflight(tmp_path / "orch.jsonl", "qwen-preflight-block")["request"]
+    blocks = routed["messages"][-1]["content"]
+    assert {block["type"] for block in blocks} == {"text"}
+    assert "INTERNAL ORCHESTRATOR PREFLIGHT" in blocks[-1]["text"]
+    assert "[qwen]" in blocks[-1]["text"]
+
+
+def test_codex_preflight_still_forces_one_tool(tmp_path):
+    """Regression guard: the Codex Responses route can force a tool call, and
+    must keep doing so."""
+    request = {
+        "model": MODELS["terra"],
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": ORCH_PROMPT}]}],
+        "tools": [
+            {"type": "function", "name": "delegate_task", "parameters": {"type": "object", "properties": {}}},
+            {"type": "function", "name": "bash", "parameters": {"type": "object", "properties": {}}},
+        ],
+    }
+    with patch("model_router._load_config", return_value=orchestration_config("terra", tmp_path / "orch.jsonl")):
+        routed = route_llm_request(
+            request=request, provider="openai-codex", model=MODELS["terra"],
+            api_mode="codex_responses", api_call_count=1, turn_id="codex-preflight",
+        )["request"]
+    assert len(routed["tools"]) == 1
+    assert routed["tool_choice"] == "required"
+    assert routed["parallel_tool_calls"] is False
+    assert {block["type"] for block in routed["input"][-1]["content"]} == {"input_text"}
+
+
+def test_min_chars_gate_follows_the_configured_orchestrator(tmp_path):
+    """The gate was pinned to the literal string "terra", so a Qwen orchestrator
+    fanned out on every turn, including one-word replies."""
+    path = tmp_path / "orch.jsonl"
+    request = anthropic_request("Köszi!")
+    with patch("model_router._load_config", return_value=orchestration_config("qwen", path)):
+        routed = route_llm_request(
+            request=request, provider="qwen-token", model=MODELS["qwen"],
+            api_mode="anthropic_messages", base_url=TOKENPLAN_URL,
+            api_call_count=1, turn_id="qwen-short-turn",
+        )["request"]
+    assert len(routed["tools"]) == 3
+    assert not path.exists()
