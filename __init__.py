@@ -1323,7 +1323,10 @@ def _force_terra_supervisor_preflight(
         # call, which is the noise the api_call_count gate already rejects.
         policy = cfg.get("orchestration") or {}
         rescue_min_calls = max(2, int(policy.get("rescue_min_calls", 6) or 6))
-        if api_call_count == 1 or api_call_count == rescue_min_calls:
+        # An operator who turned orchestration off has nothing to diagnose, and
+        # a config that omits `path` falls back to the shared production log --
+        # so logging this case makes every unrelated caller write to it.
+        if policy.get("enabled") and (api_call_count == 1 or api_call_count == rescue_min_calls):
             with _SHADOW_LOCK:
                 _orchestration_event(
                     cfg,
