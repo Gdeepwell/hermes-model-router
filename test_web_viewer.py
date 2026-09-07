@@ -82,7 +82,7 @@ class ModelRouterDashboardTests(unittest.TestCase):
         self.assertEqual(
             selector,
             '<label><span data-i18n="router.last.label">Utolsó root promptok</span>'
-            '<select id="last"><option>5</option><option selected>20</option><option>50</option></select>',
+            '<select id="last"><option>1</option><option>5</option><option selected>10</option></select>',
         )
         self.assertEqual(self.i18n('router.last.label'), ('Last root prompts', 'Utolsó root promptok'))
         self.assertIn("fetch(`/api/entries?roots=${$('last').value}`", HTML)
@@ -365,7 +365,7 @@ class ModelRouterDashboardTests(unittest.TestCase):
         self.assertIn(".execution-tree-row:before{content:'';position:absolute;left:calc(34px + var(--tree-depth) * 38px);top:0;bottom:50%;border-left:1px solid #50637d}", HTML)
         self.assertIn(".execution-tree-row.task-tree-has-next-sibling:before{bottom:0}", HTML)
 
-    def test_twenty_roots_return_a_narrow_server_side_closure(self):
+    def test_ten_roots_return_a_narrow_server_side_closure(self):
         with tempfile.TemporaryDirectory() as directory:
             log_path = Path(directory) / "router.jsonl"
             records = []
@@ -384,14 +384,14 @@ class ModelRouterDashboardTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/entries?roots=20") as response:
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/entries?roots=10") as response:
                     payload = json.load(response)
             finally:
                 server.shutdown(); server.server_close(); thread.join(timeout=2); Handler.log_path = original_path
         roots = [entry for entry in payload["entries"] if not entry.get("is_internal_prompt")]
-        self.assertEqual([entry["prompt_preview"] for entry in roots], [f"root-{i}" for i in range(10, 30)])
-        self.assertEqual(len(payload["entries"]), 120)
-        self.assertEqual(payload["selected_root_count"], 20)
+        self.assertEqual([entry["prompt_preview"] for entry in roots], [f"root-{i}" for i in range(20, 30)])
+        self.assertEqual(len(payload["entries"]), 60)
+        self.assertEqual(payload["selected_root_count"], 10)
         self.assertEqual(payload["source_entry_count"], 180)
 
     def test_refresh_cycle_fetches_entries_and_agents_once_and_renders_once(self):

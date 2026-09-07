@@ -20,7 +20,7 @@ from view_log import DEFAULT_LOG, load_entries
 DEFAULT_STATE_DB = Path("~/.hermes/state.db").expanduser()
 DEFAULT_AGENT_LOG = Path("~/.hermes/logs/agent.log").expanduser()
 DEFAULT_BRIDGE_LIFECYCLE = Path("~/.hermes/logs/claude-code-bridge.jsonl").expanduser()
-DEFAULT_ROOT_LIMIT = 20
+DEFAULT_ROOT_LIMIT = 10
 RAW_HISTORY_LIMIT = 10000
 CONFIG_PATH = Path("~/.hermes/plugins/model_router/router_config.yaml").expanduser()
 
@@ -46,7 +46,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 <div class="toolbar">
 <label><span data-i18n="router.tier.label">Modell</span><select id="tier"><option value="" data-i18n="router.tier.all">Mind</option><option>luna</option><option>spark</option><option>terra</option><option>sol</option><option>opus5</option><option>qwen</option></select></label>
 <label>Keresés<input id="search" type="search" data-i18n-placeholder="router.search.placeholder"></label>
-<label><span data-i18n="router.last.label">Utolsó root promptok</span><select id="last"><option>5</option><option selected>20</option><option>50</option></select></label>
+<label><span data-i18n="router.last.label">Utolsó root promptok</span><select id="last"><option>1</option><option>5</option><option selected>10</option></select></label>
 <label class="check"><input id="grouped" type="checkbox" checked> <span data-i18n="router.grouped">Promptonként összevonva</span></label>
 <label class="check"><input id="word-wrap" type="checkbox"> <span data-i18n="router.wordwrap">Sortörés</span></label>
 <label class="check"><input id="auto" type="checkbox" checked> <span data-i18n="router.auto">Automatikus frissítés</span></label>
@@ -759,7 +759,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except ValueError:
                 requested_root_limit = DEFAULT_ROOT_LIMIT
-            if requested_root_limit not in {5, 20, 50}:
+            if requested_root_limit not in {1, 5, 10}:
                 requested_root_limit = DEFAULT_ROOT_LIMIT
             source_entries = load_entries(self.log_path)[-RAW_HISTORY_LIMIT:]
             activity = load_agent_activity(
