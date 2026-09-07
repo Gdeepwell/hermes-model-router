@@ -321,6 +321,24 @@ def test_qwen_preflight_appends_a_valid_anthropic_content_block(tmp_path):
     assert "[qwen]" in blocks[-1]["text"]
 
 
+def test_preflight_keeps_routing_policy_out_of_the_goal(tmp_path):
+    """The conductor is re-classified from its own goal text, so routing policy
+    repeated there is read as a description of the work. A goal whose only
+    design token came from the boilerplate phrase "visual/ui analysis" pinned
+    every [terra] orchestrator onto Sol, and Sol then owned both the conducting
+    and the design leaf it was supposed to delegate."""
+    routed = route_qwen_preflight(tmp_path / "orch.jsonl", "goal-content-contract")["request"]
+    instruction = routed["messages"][-1]["content"][-1]["text"]
+    assert "Do not restate this routing policy inside the goal" in instruction
+    assert "objective and acceptance criteria only" in instruction
+    # The policy must still reach the conductor -- just through the immutable
+    # contract, which lands in its system prompt rather than its goal.
+    delegate = next(tool for tool in routed["tools"] if tool["name"] == "delegate_task")
+    contract = delegate["input_schema"]["properties"]["context"]["enum"][0]
+    assert "planning conductor" in contract
+    assert "[sol]" in contract
+
+
 def test_codex_preflight_still_forces_one_tool(tmp_path):
     """Regression guard: the Codex Responses route can force a tool call, and
     must keep doing so."""
