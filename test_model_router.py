@@ -924,6 +924,35 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIn("Sol-only", decision.reason)
 
     @patch("model_router._log_decision")
+    def test_read_only_discovery_leaf_keeps_its_spark_label(self, mocked_log):
+        """"layout" is an ordinary noun in frontend source discovery. Judging the
+        leaf by that word sent every such leaf to Sol -- the planner had already
+        decided, with the screenshot and the repo in hand, that this was bounded
+        read-only evidence work."""
+        result = route_llm_request(
+            request=chat_request(
+                "[spark] Perform read-only source discovery in /home/deepwell/booking-saas. "
+                "Identify the exact daily calendar booking-card renderer, duration layout "
+                "branches, and the editor overlay state owner."
+            ),
+            provider="openai-codex", model=MODELS["terra"], platform="subagent",
+            api_call_count=1, turn_id="spark-discovery-leaf",
+        )
+        self.assertEqual(result["metadata"]["tier"], "spark")
+
+    @patch("model_router._log_decision")
+    def test_a_spark_label_still_has_to_be_true(self, mocked_log):
+        """The label is trusted, not obeyed: a leaf that writes is not read-only
+        evidence work whatever it is labelled, and the design test survives to
+        place the rejected leaf rather than to preempt it."""
+        decision = classify_request(
+            chat_request("[spark] Implement a responsive CSS card."),
+            api_call_count=1,
+            allow_plan_label_over_design=True,
+        )
+        self.assertEqual(decision.tier, "sol")
+
+    @patch("model_router._log_decision")
     def test_text_only_design_spark_subagent_is_rerouted_to_sol(self, mocked_log):
         result = route_llm_request(
             request=chat_request("[spark] Implement a responsive CSS card."),

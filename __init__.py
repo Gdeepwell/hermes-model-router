@@ -249,16 +249,18 @@ _SPARK_CONSEQUENTIAL_WORK = re.compile(
 _PLAN_LABEL = re.compile(r"^\s*\[(luna|spark|terra|sol)(?::xhigh)?\](?:\s|$)")
 
 
-def _is_conductor_plan_label(text: str, cfg: Dict[str, Any]) -> bool:
-    """True only for a delegated conductor goal labelled by this router.
+def _is_plan_labelled_worker(text: str) -> bool:
+    """True when this text is a delegated worker goal labelled by this router.
 
-    Deliberately narrower than "any plan label": a [spark] or [sol] label says
-    *do this work*, so the design gate must keep judging it. The conductor label
-    says *coordinate this work* -- the contract forbids it from doing design and
-    requires it to route design to a [sol] leaf.
+    The keyword test predates the planner. It exists because the router once had
+    to guess a tier from raw prompt text; a labelled worker goal is instead the
+    output of a planner that saw the screenshot, the objective and the repo, and
+    that routes design to a [sol] leaf under a schema-enforced contract. Re-deciding
+    that with forty keywords overrides a better-informed decision with a worse one
+    -- and it cannot even tell the cases apart: `_is_design_request` is true both
+    for "identify the layout branches" and for "implement a responsive CSS card".
     """
-    match = _PLAN_LABEL.match(text)
-    return bool(match) and match.group(1) == str(cfg.get("default_model", "terra")).casefold()
+    return bool(_PLAN_LABEL.match(text))
 
 
 def _is_design_request(text: str) -> bool:
@@ -297,14 +299,26 @@ def _is_acknowledgement_only(text: str) -> bool:
     return bool(_ACKNOWLEDGEMENT_ONLY.fullmatch(_normalise(text)))
 
 
-def _is_spark_read_only_request(text: str) -> bool:
-    """Spark may receive only affirmative, bounded non-design evidence work."""
+def _is_spark_read_only_work(text: str) -> bool:
+    """Read-only judged from the verbs alone, independent of the subject.
+
+    Separated from the design test because mixing them made the question
+    unanswerable: "identify the layout branches" and "implement a CSS card"
+    both mention design, so a combined predicate rejected both. The verbs
+    separate them cleanly -- one reads, the other writes.
+    """
     affirmative = _normalise(_without_negated_safety_constraints(text))
     return bool(
         affirmative
-        and not _is_design_request(affirmative)
         and not _SPARK_MUTATING_WORK.search(affirmative)
         and _SPARK_READ_ONLY_WORK.search(affirmative)
+    )
+
+
+def _is_spark_read_only_request(text: str) -> bool:
+    """Spark may receive only affirmative, bounded non-design evidence work."""
+    return _is_spark_read_only_work(text) and not _is_design_request(
+        _normalise(_without_negated_safety_constraints(text))
     )
 
 
@@ -627,7 +641,7 @@ def _classify_request(
     # decisions on one turn. Only the conductor label is exempt; a [spark] or
     # [sol] leaf still faces the gate, and Sol still owns every [sol] leaf.
     if _is_design_request(user_text) and not (
-        allow_plan_label_over_design and _is_conductor_plan_label(text, cfg)
+        allow_plan_label_over_design and _is_plan_labelled_worker(text)
     ):
         return _decision("sol", "design analysis or implementation is Sol-only", cfg)
 
@@ -645,9 +659,11 @@ def _classify_request(
         tier = override.group(1)
         if tier == "spark" and has_image_attachment:
             return _decision("terra", "image attachment requires a vision-capable route", cfg)
-        if tier == "spark" and not _is_spark_read_only_request(user_text):
+        if tier == "spark" and not _is_spark_read_only_work(user_text):
             if _is_consequential_spark_request(user_text):
                 return _decision("sol", "consequential Spark task requires Sol", cfg)
+            if _is_design_request(user_text):
+                return _decision("sol", "design analysis or implementation is Sol-only", cfg)
             return _decision("terra", "Spark is restricted to non-design read-only subtasks", cfg)
         requested_effort = override.group(2)
         effort_key = "explicit_sol_xhigh" if tier == "sol" and requested_effort == "xhigh" else None
