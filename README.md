@@ -1,141 +1,140 @@
-# Model Router Plugin
+# Model Router — Hermes Agent Plugin
 
-Intelligens LLM routing Hermes Agenthez. Automatikus modellválasztás a feladat típusa alapján: Luna (egyszerű), Spark (read-only kód), Terra (default orchestrator), Sol (komplex/sensitive), és Claude Opus 5 bridge.
+Intelligent LLM routing for Hermes Agent. Routes between Luna (simple tasks), Spark (read-only coding), Terra (default orchestrator), Sol (complex/security-critical), and Claude Opus 5 bridge — with stable parent policy, bounded delegation, and privacy-safe audit logging.
 
-## Telepítés
-
-### GitHub-ról (ajánlott)
+## Install
 
 ```bash
-hermes plugins install <your-username>/hermes-model-router
+hermes plugins install Gdeepwell/hermes-model-router
 ```
 
-### Lokális telepítés
+Then enable it:
 
 ```bash
-cd /path/to/model-router-plugin
-hermes plugins install .
-```
-
-### Manuális telepítés
-
-```bash
-cp -r model-router ~/.hermes/plugins/
 hermes plugins enable model-router
 ```
 
-## Funkciók
+## Features
 
-### Automatikus Routing
+### Automatic Routing
 
-- **Luna**: Egyszerű feladatok, rövid válaszok, alapvető kérdések
-- **Spark**: Read-only kód elemzés, szűrt kódolási feladatok
-- **Terra**: Alapértelmezett orchestrator, általános feladatok
-- **Sol**: Komplex, biztonsági, kritikus feladatok
-- **Claude Opus 5**: Standalone diagnostic bridge (opcionális)
+| Tier | Purpose |
+|------|---------|
+| **Luna** | Simple tasks, short answers, basic questions |
+| **Spark** | Read-only code analysis, bounded coding subtasks |
+| **Terra** | Default orchestrator, general-purpose tasks |
+| **Sol** | Complex, security-sensitive, critical infrastructure |
+| **Claude Opus 5** | Standalone diagnostic bridge (optional) |
+
+### Stable Parent Policy
+
+The user-facing conversation stays on one durable parent model. Classifier results are worker recommendations, not silent parent switches. Sol, Spark, Qwen and Opus never become the apparent responder merely because a prompt mentions UI, CSS, design, or long text.
 
 ### Privacy-First Audit Logging
 
-- 240 karakteres bounded preview
-- Redaktált sensitive adatok
-- Parent/child correlation ID-k
-- Token és költség metrikák
+- 240-character bounded prompt preview
+- Redacted sensitive data (tokens, URLs with credentials, etc.)
+- Parent/child correlation IDs
+- Token and cost metrics when supplied by the runtime
+- No raw prompt or response bodies stored in logs
 
 ### Bounded Delegation
 
-- Max 2 egyidejű child agent
-- Max 1 spawn depth (flat hierarchy)
-- Max 16 child iteráció
-- Handoff capsule minden worker-nek
+- Max 2 concurrent child agents
+- Max 1 spawn depth (flat hierarchy — no recursive spawning)
+- Max 16 child iterations
+- Handoff capsule required for every worker task
 
 ### Live Dashboard
 
 ```bash
 python3 ~/.hermes/plugins/model-router/web_viewer.py
+# Opens at http://localhost:8765
 ```
 
-Megnyitja a `http://localhost:8765` címen a live dashboardot.
+## Configuration
 
-## Konfiguráció
+The plugin loads `router_config.yaml` from the plugin directory automatically.
 
-A plugin automatikusan betölti a `router_config.yaml` fájlt. Testreszabás:
-
-```bash
-cp ~/.hermes/plugins/model-router/router_config.yaml ~/.hermes/model-router-config.yaml
-```
-
-Szerkeszd a `~/.hermes/model-router-config.yaml` fájlt a saját igényeid szerint.
-
-### Fő beállítások
+### Key Settings
 
 ```yaml
-# Modell elérhetőség
+# Model availability
 callable:
   luna: true
-  spark: false  # read-only, explicit [spark] label szükséges
+  spark: false   # read-only, requires explicit [spark] label
   terra: true
   sol: true
   opus5: true
+  qwen: true
 
-# Default parent modell
+# Default parent model
 default_model: terra
 
-# Delegation korlátok
-orchestration:
-  enabled: false  # automatikus fan-out kikapcsolva
-  max_tasks: 1
+# Delegation limits (in ~/.hermes/config.yaml)
+delegation:
+  max_concurrent_children: 2
+  max_spawn_depth: 1
+  max_iterations: 16
 
 # Audit logging
 logging:
   prompt_preview_chars: 240
   redact_prompt_preview: true
+
+# Orchestration (auto fan-out)
+orchestration:
+  enabled: false
+  max_tasks: 1
 ```
 
-## Használat
+## Usage
 
-### Explicit Modell Választás
+### Explicit Model Override
+
+Prefix your message with a tag:
 
 ```
-[luna] Egyszerű kérdés
-[spark] Olvasd el ezt a fájlt
-[sol] Komplex biztonsági elemzés
+[luna] Simple question
+[spark] Read this file and report
+[sol] Complex security analysis
 [opus] Diagnostic review
 ```
 
-### Delegáció
+### Delegation
 
-A parent agent automatikusan delegálhat független részfeladatokat:
+The parent agent can delegate independent bounded subtasks:
 
 ```python
 delegate_task(
-  goal="Független részfeladat",
-  context="Handoff capsule: cél, korlátok, releváns döntések"
+  goal="Bounded independent subtask",
+  context="Handoff capsule: objective, boundaries, relevant decisions, expected evidence. No user-facing output."
 )
 ```
 
 ## Policy
 
-1. **Stabil Parent**: A user-facing beszélgetés nem vált modellt automatikusan
-2. **Kivétel, nem szabály**: Delegáció csak valódi független feladatoknál
-3. **Worker-korlátok**: Max 2 concurrent child, 1 spawn depth, 16 iteráció
-4. **Privacy-safe audit**: 240 char bounded preview, redaktált sensitive adatok
-5. **Dokumentáció**: Minden policy változás frissíti a README-t és teszteket
+1. **Stable Parent** — The user-facing conversation does not silently switch models.
+2. **Delegation is an exception, not the default** — Only for genuinely independent subtasks.
+3. **Worker limits enforced** — Max 2 concurrent children, 1 spawn depth, 16 iterations.
+4. **Privacy-safe audit** — 240-char bounded preview, redacted sensitive data.
+5. **Documented changes** — Every policy change updates README and tests.
 
-## Tesztek
+## Tests
 
 ```bash
 cd ~/.hermes/plugins/model-router
 pytest test_*.py
 ```
 
-## Verzió
+## Version
 
-**1.2.0** - Stable parent policy, bounded delegation, privacy-safe logging
+**1.2.0** — Stable parent policy, bounded delegation, privacy-safe logging
 
 ## License
 
 MIT
 
-## Szerző
+## Author
 
-SENTINEL - Hermes Agent Model Router
+SENTINEL — Hermes Agent Model Router
