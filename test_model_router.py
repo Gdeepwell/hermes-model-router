@@ -897,6 +897,33 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(result["request"]["model"], MODELS["sol"])
 
     @patch("model_router._log_decision")
+    def test_conductor_label_survives_a_design_flavoured_objective(self, mocked_log):
+        """The conductor coordinates design work; it does not perform it. Judging
+        it by keywords put the planner on Sol whenever the objective touched UI,
+        and Sol then owned both the conducting and the [sol] leaf it should have
+        delegated -- 15 of 16 routing decisions on one real turn."""
+        result = route_llm_request(
+            request=chat_request(
+                "[terra] Fix the daily-calendar card layout in /home/deepwell/booking-saas; "
+                "trace the computed layout/markup before implementing."
+            ),
+            provider="openai-codex", model=MODELS["terra"], platform="subagent",
+            api_call_count=1, turn_id="conductor-design-objective",
+        )
+        self.assertEqual(result["metadata"]["tier"], "terra")
+
+    @patch("model_router._log_decision")
+    def test_root_design_turn_still_ignores_a_typed_label(self, mocked_log):
+        """The exemption is for plan labels only. A user typing [terra] on a root
+        turn must not be able to route design work away from Sol."""
+        decision = classify_request(
+            chat_request("[terra] Design a responsive CSS card layout."),
+            api_call_count=1,
+        )
+        self.assertEqual(decision.tier, "sol")
+        self.assertIn("Sol-only", decision.reason)
+
+    @patch("model_router._log_decision")
     def test_text_only_design_spark_subagent_is_rerouted_to_sol(self, mocked_log):
         result = route_llm_request(
             request=chat_request("[spark] Implement a responsive CSS card."),

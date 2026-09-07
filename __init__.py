@@ -246,6 +246,21 @@ _SPARK_CONSEQUENTIAL_WORK = re.compile(
 )
 
 
+_PLAN_LABEL = re.compile(r"^\s*\[(luna|spark|terra|sol)(?::xhigh)?\](?:\s|$)")
+
+
+def _is_conductor_plan_label(text: str, cfg: Dict[str, Any]) -> bool:
+    """True only for a delegated conductor goal labelled by this router.
+
+    Deliberately narrower than "any plan label": a [spark] or [sol] label says
+    *do this work*, so the design gate must keep judging it. The conductor label
+    says *coordinate this work* -- the contract forbids it from doing design and
+    requires it to route design to a [sol] leaf.
+    """
+    match = _PLAN_LABEL.match(text)
+    return bool(match) and match.group(1) == str(cfg.get("default_model", "terra")).casefold()
+
+
 def _is_design_request(text: str) -> bool:
     return bool(_DESIGN_WORK.search(_normalise(text)))
 
@@ -557,9 +572,16 @@ def classify_request(
     request: Dict[str, Any],
     api_call_count: int = 1,
     config: Optional[Dict[str, Any]] = None,
+    *,
+    allow_plan_label_over_design: bool = False,
 ) -> RouteDecision:
     """Classify one provider request, annotated with the tiers it lost out on."""
-    decision = _classify_request(request, api_call_count, config)
+    decision = _classify_request(
+        request,
+        api_call_count,
+        config,
+        allow_plan_label_over_design=allow_plan_label_over_design,
+    )
     items = _request_items(request)
     user_text, user_index = _last_user_text_and_index(items)
     eligible = _eligible_tiers(
@@ -576,6 +598,8 @@ def _classify_request(
     request: Dict[str, Any],
     api_call_count: int = 1,
     config: Optional[Dict[str, Any]] = None,
+    *,
+    allow_plan_label_over_design: bool = False,
 ) -> RouteDecision:
     """Classify one provider request. Terra is the normal durable default."""
     cfg = config or _load_config()
@@ -595,7 +619,16 @@ def _classify_request(
     # the resulting evidence, while Spark may inspect only non-design read-only
     # facts. This check intentionally precedes manual/benchmark overrides so a
     # label cannot route design work to another tier.
-    if _is_design_request(user_text):
+    # The gate precedes the manual override so a *user* label cannot route design
+    # work off Sol. For a delegated conductor the keyword test misfires: it cannot
+    # tell "coordinate work that includes design" from "do design", so any
+    # UI-adjacent objective pinned the planner to Sol, which then owned both the
+    # conducting and the [sol] leaf it was meant to delegate -- 15 of 16 routing
+    # decisions on one turn. Only the conductor label is exempt; a [spark] or
+    # [sol] leaf still faces the gate, and Sol still owns every [sol] leaf.
+    if _is_design_request(user_text) and not (
+        allow_plan_label_over_design and _is_conductor_plan_label(text, cfg)
+    ):
         return _decision("sol", "design analysis or implementation is Sol-only", cfg)
 
     benchmark_force = _normalise(os.getenv("MODEL_ROUTER_BENCHMARK_FORCE_MODEL", ""))
@@ -1111,7 +1144,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. {_model_param_contract(orchestrator_tier)} The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. {_model_param_contract(orchestrator_tier)} Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -1466,18 +1499,22 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(request, dict):
         return None
 
-    decision = classify_request(
-        request,
-        api_call_count=int(kwargs.get("api_call_count", 1) or 1),
-        config=cfg,
-    )
-
-    decision = _require_callable(decision, cfg)
-
     subagent_marker = (
         str(kwargs.get("platform", "")).casefold() == "subagent"
         or ":sa-" in str(kwargs.get("turn_id", ""))
     )
+
+    decision = classify_request(
+        request,
+        api_call_count=int(kwargs.get("api_call_count", 1) or 1),
+        config=cfg,
+        # Only a delegated worker carries a label this router itself emitted; a
+        # root turn's label is whatever the user typed, so the design gate keeps
+        # precedence there.
+        allow_plan_label_over_design=subagent_marker,
+    )
+
+    decision = _require_callable(decision, cfg)
     # Preserve one durable user-facing owner for the whole root session.  Sol,
     # Spark, Qwen and Opus are available as explicitly requested or delegated
     # workers, not invisible replacements for the person talking to the user.
