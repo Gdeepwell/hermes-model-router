@@ -16,6 +16,36 @@ class ModelRouterDashboardTests(unittest.TestCase):
         end = HTML.index("function executionState", start)
         return HTML[start:end]
 
+    def i18n(self, key):
+        """Return the (english, hungarian) pair declared for one i18n key.
+
+        Structural assertions anchor on the key; this checks the copy itself,
+        so a translation change can never silently break an unrelated test.
+        """
+        import re
+
+        english = HTML[HTML.index("  en: {"):HTML.index("  hu: {")]
+        hungarian = HTML[HTML.index("  hu: {"):HTML.index("\n};", HTML.index("  hu: {"))]
+        pattern = r"^\s*'%s':\s*'((?:[^'\\]|\\.)*)'" % re.escape(key)
+        found = []
+        for block, language in ((english, "en"), (hungarian, "hu")):
+            match = re.search(pattern, block, re.M)
+            self.assertIsNotNone(match, f"i18n key {key!r} missing from the {language} dictionary")
+            found.append(match.group(1))
+        return tuple(found)
+
+    def i18n_runtime(self, language="en"):
+        """The dashboard's real I18N dictionary and t(), ready to run in node.
+
+        The execution-tree renderer calls t(), so a probe without it dies with
+        a ReferenceError. Slicing the live source keeps the probes honest —
+        a renamed key fails here rather than silently falling back.
+        """
+        start = HTML.index("const I18N = {")
+        end = HTML.index("function applyLanguage()")
+        runtime = HTML[start:end].replace("localStorage.getItem('model-router-lang')", "null")
+        return runtime.replace("let currentLang = null || 'en';", f"let currentLang = {language!r};")
+
     def javascript_function(self, name):
         start = HTML.index(f"function {name}")
         brace = HTML.index("{", start)
@@ -31,11 +61,12 @@ class ModelRouterDashboardTests(unittest.TestCase):
 
     def test_execution_tree_counts_are_labeled_as_routing_decisions(self):
         self.assertIn('<div class="cards"><div class="card"><div class="n" id="total">0</div>', HTML)
-        self.assertIn('<div class="k">Összes routing döntés</div>', HTML)
+        self.assertIn('<div class="k" data-i18n="card.total">', HTML)
         self.assertNotIn('.cards{display:none}', HTML)
         renderer = HTML[HTML.rindex("render=function(){"):]
-        self.assertIn("total.innerHTML='<b>ÖSSZES ROUTING DÖNTÉS</b>'", renderer)
-        self.assertIn("workers.textContent=`${workerCalls} worker-routing`", renderer)
+        self.assertIn("total.innerHTML=`<b>${t('total.routing.decisions')}</b>`", renderer)
+        self.assertIn("workers.textContent=`${workerCalls} ${t('run.worker.routing')}`", renderer)
+        self.assertEqual(self.i18n('total.routing.decisions'), ('TOTAL ROUTING DECISIONS', 'ÖSSZES ROUTING DÖNTÉS'))
         self.assertNotIn('ÖSSZES HÍVÁS', renderer)
         self.assertNotIn('worker-hívás', renderer)
 
@@ -50,10 +81,16 @@ class ModelRouterDashboardTests(unittest.TestCase):
         selector = HTML[label_start:HTML.index('</label>', select_start)]
         self.assertEqual(
             selector,
-            '<label>Utolsó root promptok<select id="last"><option>5</option><option selected>20</option><option>50</option></select>',
+            '<label><span data-i18n="router.last.label">Utolsó root promptok</span>'
+            '<select id="last"><option>5</option><option selected>20</option><option>50</option></select>',
         )
+        self.assertEqual(self.i18n('router.last.label'), ('Last root prompts', 'Utolsó root promptok'))
         self.assertIn("fetch(`/api/entries?roots=${$('last').value}`", HTML)
-        self.assertIn("`${limitedRoots.length} root prompt · ${new Date().toLocaleTimeString('hu-HU')}`", HTML)
+        self.assertIn(
+            "`${limitedRoots.length} ${t('status.rootprompts')} · "
+            "${new Date().toLocaleTimeString(t('status.locale'))}`",
+            HTML,
+        )
 
     def test_root_limit_keeps_latest_roots_and_all_of_their_raw_records(self):
         source = "\n".join(self.javascript_function(name) for name in (
@@ -142,11 +179,11 @@ class ModelRouterDashboardTests(unittest.TestCase):
 
     def test_only_top_summary_cards_use_expanded_model_family_labels(self):
         cards = HTML[HTML.index('<div class="cards">'):HTML.index('<div id="runs"')]
-        self.assertIn('<div class="k">GPT-5.6 Luna</div>', cards)
-        self.assertIn('<div class="k">GPT-5.3 Spark</div>', cards)
-        self.assertIn('<div class="k">GPT-5.6 Terra</div>', cards)
-        self.assertIn('<div class="k">GPT-5.6 Sol</div>', cards)
-        self.assertIn('<div class="k">Claude Opus 5</div>', cards)
+        for key, label in [('card.luna', 'GPT-5.6 Luna'), ('card.spark', 'GPT-5.3 Spark'),
+                           ('card.terra', 'GPT-5.6 Terra'), ('card.sol', 'GPT-5.6 Sol'),
+                           ('card.opus5', 'Claude Opus 5')]:
+            self.assertIn(f'<div class="k" data-i18n="{key}">{label}</div>', cards)
+            self.assertEqual(self.i18n(key), (label, label))
         self.assertIn('<option>luna</option><option>spark</option><option>terra</option><option>sol</option><option>opus5</option><option>qwen</option>', HTML)
         self.assertIn("return effort?`${tier} · ${effort}`:tier", HTML)
         self.assertIn("String(raw?.tier||raw?.model||node.model||kind).toUpperCase()", HTML)
@@ -161,7 +198,11 @@ class ModelRouterDashboardTests(unittest.TestCase):
         self.assertIn("function childEntries(child,list,seen=new Set())", HTML)
 
     def test_root_prompt_disclosure_is_independent_of_word_wrap(self):
-        self.assertIn('<label class="check"><input id="word-wrap" type="checkbox"> Sortörés</label>', HTML)
+        self.assertIn(
+            '<label class="check"><input id="word-wrap" type="checkbox"> '
+            '<span data-i18n="router.wordwrap">Sortörés</span></label>',
+            HTML,
+        )
         self.assertIn("hasDetails=scope.nodes.length>0", HTML)
         self.assertIn("if(hasDetails&&open)", HTML)
         self.assertIn(".word-wrap .router-run-prompt,.word-wrap .execution-tree-description", HTML)
@@ -204,15 +245,15 @@ class ModelRouterDashboardTests(unittest.TestCase):
     def test_lifecycle_description_uses_own_prompt_or_short_safe_fallback(self):
         source = self.execution_source()
         self.assertIn("function lifecycleDescription(entry)", source)
-        self.assertIn("'Belső router-lépés'", source)
+        self.assertIn("return t('internal.router.step')", source)
         self.assertIn("task_description:lifecycleDescription(entry)", source)
-        probe = source + "\nconst own={lifecycle_prompt:'Saját tárolt lifecycle feladat',prompt_preview:'[ASYNC DELEGATION COMPLETE — dump]'};const empty={prompt_preview:'[ASYNC DELEGATION COMPLETE — dump]'};console.log(JSON.stringify([lifecycleDescription(own),lifecycleDescription(empty)]));"
+        probe = self.i18n_runtime("hu") + source + "\nconst own={lifecycle_prompt:'Saját tárolt lifecycle feladat',prompt_preview:'[ASYNC DELEGATION COMPLETE — dump]'};const empty={prompt_preview:'[ASYNC DELEGATION COMPLETE — dump]'};console.log(JSON.stringify([lifecycleDescription(own),lifecycleDescription(empty)]));"
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         self.assertEqual(json.loads(result.stdout), ["Saját tárolt lifecycle feladat", "Belső router-lépés"])
 
     def test_lifecycle_description_prefers_human_completion_provenance(self):
         source = self.execution_source()
-        probe = source + "\nconst completion={event_kind:'async_delegation_completion',lifecycle_prompt:'Delegált feladat befejezési eseménye · Rövid redaktált feladat'};console.log(lifecycleDescription(completion));"
+        probe = self.i18n_runtime() + source + "\nconst completion={event_kind:'async_delegation_completion',lifecycle_prompt:'Delegált feladat befejezési eseménye · Rövid redaktált feladat'};console.log(lifecycleDescription(completion));"
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         self.assertEqual(result.stdout.strip(), "Delegált feladat befejezési eseménye · Rövid redaktált feladat")
 
@@ -245,7 +286,7 @@ class ModelRouterDashboardTests(unittest.TestCase):
                                                           [{"tier": "terra", "effort": "medium"}] * 5), "children": []},
             ],
         }]}
-        probe = source + "\nconst scope=executionScope(" + json.dumps(group) + "," + json.dumps(system) + "," + json.dumps(parent) + ",'sol');const workerCalls=scope.nodes.filter(node=>node.kind!=='LIFECYCLE').flatMap(executionCalls);console.log(JSON.stringify({calls:scope.calls.map(executionRouteKey),workerCalls:workerCalls.length,tree:scope.nodes}));"
+        probe = self.i18n_runtime() + source + "\nconst scope=executionScope(" + json.dumps(group) + "," + json.dumps(system) + "," + json.dumps(parent) + ",'sol');const workerCalls=scope.nodes.filter(node=>node.kind!=='LIFECYCLE').flatMap(executionCalls);console.log(JSON.stringify({calls:scope.calls.map(executionRouteKey),workerCalls:workerCalls.length,tree:scope.nodes}));"
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         observed = json.loads(result.stdout)
         self.assertEqual(len(observed["calls"]), 41)
@@ -303,6 +344,8 @@ class ModelRouterDashboardTests(unittest.TestCase):
         source = "\n".join(self.javascript_function(name) for name in (
             "sessionIdFromTurn", "promptsMatch", "parentForGroup", "executionState"
         ))
+        # executionState returns a sentinel, not a label: its value used to be
+        # the rendered Hungarian text, so translating the UI broke the branch.
         activity = {"parents": [{
             "session_id": "shared-session",
             "prompt": "Current live prompt",
@@ -316,7 +359,7 @@ class ModelRouterDashboardTests(unittest.TestCase):
             "console.log(JSON.stringify(groups.map(group=>executionState(group,parentForGroup(group)))));"
         )
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
-        self.assertEqual(json.loads(result.stdout), ["KÉSZ", "FUT"])
+        self.assertEqual(json.loads(result.stdout), ["done", "running"])
 
     def test_last_sibling_connector_does_not_continue_below_leaf(self):
         self.assertIn(".execution-tree-row:before{content:'';position:absolute;left:calc(34px + var(--tree-depth) * 38px);top:0;bottom:50%;border-left:1px solid #50637d}", HTML)
@@ -368,23 +411,72 @@ class ModelRouterDashboardTests(unittest.TestCase):
         self.assertIn("refreshInFlight=null", cycle)
         self.assertNotIn("replaceChildren", cycle)
         self.assertIn("button.disabled=true", cycle)
-        self.assertIn("Frissítés…", cycle)
+        self.assertIn("button.textContent=t('status.refresh.short')", cycle)
+        self.assertEqual(self.i18n('status.refresh.short'), ('Refresh…', 'Frissítés…'))
         self.assertIn("setInterval(()=>{if($('auto').checked)refreshDashboard()},3000)", HTML)
 
     def test_external_opus_child_card_has_badges_metrics_states_and_stable_run_disclosure(self):
         source = self.execution_source()
         self.assertIn("node.external", source)
-        self.assertIn("KÜLSŐ", source)
-        self.assertIn("READ-ONLY", source)
-        self.assertIn("KÉRT READ-ONLY", source)
+        self.assertIn("badges.push(t('exec.external'))", source)
+        self.assertIn("badges.push(t('exec.read.only'))", source)
+        self.assertIn("badges.push(t('agents.requested.ro'))", source)
+        self.assertEqual(self.i18n('exec.external'), ('EXTERNAL', 'KÜLSŐ'))
+        self.assertEqual(self.i18n('exec.read.only'), ('READ-ONLY', 'READ-ONLY'))
+        self.assertEqual(self.i18n('agents.requested.ro'), ('Requested READ-ONLY', 'KÉRT READ-ONLY'))
         self.assertIn("input_tokens", source)
         self.assertIn("cache_read_input_tokens", source)
         self.assertIn("total_cost_usd", source)
         self.assertIn("bridge_run_id", source)
-        self.assertIn("running:'FUT'", source)
+        self.assertIn("running:t('state.running.short')", source)
+        self.assertEqual(self.i18n('state.running.short'), ('RUNNING', 'FUT'))
         self.assertIn("'max-turn':'MAX-TURN'", source)
         self.assertIn("external_bridge_run_ids", HTML)
         self.assertIn("bridge_run_id", HTML)
+
+
+class DashboardLanguageTests(unittest.TestCase):
+    """The dictionary existing is not the same as the renderers using it.
+
+    Every string the renderers emit used to be a Hungarian literal, so the
+    language selector only ever translated the static shell.
+    """
+
+    def render_probe(self, language):
+        helper = ModelRouterDashboardTests("test_lifecycle_description_uses_own_prompt_or_short_safe_fallback")
+        source = helper.execution_source()
+        probe = helper.i18n_runtime(language) + source + (
+            "\nconsole.log(JSON.stringify({"
+            "fallback:lifecycleDescription({}),"
+            "external:t('exec.external'),"
+            "running:t('state.running.short'),"
+            "missing:t('no.such.key')"
+            "}));"
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return json.loads(result.stdout)
+
+    def test_renderer_output_follows_the_selected_language(self):
+        english, hungarian = self.render_probe("en"), self.render_probe("hu")
+        self.assertEqual(english["fallback"], "Internal router step")
+        self.assertEqual(hungarian["fallback"], "Belső router-lépés")
+        self.assertEqual(english["external"], "EXTERNAL")
+        self.assertEqual(hungarian["external"], "KÜLSŐ")
+        self.assertEqual(english["running"], "RUNNING")
+        self.assertEqual(hungarian["running"], "FUT")
+
+    def test_unknown_key_degrades_to_the_key_itself(self):
+        # A missing key must never render as blank — it has to stay findable.
+        self.assertEqual(self.render_probe("hu")["missing"], "no.such.key")
+
+    def test_switching_language_rerenders_the_dynamic_content(self):
+        # applyLanguage only walks [data-i18n] nodes; the tables and agent
+        # cards are built by the renderers and need an explicit repaint.
+        handler = HTML[HTML.index("document.getElementById('language-select').addEventListener"):]
+        handler = handler[:handler.index("});")]
+        self.assertIn("applyLanguage()", handler)
+        self.assertIn("render()", handler)
+        self.assertIn("renderAgents(agentActivity)", handler)
 
 
 if __name__ == "__main__":
