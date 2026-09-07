@@ -81,9 +81,9 @@ delegation:
   preserve_spark_subagents: true
 orchestration:
   enabled: true
-  min_chars: 180
-  max_tasks: 1
-  rescue_min_calls: 9999
+  min_chars: 60
+  max_tasks: 2
+  rescue_min_calls: 6
   path: ~/.hermes/logs/terra-spark-orchestration.jsonl
 sol_opus5_preflight:
   enabled: false

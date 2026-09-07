@@ -997,6 +997,51 @@ def _supports_forced_tool_choice(kwargs: Dict[str, Any], decision: RouteDecision
     return "token-plan." not in str(kwargs.get("base_url") or "").casefold()
 
 
+_HERMES_CONFIG_PATH = Path(os.path.expanduser("~/.hermes/config.yaml"))
+
+
+def _delegation_target_names() -> Tuple[str, ...]:
+    """Targets the host will actually accept in ``delegate_task(model=...)``.
+
+    Read from Hermes's own ``delegation.targets`` rather than this plugin's
+    config: that map builds the tool's ``model`` enum, and the host silently
+    drops any target with an empty model. Naming one here that the host has
+    dropped would point the planner at a route that cannot spawn.
+    """
+    if yaml is None:
+        return ()
+    try:
+        raw = yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        targets = (raw.get("delegation") or {}).get("targets") or {}
+        return tuple(sorted(
+            str(name).strip().casefold()
+            for name, spec in targets.items()
+            if isinstance(spec, dict) and str(spec.get("model") or "").strip()
+        ))
+    except Exception:
+        return ()
+
+
+def _model_param_contract(orchestrator_tier: str) -> str:
+    """The sentence that makes route choice expressible instead of implied.
+
+    A ``[sol]``/``[spark]`` goal prefix is only a model rename inside the
+    default provider, so it can never reach a target that lives on a separate
+    account. Without this, every leaf inherits the default route: the delegation
+    registry shows every child ever spawned running on the default model, even
+    ones whose goal was explicitly prefixed for another target.
+    """
+    names = [name for name in _delegation_target_names() if name != orchestrator_tier]
+    scope = f" (available targets: {', '.join(names)})" if names else ""
+    return (
+        f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
+        "A goal-text prefix only renames the model inside the default provider and cannot reach a "
+        "target on a separate account, so a leaf intended for one must carry model:<name>. Prefer "
+        "spreading genuinely independent leaves across different targets so separate accounts and "
+        "quotas absorb the work in parallel; never split work merely to use more targets."
+    )
+
+
 def _prepare_orchestration_delegation(
     request: Dict[str, Any],
     plan_id: str,
@@ -1028,6 +1073,7 @@ def _prepare_orchestration_delegation(
         f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Spark/Sol workers receive a "
         "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
+        f"{_model_param_contract(orchestrator_tier)} "
         f"{orchestrator_tier} keeps coordination, acceptance/rejection, shared-file integration, and final verification; Sol owns all design analysis and design implementation. "
         "It waits for delegated evidence, explicitly records SUPERVISOR DECISION: ACCEPT or REJECT for every worker, then completes the owned work. "
         f"The current parent must not perform normal implementation; the {orchestrator_tier} conductor owns the reviewed result.\n"
@@ -1060,7 +1106,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol]. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark]. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero Spark leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. {_model_param_contract(orchestrator_tier)} The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -1163,95 +1209,134 @@ def _orchestration_forced_event(cfg: Dict[str, Any], parent_turn_id: str) -> Opt
     return None
 
 
-def _orchestration_eligible(kwargs: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision) -> bool:
+def _orchestration_skip_reason(
+    kwargs: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision
+) -> Optional[str]:
+    """Name the gate that rejected this turn, or None when it is eligible.
+
+    The route log records the winning route, not the dispatch that never
+    happened, so a turn that runs twenty parent calls with no worker looks
+    identical whether orchestration was ineligible, deduped, or never reached.
+    Returning the reason lets the caller record it.
+    """
     policy = cfg.get("orchestration") or {}
     request = kwargs.get("request")
     sol_preflight = decision.tier == "sol" and _sol_opus5_preflight_enabled(cfg)
     # Orchestration is enabled for Sol (design preflight) and the configured
     # default_model (which acts as the general-purpose orchestrator).
     orchestration_tiers = {"sol"} | {str(cfg.get("default_model", "terra"))}
-    if not policy.get("enabled") or decision.tier not in orchestration_tiers or not isinstance(request, dict):
-        return False
+    if not policy.get("enabled"):
+        return "orchestration_disabled"
+    if decision.tier not in orchestration_tiers:
+        return f"tier_not_orchestrator:{decision.tier}"
+    if not isinstance(request, dict):
+        return "request_not_a_dict"
     if decision.tier == "sol" and not sol_preflight:
-        return False
+        return "sol_preflight_disabled"
     api_call_count = int(kwargs.get("api_call_count", 1) or 1)
     # Normal path: dispatch on the first Terra call. Recovery path: if that
     # process missed its initial checkpoint, rescue a genuinely long tool loop
-    # once instead of letting it remain 20–30 Terra calls with no Spark work.
+    # once instead of letting it remain 20-30 Terra calls with no Spark work.
     rescue_min_calls = max(2, int(policy.get("rescue_min_calls", 6) or 6))
     is_rescue = api_call_count >= rescue_min_calls
     if api_call_count != 1 and not is_rescue:
-        return False
+        return f"mid_loop_call:{api_call_count}"
     if str(kwargs.get("platform", "")).casefold() == "subagent" or ":sa-" in str(kwargs.get("turn_id", "")):
-        return False
+        return "subagent_turn"
     tools = request.get("tools") or []
     if not any(
         isinstance(tool, dict)
         and (tool.get("name") == "delegate_task" or (tool.get("function") or {}).get("name") == "delegate_task")
         for tool in tools
     ):
-        return False
+        return "no_delegate_task_tool"
     items = _request_items(request)
     user_text, user_index = _last_user_text_and_index(items)
     if not user_text:
-        return False
+        return "no_user_text"
     # A task too short to decompose is not worth a planner round trip plus up to
     # max_tasks bounded workers. Without this gate every actionable Terra turn
-    # forced a fan-out dispatch, the dominant source of perceived latency. Scoped
-    # to the Terra path: the Sol preflight is a design-safety review whose value
-    # does not depend on the request being long enough to split into workers.
-    if decision.tier == str(cfg.get("default_model", "terra")) and not sol_preflight:
+    # forced a fan-out dispatch, the dominant source of perceived latency. That
+    # is a first-call latency argument, so it must not gate the rescue: a turn
+    # already deep in a tool loop has spent far more than a planner round trip,
+    # and a short prompt ("csinald meg") routinely opens the longest loops.
+    if decision.tier == str(cfg.get("default_model", "terra")) and not sol_preflight and not is_rescue:
         min_chars = max(0, int(policy.get("min_chars", 180) or 0))
         if len(user_text) < min_chars:
-            return False
+            return f"prompt_shorter_than_min_chars:{len(user_text)}<{min_chars}"
     # Explicit bounded UI requests authorised for the verified bridge are a
     # single-hop exception: Sol retains policy ownership, but no Sol/Terra/Spark
     # planner call is created before Opus execution middleware handles the turn.
     if decision.tier == "sol" and _is_explicit_bounded_opus_ui_request(user_text, cfg):
-        return False
+        return "explicit_bounded_opus_ui_request"
     # A normal first-call preflight must be before parent tool work. The rescue
     # path intentionally runs inside an existing tool loop.
     if not is_rescue and _current_turn_has_tool_activity(items, user_index):
-        return False
+        return "tool_activity_before_first_call"
     text = _normalise(user_text)
     # Completion delivery is the Terra supervisor's reviewed hand-back, never a
     # fresh task to fan out again. Without this guard it can recursively create
     # another orchestration cycle merely because the consolidated evidence is long.
     if "[async delegation batch complete" in text:
-        return False
+        return "delegation_completion_delivery"
     # A compaction envelope can precede the real current user request in the
     # same message. Route from the suffix after its end marker; treating the
     # whole envelope as an internal continuation silently suppresses dispatch.
     if text.startswith("[context compaction"):
         end_marker = re.search(r"\[end of context summary[^\]]*\]", text)
         if not end_marker:
-            return False
+            return "compaction_envelope_without_end_marker"
         text = text[end_marker.end():].strip()
         if not text:
-            return False
+            return "compaction_envelope_with_empty_suffix"
     internal_prefixes = (
         "review the conversation above and consider saving to memory",
         "what do you see in this image?",
     )
     if text.startswith(internal_prefixes):
-        return False
+        return "internal_prompt_prefix"
     # Terra is the planner for every actionable Terra turn. Do not try to infer
     # task decomposability from keyword lists: real work is often introduced by
     # terse contextual requests, screenshots, or a tool loop whose prompt has
     # none of the old multi-step marker words. The planner itself decides whether
     # zero, one, or several bounded workers are useful; host guards still
     # constrain their scopes and hard-risk requests route to Sol first.
-    return bool(text)
+    if not text:
+        return "empty_normalised_text"
+    return None
+
+
+def _orchestration_eligible(kwargs: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision) -> bool:
+    return _orchestration_skip_reason(kwargs, cfg, decision) is None
 
 
 def _force_terra_supervisor_preflight(
     kwargs: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision
 ) -> Optional[Dict[str, Any]]:
-    if not _orchestration_eligible(kwargs, cfg, decision):
-        return None
     turn_id = str(kwargs.get("turn_id", ""))
     api_call_count = int(kwargs.get("api_call_count", 1) or 1)
     phase = "rescue" if api_call_count > 1 else "preflight"
+    skip_reason = _orchestration_skip_reason(kwargs, cfg, decision)
+    if skip_reason is not None:
+        # Record only the two calls where a dispatch was actually due. Logging
+        # every mid-loop call would bury the signal under one line per parent
+        # call, which is the noise the api_call_count gate already rejects.
+        policy = cfg.get("orchestration") or {}
+        rescue_min_calls = max(2, int(policy.get("rescue_min_calls", 6) or 6))
+        if api_call_count == 1 or api_call_count == rescue_min_calls:
+            with _SHADOW_LOCK:
+                _orchestration_event(
+                    cfg,
+                    {
+                        "event": "preflight_skipped",
+                        "phase": phase,
+                        "api_call_count": api_call_count,
+                        "turn_id": turn_id,
+                        "parent_model": decision.tier,
+                        "skip_reason": skip_reason,
+                    },
+                )
+        return None
     with _SHADOW_LOCK:
         if _orchestration_forced_event(cfg, turn_id):
             return None

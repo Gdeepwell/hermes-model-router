@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import json
 import pytest
 
 from model_router import RouteDecision, _log_decision, route_llm_request, run_llm_with_transient_failover
@@ -354,4 +355,8 @@ def test_min_chars_gate_follows_the_configured_orchestrator(tmp_path):
             api_call_count=1, turn_id="qwen-short-turn",
         )["request"]
     assert len(routed["tools"]) == 3
-    assert not path.exists()
+    # The gate now records why it declined, so assert the intent -- no dispatch --
+    # rather than the absence of the log file the diagnostic also writes to.
+    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert not [event for event in events if event["event"] == "preflight_forced"]
+    assert [event["skip_reason"].split(":")[0] for event in events] == ["prompt_shorter_than_min_chars"]

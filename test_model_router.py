@@ -1209,10 +1209,22 @@ class ModelRouterTests(unittest.TestCase):
                     api_call_count=1, turn_id="below-min-chars-turn",
                 )
             orchestration_log = Path(temp_dir) / "orchestration.jsonl"
-            dispatched = orchestration_log.exists() and orchestration_log.read_text(encoding="utf-8").strip()
+            events = [
+                json.loads(line)
+                for line in orchestration_log.read_text(encoding="utf-8").splitlines()
+            ]
         self.assertEqual(routed["metadata"]["tier"], "terra")
         self.assertNotIn("tool_choice", routed["request"])
-        self.assertFalse(dispatched, "a sub-min_chars turn must not emit a preflight dispatch")
+        # The declined turn is now logged with its reason; only a forced
+        # dispatch would mean the gate leaked.
+        self.assertFalse(
+            [event for event in events if event["event"] == "preflight_forced"],
+            "a sub-min_chars turn must not emit a preflight dispatch",
+        )
+        self.assertEqual(
+            [event["skip_reason"].split(":")[0] for event in events],
+            ["prompt_shorter_than_min_chars"],
+        )
 
     @patch("model_router._log_decision")
     def test_sol_preflight_ignores_min_chars_because_it_is_not_a_fan_out(self, mocked_log):
