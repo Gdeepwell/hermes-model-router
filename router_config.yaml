@@ -1,0 +1,96 @@
+enabled: true
+provider: openai-codex
+models:
+  luna: gpt-5.6-luna
+  spark: gpt-5.3-codex-spark
+  terra: gpt-5.6-terra
+  sol: gpt-5.6-sol
+  qwen: qwen3.7-plus
+callable:
+  luna: true
+  spark: false
+  terra: true
+  sol: true
+  opus5: true
+  qwen: true
+fallbacks:
+  spark: luna
+  luna: terra
+  sol: terra
+  opus5: sol
+  qwen: terra
+default_model: qwen
+coding_agent:
+  enabled: false
+  tier: opus5
+  requested_alias: opus
+  canonical_model: claude-opus-5
+  default_repo: ~/booking-saas
+  max_turns: 8
+  max_budget_usd: 5.0
+  timeout_seconds: 300
+  explicit_ui:
+    enabled: true
+    max_chars: 1200
+    require_recent_verified_probe_seconds: 86400
+  reviewer:
+    enabled: true
+    max_chars: 8000
+  repo_aliases:
+    model router: ~/.hermes/plugins/model_router
+    modelrouter: ~/.hermes/plugins/model_router
+    hermes-agent: ~/.hermes/hermes-agent
+    hermes agent: ~/.hermes/hermes-agent
+    booking-saas: ~/booking-saas
+    booking saas: ~/booking-saas
+    hermes: ~/.hermes/hermes-agent
+    booking: ~/booking-saas
+tier_providers:
+  luna: openai-codex
+  spark: openai-codex
+  terra: openai-codex
+  sol: openai-codex
+  opus5: openai-codex
+  qwen: qwen-token
+thresholds:
+  luna_max_chars: 700
+  sol_min_chars: 3500
+effort:
+  luna: low
+  spark: medium
+  terra: medium
+  sol: medium
+  opus5: external
+  sol_long: medium
+  explicit_sol: medium
+  explicit_sol_xhigh: medium
+quota_fallbacks:
+  spark:
+    model: luna
+    effort: medium
+logging:
+  enabled: true
+  path: ~/.hermes/logs/model-router.jsonl
+  prompt_preview_chars: 240
+  redact_prompt_preview: true
+session_policy:
+  pin_root_parent: true
+  handoff_capsule_version: v1
+  max_workers_per_turn: 2
+delegation:
+  preserve_spark_subagents: true
+orchestration:
+  enabled: false
+  min_chars: 180
+  max_tasks: 1
+  rescue_min_calls: 6
+  path: ~/.hermes/logs/terra-spark-orchestration.jsonl
+sol_opus5_preflight:
+  enabled: false
+  owner: sol
+  bridge_model: claude-opus-5
+  require_successful_auth_probe: true
+shadow:
+  enabled: false
+  limit: 0
+  path: ~/.hermes/logs/spark-shadow-benchmark.jsonl

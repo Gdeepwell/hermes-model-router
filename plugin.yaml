@@ -1,0 +1,8 @@
+name: model-router
+version: "1.2.0"
+description: "Smart LLM routing for OpenAI Codex models. Routes between Luna (simple tasks), Spark (read-only coding), Terra (default orchestrator), Sol (complex/sensitive), and Claude Opus 5 bridge. Privacy-safe audit logging, bounded delegation, live dashboard."
+author: "SENTINEL"
+middleware:
+  - llm_request
+config:
+  - router_config.yaml
