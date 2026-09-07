@@ -924,6 +924,57 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIn("Sol-only", decision.reason)
 
     @patch("model_router._log_decision")
+    def test_a_labelled_leaf_survives_its_own_callable_fallback(self, mocked_log):
+        """The planner-tier default asked "was this labelled?" by string-matching
+        the reason, which the callable fallback rewrites: a [spark] leaf becomes
+        "fallback from disabled spark" the moment Spark is not callable, so every
+        legitimate Spark leaf was demoted to the planner tier and lost its Luna
+        fallback -- the separate model the leaf was meant to run on."""
+        cfg = {
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": {**CALLABLE, "spark": False, "luna": True},
+            "fallbacks": {"spark": "luna"},
+            "default_model": "terra",
+        }
+        with patch("model_router._load_config", return_value=cfg):
+            result = route_llm_request(
+                request=chat_request("[spark] Read-only inventory. Identify the build commands."),
+                provider="openai-codex", model=MODELS["terra"], platform="subagent",
+                api_call_count=1, turn_id="session:sa-1-leaf:turn",
+            )
+        self.assertEqual(result["metadata"]["tier"], "luna")
+
+    @patch("model_router._log_decision")
+    def test_a_rejected_leaf_keeps_its_escalation(self, mocked_log):
+        """Demoting a rejected [spark] leaf to the planner tier turned a
+        deliberate escalation into the very tier it existed to avoid."""
+        with patch("model_router._load_config", return_value={
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": CALLABLE, "default_model": "terra",
+        }):
+            result = route_llm_request(
+                request=chat_request("[spark] Review the deploy scripts in production."),
+                provider="openai-codex", model=MODELS["terra"], platform="subagent",
+                api_call_count=1, turn_id="session:sa-1-risky:turn",
+            )
+        self.assertEqual(result["metadata"]["tier"], "sol")
+        self.assertIn("consequential", result["reason"])
+
+    @patch("model_router._log_decision")
+    def test_unlabelled_child_work_still_defaults_to_the_planner_tier(self, mocked_log):
+        with patch("model_router._load_config", return_value={
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": CALLABLE, "default_model": "terra",
+        }):
+            result = route_llm_request(
+                request=chat_request("Continue the integration work for the calendar fix."),
+                provider="openai-codex", model=MODELS["terra"], platform="subagent",
+                api_call_count=1, turn_id="session:sa-1-plain:turn",
+            )
+        self.assertEqual(result["metadata"]["tier"], "terra")
+        self.assertIn("planner or integration subagent", result["reason"])
+
+    @patch("model_router._log_decision")
     def test_read_only_discovery_leaf_keeps_its_spark_label(self, mocked_log):
         """"layout" is an ordinary noun in frontend source discovery. Judging the
         leaf by that word sent every such leaf to Sol -- the planner had already

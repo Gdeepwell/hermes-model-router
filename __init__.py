@@ -1607,12 +1607,21 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         subagent_marker
         and active_model == str((cfg.get("models") or {}).get("terra", ""))
         and not design_only
+        # Only *unlabelled* child work belongs to the planner tier. A labelled
+        # leaf has already been decided -- accepted, or rejected for a stated
+        # reason -- and this branch used to overwrite both. It tested the label
+        # by string-matching "explicit [" at the front of the reason, which any
+        # later rewrite erases: a [spark] leaf becomes "fallback from disabled
+        # spark" the moment Spark is not callable, so every legitimate Spark
+        # leaf was demoted to the planner tier and its Luna fallback lost.
+        # A rejected leaf fared worse -- "consequential Spark task requires Sol"
+        # was demoted to Terra, turning a deliberate escalation into the exact
+        # tier the escalation existed to avoid.
+        and not _PLAN_LABEL.match(_normalise(latest_user_text))
     ):
         # The delegation default is Terra so the forced first child is a real
-        # planner. A planner may deliberately label bounded leaves [spark] or
-        # consequential leaves [sol]; unlabelled child work remains with the
-        # default_model rather than being silently demoted before it can
-        # decompose the task.
+        # planner. Unlabelled child work remains with the default_model rather
+        # than being silently demoted before it can decompose the task.
         default_model_tier = str(cfg.get("default_model", "terra"))
         if not decision.reason.startswith("explicit ["):
             decision = _decision(default_model_tier, f"{default_model_tier.capitalize()} planner or integration subagent", cfg)
