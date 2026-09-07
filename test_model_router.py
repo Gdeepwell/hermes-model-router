@@ -8,6 +8,7 @@ from unittest.mock import patch
 from model_router import (
     RouteDecision,
     _log_decision,
+    _require_callable,
     _lifecycle_event_kind,
     _prompt_preview,
     classify_request,
@@ -922,6 +923,40 @@ class ModelRouterTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, "sol")
         self.assertIn("Sol-only", decision.reason)
+
+    def test_a_policy_route_is_not_laundered_by_the_fallback_chain(self):
+        """Design work reaches Sol because only Sol may do it. Answering "Sol is
+        unavailable" with Terra performs the work on the tier the rule exists to
+        keep it away from -- and does so exactly when Sol has run out of quota,
+        which is when the rule matters most."""
+        cfg = {
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": {**CALLABLE, "sol": False},
+            "fallbacks": {"sol": "terra"},
+        }
+        decision = classify_request(
+            chat_request("Design a responsive CSS card layout."), config=cfg
+        )
+        self.assertEqual(decision.tier, "sol")
+        self.assertTrue(decision.mandatory)
+        with self.assertRaises(RuntimeError) as raised:
+            _require_callable(decision, cfg)
+        self.assertIn("no fallback may take its place", str(raised.exception))
+
+    def test_a_preference_route_still_falls_back(self):
+        """The rule is about policy, not about every Sol route: a long request
+        prefers Sol for capacity, and demoting that is a quality trade, not a
+        boundary violation."""
+        cfg = {
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": {**CALLABLE, "sol": False},
+            "fallbacks": {"sol": "terra"},
+            "thresholds": {"sol_min_chars": 3500, "luna_max_chars": 700},
+        }
+        decision = classify_request(chat_request("Analyse this. " + "x" * 3600), config=cfg)
+        self.assertEqual(decision.tier, "sol")
+        self.assertFalse(decision.mandatory)
+        self.assertEqual(_require_callable(decision, cfg).tier, "terra")
 
     @patch("model_router._log_decision")
     def test_a_labelled_leaf_survives_its_own_callable_fallback(self, mocked_log):

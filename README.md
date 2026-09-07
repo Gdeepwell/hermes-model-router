@@ -139,6 +139,18 @@ Declining to dispatch is logged too. `terra-spark-orchestration.jsonl` records
 the gate that rejected it — when one is not, so a turn that ran twenty calls
 with no worker says why.
 
+### Policy routes do not fall back
+
+`fallbacks` exists for preference: a long request prefers Sol for capacity, and
+demoting it to Terra is a quality trade. But some routes are policy — design work
+reaches Sol because *only* Sol may do it, and consequential work escalates there
+for the same reason. Satisfying those from the fallback chain would perform the
+work on the tier the rule exists to keep it away from, precisely when Sol is out
+of quota and the rule matters most.
+
+Such a decision is marked at the point it is made and declines the chain, so a
+disabled Sol fails loudly instead of quietly landing design work on Terra.
+
 ## Usage
 
 ### Explicit Model Override

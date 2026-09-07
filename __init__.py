@@ -136,6 +136,10 @@ class RouteDecision:
     # never fires: an eligible-but-never-chosen tier looks identical to one whose
     # preconditions are never met. These signals separate the two.
     vetoed_by: Tuple[str, ...] = ()
+    # True when the tier was chosen by policy or a hard capability limit rather
+    # than preference. Such a route must not be satisfied by the fallback chain:
+    # falling back from it grants exactly the access the decision denied.
+    mandatory: bool = False
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -160,6 +164,14 @@ def _resolve_callable_fallback(
 
     chosen_tier = decision.tier
     if callable_tiers.get(chosen_tier, False):
+        return decision
+
+    # A policy route is not a preference. Design work reaches Sol because only
+    # Sol may do it, so answering "Sol is unavailable" with Terra performs the
+    # work on the tier the rule exists to keep it away from -- and it does so
+    # exactly when Sol has run out of quota, which is when the rule matters
+    # most. Decline the chain and let the caller fail loudly instead.
+    if decision.mandatory:
         return decision
 
     # Tier is disabled — follow fallback chain (max 3 hops to prevent cycles)
@@ -190,6 +202,11 @@ def _require_callable(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDeci
     """Never emit a route for a tier disabled in the dashboard."""
     resolved = _resolve_callable_fallback(decision, cfg)
     if not _is_callable_tier(resolved.tier, cfg):
+        if decision.mandatory:
+            raise RuntimeError(
+                f"'{decision.tier}' is required for this request ({decision.reason}) but is "
+                f"disabled; no fallback may take its place. Re-enable it or narrow the request."
+            )
         raise RuntimeError(
             f"No enabled ModelRouter tier is available for requested '{decision.tier}'"
         )
@@ -537,12 +554,15 @@ def _decision(
     *,
     explicit: bool = False,
     effort_key: Optional[str] = None,
+    mandatory: bool = False,
 ) -> RouteDecision:
     if effort_key is None:
         effort_key = "explicit_sol" if explicit and tier == "sol" else tier
     fallback = {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium"}[tier]
     effort = str((cfg.get("effort") or {}).get(effort_key) or fallback).casefold()
-    return RouteDecision(tier=tier, model=cfg["models"][tier], reason=reason, effort=effort)
+    return RouteDecision(
+        tier=tier, model=cfg["models"][tier], reason=reason, effort=effort, mandatory=mandatory
+    )
 
 
 def _eligible_tiers(
@@ -646,13 +666,13 @@ def _classify_request(
     if _is_design_request(user_text) and not (
         allow_plan_label_over_design and _is_plan_labelled_worker(text)
     ):
-        return _decision("sol", "design analysis or implementation is Sol-only", cfg)
+        return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True)
 
     benchmark_force = _normalise(os.getenv("MODEL_ROUTER_BENCHMARK_FORCE_MODEL", ""))
     if benchmark_force in ("luna", "spark", "terra", "sol"):
         if benchmark_force == "spark":
             if has_image_attachment:
-                return _decision("terra", "image attachment requires a vision-capable route", cfg)
+                return _decision("terra", "image attachment requires a vision-capable route", cfg, mandatory=True)
             if not _is_spark_read_only_request(user_text):
                 return _decision("terra", "Spark is restricted to non-design read-only subtasks", cfg)
         return _decision(benchmark_force, "benchmark environment force override", cfg, explicit=True)
@@ -661,12 +681,12 @@ def _classify_request(
     if override:
         tier = override.group(1)
         if tier == "spark" and has_image_attachment:
-            return _decision("terra", "image attachment requires a vision-capable route", cfg)
+            return _decision("terra", "image attachment requires a vision-capable route", cfg, mandatory=True)
         if tier == "spark" and not _is_spark_read_only_work(user_text):
             if _is_consequential_spark_request(user_text):
-                return _decision("sol", "consequential Spark task requires Sol", cfg)
+                return _decision("sol", "consequential Spark task requires Sol", cfg, mandatory=True)
             if _is_design_request(user_text):
-                return _decision("sol", "design analysis or implementation is Sol-only", cfg)
+                return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True)
             return _decision("terra", "Spark is restricted to non-design read-only subtasks", cfg)
         requested_effort = override.group(2)
         effort_key = "explicit_sol_xhigh" if tier == "sol" and requested_effort == "xhigh" else None
@@ -693,7 +713,7 @@ def _classify_request(
         r"orvosi|medical|diagnos|gyogyszer|befektetes|investment|adozas|tax)\b"
     )
     if sensitive.search(text):
-        return _decision("sol", "sensitive or consequential domain", cfg)
+        return _decision("sol", "sensitive or consequential domain", cfg, mandatory=True)
 
     # High-consequence engineering stays on Sol. Ordinary repository debugging,
     # refactoring and test execution stay on Terra: the implementation benchmark
@@ -704,7 +724,7 @@ def _classify_request(
         r"deep research|mely kutatas|kutass reszletesen)\b"
     )
     if critical_work.search(text):
-        return _decision("sol", "consequential engineering or research task", cfg)
+        return _decision("sol", "consequential engineering or research task", cfg, mandatory=True)
 
     action = re.compile(
         r"\b(modositsd|konfigurald|configure|restart|ujraindit|torol(?:d|j)|delete|remove|"
@@ -716,13 +736,13 @@ def _classify_request(
         r"hosting|gateway|docker|kubernetes|systemd|config|konfiguracio)\b"
     )
     if action.search(text) and consequential_system.search(text):
-        return _decision("sol", "consequential system action", cfg)
+        return _decision("sol", "consequential system action", cfg, mandatory=True)
 
     # Spark is text-only. This hard route sits after the higher-priority Sol
     # safety routes and before every Spark classifier, so an image cannot be
     # routed to Spark by a primary, override, benchmark, or tool-loop branch.
     if has_image_attachment:
-        return _decision("terra", "image attachment requires a vision-capable route", cfg)
+        return _decision("terra", "image attachment requires a vision-capable route", cfg, mandatory=True)
 
     # Unlabelled work is never sent directly to Spark. Terra plans and owns the
     # task first; only its explicit [spark] leaf goals may use Spark.  Repeated
