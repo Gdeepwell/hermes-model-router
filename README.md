@@ -1,6 +1,6 @@
 # Model Router — Hermes Agent Plugin
 
-Intelligent LLM routing for Hermes Agent. Routes between Luna (simple tasks), Spark (read-only coding), Terra (default orchestrator), Sol (complex/security-critical), and Claude Opus 5 bridge — with stable parent policy, bounded delegation, and privacy-safe audit logging.
+Intelligent LLM routing for Hermes Agent. Routes between Qwen (orchestrator), Luna (simple tasks), Spark (read-only coding), Terra (default orchestrator), Sol (complex/security-critical), and Claude Opus 5 bridge — with stable parent policy, bounded delegation, and privacy-safe audit logging.
 
 ## Install
 
@@ -20,9 +20,10 @@ hermes plugins enable model-router
 
 | Tier | Purpose |
 |------|---------|
+| **Qwen** | Orchestrator (default for this deployment) |
 | **Luna** | Simple tasks, short answers, basic questions |
 | **Spark** | Read-only code analysis, bounded coding subtasks |
-| **Terra** | Default orchestrator, general-purpose tasks |
+| **Terra** | Durable default orchestrator, general-purpose tasks |
 | **Sol** | Complex, security-sensitive, critical infrastructure |
 | **Claude Opus 5** | Standalone diagnostic bridge (optional) |
 
