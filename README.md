@@ -1,6 +1,8 @@
 # Model Router — Hermes Agent Plugin
 
-Intelligent LLM routing for Hermes Agent. Routes between Qwen (orchestrator), Luna (simple tasks), Spark (read-only coding), Terra (default orchestrator), Sol (complex/security-critical), and Claude Opus 5 bridge — with stable parent policy, bounded delegation, and privacy-safe audit logging.
+Routing and delegation for Hermes Agent. It keeps the user-facing conversation on one durable parent model, lets that parent's plan choose which model runs each delegated worker, and records every decision in a privacy-safe audit log.
+
+The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and Claude through its own CLI. Spreading independent work across them spends separate quotas in parallel instead of draining one.
 
 ## Install
 
@@ -20,12 +22,12 @@ hermes plugins enable model-router
 
 | Tier | Purpose |
 |------|---------|
-| **Qwen** | Orchestrator (default for this deployment) |
+| **Qwen** | Separate account; reachable as a delegation target |
 | **Luna** | Simple tasks, short answers, basic questions |
 | **Spark** | Read-only code analysis, bounded coding subtasks |
 | **Terra** | Durable default orchestrator, general-purpose tasks |
 | **Sol** | Complex, security-sensitive, critical infrastructure |
-| **Claude Opus 5** | Standalone diagnostic bridge (optional) |
+| **Claude (Opus / Sonnet)** | Read-only review leaves through the Claude CLI, plus a standalone diagnostic bridge |
 
 ### Stable Parent Policy
 
@@ -100,7 +102,7 @@ The plugin loads `router_config.yaml` from the plugin directory automatically.
 # Model availability
 callable:
   luna: true
-  spark: false   # read-only, requires explicit [spark] label
+  spark: false   # disabled here; [spark] leaves follow the `fallbacks` chain
   terra: true
   sol: true
   opus5: true
@@ -112,7 +114,7 @@ default_model: terra
 # Delegation limits (in ~/.hermes/config.yaml)
 delegation:
   max_concurrent_children: 2
-  max_spawn_depth: 1
+  max_spawn_depth: 2
   max_iterations: 16
 
 # Audit logging
@@ -120,11 +122,22 @@ logging:
   prompt_preview_chars: 240
   redact_prompt_preview: true
 
-# Orchestration (auto fan-out)
+# Orchestration: the parent hands the objective to a conductor, which
+# plans the work and delegates the leaves.
 orchestration:
-  enabled: false
-  max_tasks: 1
+  enabled: true
+  min_chars: 60        # too short to decompose; skip the planner round trip
+  max_tasks: 2         # must not exceed delegation.max_concurrent_children
+  rescue_min_calls: 6  # a turn this deep with no worker gets one late checkpoint
 ```
+
+`max_tasks` above `max_concurrent_children` is a hard error, not a partial
+run: `delegate_task` rejects the whole batch. Keep them equal.
+
+Declining to dispatch is logged too. `terra-spark-orchestration.jsonl` records
+`preflight_forced` when a conductor is created and `preflight_skipped` — with
+the gate that rejected it — when one is not, so a turn that ran twenty calls
+with no worker says why.
 
 ## Usage
 
@@ -134,38 +147,72 @@ Prefix your message with a tag:
 
 ```
 [luna] Simple question
-[spark] Read this file and report
 [sol] Complex security analysis
-[opus] Diagnostic review
+[opus] Diagnostic review through the standalone bridge
 ```
+
+A root turn is still assessed for you: design work reaches Sol whatever label
+you type, and `[spark]` on a root turn defers to the orchestrator rather than
+sending user-facing work to a read-only worker.
+
+### Labels inside a plan
+
+The same labels mean something stronger on a delegated worker, because there
+the label was written by a conductor that saw the objective, the repository and
+any screenshot — a better-informed decision than a keyword test on the goal
+text. So a plan label is authoritative, and the design gate does not re-judge it.
+
+The label still has to be true. A `[spark]` leaf must actually be read-only:
+one that writes is rejected, and one touching production, security, credentials
+or payments escalates to Sol. Both are judged from the verbs, independently of
+the subject matter — "identify the layout branches" is source discovery, not
+design work.
 
 ### Delegation
 
-The parent agent can delegate independent bounded subtasks:
+The parent delegates independent bounded subtasks, and picks the route for
+each one with `model`:
 
 ```python
-delegate_task(
-  goal="Bounded independent subtask",
-  context="Handoff capsule: objective, boundaries, relevant decisions, expected evidence. No user-facing output."
-)
+delegate_task(tasks=[
+  {"goal": "[spark] Read-only source discovery for the calendar renderer.",
+   "model": "luna"},
+  {"goal": "[sol] Diagnose and fix the card layout.",
+   "model": "sol"},
+])
+```
+
+`model` is what actually selects the route; the enum is built from
+`delegation.targets` in `~/.hermes/config.yaml`. A goal-text prefix only renames
+the model *inside the default provider*, so it cannot reach a target on another
+account — a leaf meant for Qwen must carry `model: "qwen"`.
+
+A read-only review leaf can go to Claude instead, which needs no `model`
+because its route is the label:
+
+```python
+{"goal": "[sonnet-review] Review the pending calendar diff in /path/to/repo. Report only."}
 ```
 
 ## Policy
 
 1. **Stable Parent** — The user-facing conversation does not silently switch models.
 2. **Delegation is an exception, not the default** — Only for genuinely independent subtasks.
-3. **Worker limits enforced** — Max 2 concurrent children, 1 spawn depth, 16 iterations.
+3. **Worker limits enforced** — Max 2 concurrent children, 2 spawn depth, 16 iterations.
 4. **Privacy-safe audit** — 240-char bounded preview, redacted sensitive data.
-5. **Documented changes** — Every policy change updates README and tests.
+5. **The plan decides the route** — On a delegated worker the conductor's label wins; the router enforces only what the label claims (read-only, non-consequential).
+6. **Documented changes** — Every policy change updates README and tests.
 
 ## Tests
 
 ```bash
-cd ~/.hermes/plugins/model-router
-pytest test_*.py
+cd ~/.hermes/plugins/model_router
+pytest
 ```
 
 ## Version
+
+**1.3.0** — Per-worker route selection across accounts, delegated Claude review leaves, plan labels authoritative on delegated workers, orchestration preflight with a late rescue and logged skip reasons
 
 **1.2.0** — Stable parent policy, bounded delegation, privacy-safe logging
 
