@@ -73,6 +73,24 @@ class ModelRouterDashboardTests(unittest.TestCase):
         self.assertNotIn('ÖSSZES HÍVÁS', renderer)
         self.assertNotIn('worker-hívás', renderer)
 
+    def test_the_two_claude_tiers_are_styled_the_same_way(self):
+        """Duplicating a rule for a new tier is easy to get wrong: dropping the
+        selector prefix turns `.task-tree-marker.opus5{background:…}` into a bare
+        `.sonnet5{background:…}`, which then paints the whole summary card in the
+        tier colour instead of a four-pixel marker."""
+        import re
+
+        css = "".join(re.findall(r"<style>(.*?)</style>", HTML, re.S))
+        selectors = {
+            tier: sorted(
+                match.group(1).replace(tier, "<tier>")
+                for match in re.finditer(r"([^{};]*\.%s[^{};]*)\{" % tier, css)
+            )
+            for tier in ("opus5", "sonnet5")
+        }
+        self.assertTrue(selectors["opus5"], "expected opus5 to carry tier styling")
+        self.assertEqual(selectors["opus5"], selectors["sonnet5"])
+
     def test_final_router_renderer_refreshes_each_summary_counter(self):
         """Asserted against the cards themselves rather than a copied literal:
         adding a tier used to mean editing four separate lists, and a counter
