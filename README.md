@@ -87,6 +87,13 @@ reads Hermes's durable delegation registry and shows running and recent child
 jobs nested under their parent session, with a privacy-safe task preview, state,
 age, selected model and call count. Everything refreshes every 3 seconds.
 
+The Settings tab shows availability alongside the switches. A tier that is
+enabled but cooling carries a pill with the remaining time and the reason, since
+the switch alone would not explain why traffic went elsewhere; underneath, the
+per-account call counts for the same window the conductor is given. Both are read
+through the router's own helpers rather than recomputed, so the panel and the
+routing decision cannot disagree.
+
 The server binds to `127.0.0.1` only, so it is not reachable from the local
 network. Model callability and the default orchestrator can be changed from the
 Settings tab; those writes land in `router_config.yaml` and take effect on the

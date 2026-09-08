@@ -7,6 +7,9 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from unittest.mock import patch
+
+import web_viewer
 from web_viewer import HTML, Handler
 
 
@@ -481,3 +484,24 @@ class DashboardLanguageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouterStatusTests(unittest.TestCase):
+    def test_router_status_degrades_to_empty_instead_of_failing(self):
+        """The dashboard is a standalone script; it must keep serving the log
+        even when the router package cannot be imported."""
+        with patch.dict("sys.modules", {"model_router": None}):
+            status = web_viewer._router_status()
+        self.assertEqual(status, {"cooldowns": {}, "load": {}, "window_minutes": 0})
+
+    def test_router_status_reports_cooling_tiers_and_account_load(self):
+        """Read through the router's own helpers rather than recomputed here, so
+        the panel and the routing decision cannot disagree about availability."""
+        status = web_viewer._router_status()
+        self.assertIn("cooldowns", status)
+        self.assertIn("load", status)
+        self.assertIsInstance(status["cooldowns"], dict)
+        self.assertIsInstance(status["load"], dict)
+        for entry in status["cooldowns"].values():
+            self.assertIn("seconds", entry)
+            self.assertIn("reason", entry)
