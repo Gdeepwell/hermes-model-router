@@ -1148,6 +1148,38 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIn("planner or integration subagent", result["reason"])
 
     @patch("model_router._log_decision")
+    def test_a_leaf_need_not_prove_it_is_read_only_in_a_known_phrasing(self, mocked_log):
+        """The conductor already declared the leaf read-only by labelling it, so
+        demanding a second positive signal lets the router overrule that claim
+        whenever the wording falls outside a hand-written verb list. A Hungarian
+        goal did exactly that on its first outing: "Tárd fel..." reads nothing
+        but says so with a verb the list never had, and eight calls of pure
+        discovery ran on the planner tier."""
+        cfg = {
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": {**CALLABLE, "spark": False, "luna": True},
+            "fallbacks": {"spark": "luna"}, "default_model": "terra",
+        }
+        with patch("model_router._load_config", return_value=cfg):
+            result = route_llm_request(
+                request=chat_request(
+                    "[spark] Tárd fel tényalapon a napi időrács renderelési útvonalát "
+                    "és a rendelkezésre álló teszteket."
+                ),
+                provider="openai-codex", model=MODELS["terra"], platform="subagent",
+                api_call_count=1, turn_id="session:sa-1-discovery:turn",
+            )
+        self.assertEqual(result["metadata"]["tier"], "luna")
+
+    def test_a_root_spark_label_must_still_show_its_read_only_intent(self):
+        """No conductor vouched for a label someone typed, so the stricter form
+        stays: absence of a write verb is not a declaration of intent."""
+        decision = classify_request(
+            chat_request("[spark] Oldd meg ezt a kritikus production hibát"), 1
+        )
+        self.assertEqual(decision.tier, "sol")
+
+    @patch("model_router._log_decision")
     def test_read_only_discovery_leaf_keeps_its_spark_label(self, mocked_log):
         """"layout" is an ordinary noun in frontend source discovery. Judging the
         leaf by that word sent every such leaf to Sol -- the planner had already

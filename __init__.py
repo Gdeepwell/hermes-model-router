@@ -392,9 +392,11 @@ _SPARK_MUTATING_WORK = re.compile(
 )
 _SPARK_READ_ONLY_WORK = re.compile(
     r"\b(inspect|read|review|audit|report|analy[sz]e|compare|search|find|"
-    r"identify|list|check|investigate|research|test[- ]case\s+design|"
-    r"nezd\s+meg|olvasd|ellenorizd|elemezd|jelentsd|keresd|azonositsd|"
-    r"hasonlitsd\s+ossze|kutass)\b"
+    r"identify|list|check|investigate|research|explore|trace|map|survey|"
+    r"enumerate|discover|determine|locate|gather|document|test[- ]case\s+design|"
+    r"nezd\s+meg|nezd\s+at|olvasd|ellenorizd|elemezd|jelentsd|keresd|azonositsd|"
+    r"hasonlitsd\s+ossze|kutass|tard\s+fel|deritsd\s+ki|vizsgald|tekintsd\s+at|"
+    r"gyujtsd\s+ossze|terkepezd\s+fel|merd\s+fel|listazd|allapitsd\s+meg)\b"
 )
 _SPARK_CONSEQUENTIAL_WORK = re.compile(
     r"\b(production|prod|security|biztonsag|auth(?:entication|orization)?|"
@@ -457,25 +459,37 @@ def _is_acknowledgement_only(text: str) -> bool:
 
 
 def _is_spark_read_only_work(text: str) -> bool:
-    """Read-only judged from the verbs alone, independent of the subject.
+    """A plan-labelled leaf is read-only unless it says otherwise.
 
     Separated from the design test because mixing them made the question
     unanswerable: "identify the layout branches" and "implement a CSS card"
     both mention design, so a combined predicate rejected both. The verbs
     separate them cleanly -- one reads, the other writes.
+
+    This side looks for *contradiction*, not corroboration. The conductor has
+    already declared the leaf read-only by labelling it, so demanding a second
+    positive signal means the router overrules that claim whenever the phrasing
+    falls outside a hand-written verb list -- which a Hungarian goal did on its
+    first outing ("Tárd fel..." reads nothing but says so with a verb the list
+    never had). Write verbs are the small, stable set worth enumerating;
+    read-only phrasings are open-ended.
     """
     affirmative = _normalise(_without_negated_safety_constraints(text))
-    return bool(
-        affirmative
-        and not _SPARK_MUTATING_WORK.search(affirmative)
-        and _SPARK_READ_ONLY_WORK.search(affirmative)
-    )
+    return bool(affirmative and not _SPARK_MUTATING_WORK.search(affirmative))
 
 
 def _is_spark_read_only_request(text: str) -> bool:
-    """Spark may receive only affirmative, bounded non-design evidence work."""
-    return _is_spark_read_only_work(text) and not _is_design_request(
-        _normalise(_without_negated_safety_constraints(text))
+    """Spark may receive only affirmative, bounded non-design evidence work.
+
+    The stricter form, for a claim no conductor vouched for: a bare ``[spark]``
+    on a root turn is a label someone typed, so here a positive read-only signal
+    is still required.
+    """
+    affirmative = _normalise(_without_negated_safety_constraints(text))
+    return bool(
+        _is_spark_read_only_work(text)
+        and _SPARK_READ_ONLY_WORK.search(affirmative)
+        and not _is_design_request(affirmative)
     )
 
 
@@ -819,7 +833,15 @@ def _classify_request(
         tier = override.group(1)
         if tier == "spark" and has_image_attachment:
             return _decision("terra", "image attachment requires a vision-capable route", cfg, mandatory=True)
-        if tier == "spark" and not _is_spark_read_only_work(user_text):
+        # A delegated leaf carries a conductor's declaration, so the router
+        # looks only for contradiction. A root [spark] is a label someone typed
+        # with nothing behind it, and still has to show its read-only intent.
+        spark_read_only = (
+            _is_spark_read_only_work(user_text)
+            if allow_plan_label_over_design
+            else _is_spark_read_only_request(user_text)
+        )
+        if tier == "spark" and not spark_read_only:
             if _is_consequential_spark_request(user_text):
                 return _decision("sol", "consequential Spark task requires Sol", cfg, mandatory=True)
             if _is_design_request(user_text):

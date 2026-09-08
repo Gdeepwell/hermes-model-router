@@ -238,6 +238,13 @@ or payments escalates to Sol. Both are judged from the verbs, independently of
 the subject matter — "identify the layout branches" is source discovery, not
 design work.
 
+The check looks for contradiction, not corroboration. A leaf that names no write
+verb passes, because the conductor already declared it read-only by labelling it;
+requiring a second positive signal would let a hand-written verb list overrule
+that declaration on phrasing alone. A root `[spark]` is a label someone typed
+with nothing behind it, and there the stricter form still applies: it has to show
+its read-only intent.
+
 ### Delegation
 
 The parent delegates independent bounded subtasks, and picks the route for
