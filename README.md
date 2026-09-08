@@ -74,6 +74,13 @@ Delegated workers only — a root turn is never diverted into a subprocess.
 Read-only (`--tools Read`, 16 turns, $5, 600s); writing is not offered because
 parallel leaves share one working tree.
 
+**A review leaf must not carry `model`.** Its route is its label. Naming a target
+sends it to a provider the bridge cannot run on — the execution middleware
+returns early off-provider, and the bridge answers in the Codex Responses shape —
+where it silently becomes an ordinary worker on that model with the Claude
+subscription untouched. The route log names that case rather than letting it read
+as a normal worker.
+
 ### Live Dashboard
 
 ```bash
@@ -156,12 +163,14 @@ contract now carries a live figure read from the router's own log:
 ```
 Recent load over the last 60 minutes, in calls per account: openai-codex 82.
 These are call counts from this router's own log, not quota readings — read
-them as relative load. qwen-token has taken none: prefer it for an independent
-leaf that suits it.
+them as relative load. qwen-token has taken none in this window.
 ```
 
 Call counts, deliberately: the runtime does not report tokens or cost to the
-route log, so a percentage would be invented. Only the tail of the log is
+route log, so a percentage would be invented. The sentence states the count and
+stops there — "no calls" reads as spare capacity, but it is equally what an
+exhausted account looks like, and an earlier version of this line recommended an
+account whose weekly quota had already run out. Only the tail of the log is
 parsed, since it reaches tens of megabytes and this runs on the preflight path.
 
 A cooling target is annotated in the same sentence rather than dropped from the
@@ -189,6 +198,12 @@ cooldown:
   failure_window_seconds: 60
   failure_seconds: 60
 ```
+
+Failures are recorded whatever provider served them. The execution middleware
+returns early off-provider because it rewrites `request["model"]` within one
+provider, but noticing that an account refused a call needs none of that — and
+skipping it meant a weekly-quota 429 on the second account left no cooldown at
+all, while the load report kept describing it as the one with no traffic.
 
 The state is a file rather than process memory because the interactive TUI and
 the gateway are separate processes — a note kept in memory would not be seen by
@@ -260,12 +275,15 @@ delegate_task(tasks=[
 ```
 
 `model` is what actually selects the route; the enum is built from
-`delegation.targets` in `~/.hermes/config.yaml`. A goal-text prefix only renames
+`delegation.targets` in `~/.hermes/config.yaml`, filtered to tiers that are
+currently callable. `callable` and `delegation.targets` are separate switches, so
+without that filter a planner can pick a tier the cross-provider guard then
+refuses mid-session, producing a leaf that never runs. A goal-text prefix only renames
 the model *inside the default provider*, so it cannot reach a target on another
 account — a leaf meant for Qwen must carry `model: "qwen"`.
 
-A read-only review leaf can go to Claude instead, which needs no `model`
-because its route is the label:
+A read-only review leaf goes to Claude instead, and must not carry `model` —
+its route is the label:
 
 ```python
 {"goal": "[sonnet-review] Review the pending calendar diff in /path/to/repo. Report only."}
@@ -288,6 +306,8 @@ pytest
 ```
 
 ## Version
+
+**1.4.0** — Cooldowns after quota and repeated failures, per-account load in the routing contract, policy routes that decline the fallback chain, cooling tiers and load shown in the dashboard
 
 **1.3.0** — Per-worker route selection across accounts, delegated Claude review leaves, plan labels authoritative on delegated workers, orchestration preflight with a late rescue and logged skip reasons
 
