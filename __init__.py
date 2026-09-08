@@ -128,6 +128,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "failure_window_seconds": 60,
         "failure_seconds": 60,
     },
+    "usage_report": {"enabled": True, "window_seconds": 3600},
     "shadow": {
         "enabled": False,
         "limit": 10,
@@ -201,6 +202,9 @@ def _resolve_callable_fallback(
     # No valid fallback found — return original decision unchanged
     return decision
 
+
+# The route log reaches tens of megabytes; the recent window lives in its tail.
+_USAGE_TAIL_BYTES = 1_000_000
 
 _COOLDOWN_LOCK = threading.Lock()
 _COOLDOWN_CACHE: Dict[str, Any] = {"key": None, "state": {}}
@@ -943,7 +947,14 @@ def _log_decision(decision: RouteDecision, kwargs: Dict[str, Any], cfg: Dict[str
     log_cfg = cfg.get("logging", {})
     if not log_cfg.get("enabled", True):
         return
-    path = Path(os.path.expanduser(str(log_cfg.get("path", "~/.hermes/logs/model-router.jsonl"))))
+    # No invented default: a config that does not name the audit log does not
+    # get written to it. Defaulting here meant every caller holding a partial
+    # config -- the test suite above all -- appended to the real log, and those
+    # entries then show up as real traffic to anything that reads it back.
+    configured = str(log_cfg.get("path") or "").strip()
+    if not configured:
+        return
+    path = Path(os.path.expanduser(configured))
     request = kwargs.get("request")
     event_kind = _lifecycle_event_kind(request)
     delegation_id = _completion_delegation_id(request) if event_kind == "async_delegation_completion" else ""
@@ -1227,7 +1238,69 @@ def _delegation_target_names() -> Tuple[str, ...]:
         return ()
 
 
-def _model_param_contract(orchestrator_tier: str) -> str:
+def _recent_account_load(cfg: Dict[str, Any], window_seconds: int) -> Dict[str, int]:
+    """Calls per account over the recent window, read from this router's own log.
+
+    Call counts, not quota readings: the runtime does not report tokens or cost
+    to the route log, so anything phrased as "83% used" would be invented. A
+    relative load figure is what the data supports, and it is enough to tell an
+    idle account from a busy one.
+
+    Only the tail of the log is parsed. It reaches tens of megabytes, and this
+    runs on the preflight path where a full scan would be felt.
+    """
+    log_cfg = cfg.get("logging") or {}
+    path = Path(os.path.expanduser(str(log_cfg.get("path") or "")))
+    tier_providers = cfg.get("tier_providers") or {}
+    if not str(path) or not tier_providers:
+        return {}
+    cutoff = datetime.now(timezone.utc).timestamp() - max(60, int(window_seconds))
+    counts: Dict[str, int] = {}
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _USAGE_TAIL_BYTES))
+            if size > _USAGE_TAIL_BYTES:
+                handle.readline()  # discard the partial line the seek landed in
+            for raw in handle:
+                try:
+                    entry = json.loads(raw)
+                    observed = datetime.fromisoformat(
+                        str(entry.get("timestamp") or "").replace("Z", "+00:00")
+                    )
+                except Exception:
+                    continue
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+                if observed.timestamp() < cutoff:
+                    continue
+                account = tier_providers.get(str(entry.get("tier") or ""))
+                if account:
+                    counts[account] = counts.get(account, 0) + 1
+    except OSError:
+        return {}
+    return counts
+
+
+def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Per-target cooldown note, empty when the target is available.
+
+    Cooling targets are annotated rather than dropped. LiteLLM excludes a
+    deployment that would exceed its limit, but its deployments are
+    interchangeable and ours are not: hiding a cooling Sol would invite the
+    planner to send design work somewhere it is not allowed, which the
+    classifier then refuses outright. Saying "unavailable, and for how long"
+    lets the conductor wait or narrow the objective instead.
+    """
+    notes = {}
+    for name in names:
+        remaining = _tier_cooldown_remaining(name, cfg)
+        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min]" if remaining else ""
+    return notes
+
+
+def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None) -> str:
     """The sentence that makes route choice expressible instead of implied.
 
     A ``[sol]``/``[spark]`` goal prefix is only a model rename inside the
@@ -1236,14 +1309,51 @@ def _model_param_contract(orchestrator_tier: str) -> str:
     registry shows every child ever spawned running on the default model, even
     ones whose goal was explicitly prefixed for another target.
     """
+    cfg = cfg if isinstance(cfg, dict) else _load_config()
     names = [name for name in _delegation_target_names() if name != orchestrator_tier]
-    scope = f" (available targets: {', '.join(names)})" if names else ""
+    notes = _target_availability(names, cfg)
+    scope = (
+        f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
+    )
     return (
         f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
         "A goal-text prefix only renames the model inside the default provider and cannot reach a "
         "target on a separate account, so a leaf intended for one must carry model:<name>. Prefer "
         "spreading genuinely independent leaves across different targets so separate accounts and "
-        "quotas absorb the work in parallel; never split work merely to use more targets."
+        "quotas absorb the work in parallel; never split work merely to use more targets. "
+        f"{_account_load_sentence(cfg)}"
+    )
+
+
+def _account_load_sentence(cfg: Dict[str, Any]) -> str:
+    """Tell the conductor where the traffic has actually been going.
+
+    Spreading work was previously an instruction with nothing behind it: the
+    conductor was told to use separate accounts but had no way to see that one
+    of them had taken every call for the last hour and another had taken none.
+    """
+    policy = cfg.get("usage_report") or {}
+    if not policy.get("enabled", True):
+        return ""
+    window = int(policy.get("window_seconds", 3600) or 3600)
+    counts = _recent_account_load(cfg, window)
+    if not counts:
+        return ""
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    summary = ", ".join(f"{account} {calls}" for account, calls in ordered)
+    idle = [
+        account
+        for account in sorted({str(v) for v in (cfg.get("tier_providers") or {}).values()})
+        if counts.get(account, 0) == 0
+    ]
+    tail = (
+        f" {', '.join(idle)} has taken none: prefer it for an independent leaf that suits it."
+        if idle else ""
+    )
+    return (
+        f"Recent load over the last {window // 60} minutes, in calls per account: {summary}. "
+        f"These are call counts from this router's own log, not quota readings -- read them as "
+        f"relative load.{tail}"
     )
 
 
@@ -1278,7 +1388,7 @@ def _prepare_orchestration_delegation(
         f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Spark/Sol workers receive a "
         "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
-        f"{_model_param_contract(orchestrator_tier)} "
+        f"{_model_param_contract(orchestrator_tier, cfg)} "
         "Write the goal as objective and acceptance criteria only: what must change, where, and how it is verified. "
         "Do not restate this routing policy inside the goal. The conductor already receives it verbatim as an immutable "
         "contract in the required `context` field, and the goal is re-read as a description of the work -- routing "
@@ -1316,7 +1426,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review]: those run on Claude through its own CLI and draw on a separate quota, so prefer them for review whenever the leaf writes nothing. Use [sonnet-review] for routine checks and reserve [opus-review] for consequential or hard review. Such a leaf must name the repository, receive every fact it needs in the goal, and never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review]: those run on Claude through its own CLI and draw on a separate quota, so prefer them for review whenever the leaf writes nothing. Use [sonnet-review] for routine checks and reserve [opus-review] for consequential or hard review. Such a leaf must name the repository, receive every fact it needs in the goal, and never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }

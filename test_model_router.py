@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 import tempfile
 
 import unittest
@@ -9,8 +10,11 @@ from model_router import (
     RouteDecision,
     _is_callable_tier,
     _log_decision,
+    _account_load_sentence,
+    _recent_account_load,
     _record_tier_failure,
     _require_callable,
+    _target_availability,
     _tier_cooldown_remaining,
     _lifecycle_event_kind,
     _prompt_preview,
@@ -926,6 +930,73 @@ class ModelRouterTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, "sol")
         self.assertIn("Sol-only", decision.reason)
+
+    def _usage_log(self, directory, entries):
+        path = Path(directory) / "route.jsonl"
+        now = datetime.now(timezone.utc)
+        lines = []
+        for tier, age_seconds in entries:
+            stamp = (now - timedelta(seconds=age_seconds)).replace(microsecond=0).isoformat()
+            lines.append(json.dumps({"timestamp": stamp, "tier": tier, "turn_id": "s:s:1"}))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def _usage_cfg(self, log_path, cooldown_path):
+        return {
+            "enabled": True, "provider": "openai-codex", "models": MODELS, "callable": CALLABLE,
+            "tier_providers": {"luna": "openai-codex", "spark": "openai-codex",
+                               "terra": "openai-codex", "sol": "openai-codex",
+                               "qwen": "qwen-token"},
+            "logging": {"enabled": True, "path": str(log_path)},
+            "usage_report": {"enabled": True, "window_seconds": 3600},
+            "cooldown": {"enabled": True, "path": str(cooldown_path)},
+        }
+
+    def test_account_load_counts_only_the_recent_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = self._usage_log(directory, [
+                ("terra", 60), ("sol", 120), ("qwen", 180),
+                ("terra", 7200),  # older than the window
+            ])
+            cfg = self._usage_cfg(log, Path(directory) / "cool.json")
+            self.assertEqual(
+                _recent_account_load(cfg, 3600), {"openai-codex": 2, "qwen-token": 1}
+            )
+
+    def test_the_contract_names_an_account_that_has_taken_nothing(self):
+        """Spreading work was an instruction with nothing behind it: the conductor
+        was told to use separate accounts but could not see that one had taken
+        every call for an hour and another had taken none."""
+        with tempfile.TemporaryDirectory() as directory:
+            log = self._usage_log(directory, [("terra", 30), ("sol", 60)])
+            cfg = self._usage_cfg(log, Path(directory) / "cool.json")
+            sentence = _account_load_sentence(cfg)
+            self.assertIn("openai-codex 2", sentence)
+            self.assertIn("qwen-token has taken none", sentence)
+            # Call counts are what the log supports; a percentage would be invented.
+            self.assertIn("not quota readings", sentence)
+
+    def test_a_cooling_target_is_annotated_rather_than_hidden(self):
+        """LiteLLM drops a deployment over its limit, but its deployments are
+        interchangeable and ours are not: hiding a cooling Sol would invite the
+        planner to send design work somewhere the classifier then refuses."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._usage_cfg(Path(directory) / "route.jsonl", Path(directory) / "cool.json")
+            _record_tier_failure("sol", cfg, quota=True)
+            notes = _target_availability(["luna", "sol"], cfg)
+            self.assertEqual(notes["luna"], "")
+            self.assertIn("unavailable for another", notes["sol"])
+
+    def test_a_config_without_a_log_path_writes_nothing(self):
+        """Test-suite entries appended to the real audit log then read back as
+        real traffic -- 56 of them, which is exactly what the usage report
+        attributed to an account that had taken no calls at all."""
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "route.jsonl"
+            cfg = {"enabled": True, "models": MODELS, "callable": CALLABLE,
+                   "logging": {"enabled": True}}
+            _log_decision(RouteDecision("terra", MODELS["terra"], "any"), {"request": {}}, cfg)
+            self.assertFalse(marker.exists())
 
     def _cooldown_cfg(self, path, **overrides):
         policy = {

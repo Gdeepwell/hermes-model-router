@@ -139,6 +139,35 @@ Declining to dispatch is logged too. `terra-spark-orchestration.jsonl` records
 the gate that rejected it — when one is not, so a turn that ran twenty calls
 with no worker says why.
 
+### Usage reporting
+
+Spreading work across accounts used to be an instruction with nothing behind it:
+the conductor was told to use separate accounts, but could not see that one had
+taken every call for the last hour and another had taken none. The routing
+contract now carries a live figure read from the router's own log:
+
+```
+Recent load over the last 60 minutes, in calls per account: openai-codex 82.
+These are call counts from this router's own log, not quota readings — read
+them as relative load. qwen-token has taken none: prefer it for an independent
+leaf that suits it.
+```
+
+Call counts, deliberately: the runtime does not report tokens or cost to the
+route log, so a percentage would be invented. Only the tail of the log is
+parsed, since it reaches tens of megabytes and this runs on the preflight path.
+
+A cooling target is annotated in the same sentence rather than dropped from the
+list. LiteLLM excludes a deployment that is over its limit, but its deployments
+are interchangeable and these are not — hiding a cooling Sol would invite the
+planner to send design work somewhere the classifier then refuses outright.
+
+```yaml
+usage_report:
+  enabled: true
+  window_seconds: 3600
+```
+
 ### Cooldowns
 
 A tier that just rejected a call for quota is not a candidate for the next one.
