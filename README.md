@@ -20,15 +20,23 @@ hermes plugins enable model-router
 
 ### Automatic Routing
 
-| Tier | Purpose |
-|------|---------|
-| **Qwen** | Separate account; reachable as a delegation target |
-| **Luna** | Simple tasks, short answers, basic questions |
-| **Spark** | Read-only code analysis, bounded coding subtasks |
-| **Terra** | Durable default orchestrator, general-purpose tasks |
-| **Sol** | Complex, security-sensitive, critical infrastructure |
-| **Claude Opus 5** | Separate account; delegation target for consequential work |
-| **Claude Sonnet 5** | Separate account; delegation target, the default Claude choice |
+The tier name is what you write in `model:` and in `router_config.yaml`. The
+account is the point of the table: spreading independent work across the three
+is what keeps a single quota from carrying everything.
+
+| Tier | Model | Account | Purpose |
+|------|-------|---------|---------|
+| `terra` | GPT-5.6 Terra | Codex | Durable default parent and conductor |
+| `luna` | GPT-5.6 Luna | Codex | Simple tasks, short answers |
+| `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
+| `sol` | GPT-5.6 Sol | Codex | Complex, security-sensitive, design |
+| `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
+| `opus5` | Claude Opus 5 | Claude subscription | Delegation target for consequential work |
+| `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the default Claude choice |
+
+`qwen`, `opus5` and `sonnet5` are delegation targets rather than routable tiers:
+the middleware cannot move a call across providers, so they are reached by a
+plan choosing them with `model:`, not by the router switching to them mid-turn.
 
 ### Stable Parent Policy
 
