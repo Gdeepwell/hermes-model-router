@@ -31,8 +31,8 @@ is what keeps a single quota from carrying everything.
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
 | `sol` | GPT-5.6 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
-| `opus5` | Claude Opus 5 | Claude, extra usage or API key | Delegation target, off by default (see below) |
-| `sonnet5` | Claude Sonnet 5 | Claude, extra usage or API key | Delegation target, off by default (see below) |
+| `opus5` | Claude Opus 5 | Claude subscription | Delegation target, off by default (see below) |
+| `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, off by default (see below) |
 
 `qwen`, `opus5` and `sonnet5` are delegation targets rather than routable tiers:
 the middleware cannot move a call across providers, so they are reached by a
@@ -103,24 +103,38 @@ delegation:
       model: claude-sonnet-5
 ```
 
-**These targets are off by default, and subscription OAuth is why.** Anthropic
-does not fund third-party API access from a Claude plan: a delegated child is a
-third-party app, and every call returns
+**These targets ship switched off, because on some accounts every call returns:**
 
 ```
 HTTP 400 invalid_request_error
 Third-party apps now draw from your extra usage, not your plan limits.
+Add more at claude.ai/settings/usage and keep going.
 ```
 
-Hermes already sends the Claude Code beta headers and system identity, and the
-answer is the same — this is a deliberate boundary on the provider's side, not a
-configuration gap, and it is not something to work around. Turn these targets on
-only with extra-usage credit or an `ANTHROPIC_API_KEY` on pay-as-you-go billing.
+Easy to misread as a policy prohibition. It is not one: the same Hermes on
+another Pro account draws on plan limits and works. On the failing account these
+were ruled out by measurement — the credential (both pooled tokens, and the
+Claude Code login with the pool emptied), request size (a 12k-token probe
+passes), the presence of tools, the Hermes version (its OAuth path is identical
+to upstream), and delegation itself, since a plain
+`hermes -z -m claude-sonnet-5 --provider anthropic` reproduces it.
 
-The route that does draw on the plan is the CLI bridge below: `claude -p` *is*
-Claude Code, so a `[sonnet-review]` or `[opus-review]` leaf spends the
-subscription legitimately. It is read-only and replaces a single call rather than
-running an agent, which is the trade for staying inside what the plan covers.
+The only difference found against a working account is visible here:
+
+```bash
+curl -s https://api.anthropic.com/api/oauth/usage \
+  -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN" \
+  -H "anthropic-beta: oauth-2025-04-20" | jq '.extra_usage, .five_hour, .seven_day'
+```
+
+The working account had `credits_ever_enabled: true` while spending nothing
+(`used_credits: 0.0`); the failing one had never enabled extra usage at all.
+Once your calls succeed, turn the targets on with `callable.opus5` and
+`callable.sonnet5`.
+
+Meanwhile the CLI bridge below does draw on the plan: `claude -p` *is* Claude
+Code, so a `[sonnet-review]` or `[opus-review]` leaf works regardless. It is
+read-only and replaces a single call instead of running an agent.
 
 The router does not *route* these children — `route_llm_request` returns `None`
 for a model outside its own tier map, so nothing here rewrites them — but it does
@@ -376,7 +390,7 @@ pytest
 
 ## Version
 
-**1.6.1** — Claude delegation targets switched off: a Claude plan does not fund third-party API access, so the CLI bridge is the route that spends the subscription
+**1.6.2** — Claude delegation targets ship off pending an account-side 400; what was ruled out, and how to check it, is documented rather than guessed at
 
 **1.6.0** — Substitution groups across accounts, cooling targets annotated with their replacement, orchestrator selector restricted to routable tiers
 
