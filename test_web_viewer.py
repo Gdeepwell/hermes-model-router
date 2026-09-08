@@ -525,7 +525,21 @@ class RouterStatusTests(unittest.TestCase):
         even when the router package cannot be imported."""
         with patch.dict("sys.modules", {"model_router": None}):
             status = web_viewer._router_status()
-        self.assertEqual(status, {"cooldowns": {}, "load": {}, "window_minutes": 0})
+        self.assertEqual(
+            status, {"cooldowns": {}, "load": {}, "window_minutes": 0, "routable": []}
+        )
+
+    def test_only_a_routable_tier_is_offered_as_orchestrator(self):
+        """A delegation-only target has no model entry in the router, so picking
+        it raises a KeyError on the first routing decision. The card and the
+        callability switch still apply to it -- only the orchestrator role does
+        not."""
+        status = web_viewer._router_status()
+        self.assertNotIn("opus5", status["routable"])
+        self.assertNotIn("sonnet5", status["routable"])
+        self.assertIn("terra", status["routable"])
+        renderer = HTML[HTML.index("const select=$('default-model-select');"):]
+        self.assertIn("currentConfig.routable", renderer.split("}")[0] + renderer[:400])
 
     def test_router_status_reports_cooling_tiers_and_account_load(self):
         """Read through the router's own helpers rather than recomputed here, so

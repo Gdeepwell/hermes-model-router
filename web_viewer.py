@@ -33,7 +33,7 @@ def _router_status() -> dict:
     Recomputing either of these here instead would let the panel and the routing
     decision disagree about which tiers are available.
     """
-    empty = {"cooldowns": {}, "load": {}, "window_minutes": 0}
+    empty = {"cooldowns": {}, "load": {}, "window_minutes": 0, "routable": []}
     try:
         import sys
 
@@ -64,6 +64,11 @@ def _router_status() -> dict:
             "cooldowns": cooldowns,
             "load": _recent_account_load(config, window),
             "window_minutes": max(1, window // 60),
+            # Which tiers can actually hold the orchestrator role. A tier the
+            # router has no model entry for cannot: picking it raises a KeyError
+            # on the first routing decision. Served rather than hardcoded so the
+            # dropdown cannot drift from the router's own tier map again.
+            "routable": sorted(config.get("models") or {}),
         }
     except Exception:
         return empty
@@ -501,7 +506,10 @@ function renderSettings(){
   }
   const select=$('default-model-select');
   select.innerHTML='';
-  for(const model of models){
+  // Only a routable tier can be the orchestrator; a delegation-only target has
+  // no model entry in the router and raises on the first decision.
+  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m));
+  for(const model of (orchestrators.length?orchestrators:models)){
     const option=document.createElement('option');
     option.value=model;
     option.textContent=modelLabels[model];
