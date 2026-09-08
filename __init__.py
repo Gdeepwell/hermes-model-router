@@ -94,6 +94,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "max_turns": 8,
         "max_budget_usd": 5.0,
         "timeout_seconds": 300,
+        "lifecycle_path": "~/.hermes/logs/claude-code-bridge.jsonl",
         "reviewer": {"enabled": False, "max_chars": 8000},
         # Delegated read-only Claude review, off by default and independent of
         # ``enabled`` above, which also arms the label-free coding classifier.
@@ -406,6 +407,7 @@ _SPARK_CONSEQUENTIAL_WORK = re.compile(
 
 
 _PLAN_LABEL = re.compile(r"^\s*\[(luna|spark|terra|sol)(?::xhigh)?\](?:\s|$)")
+_CLAUDE_REVIEW_LABEL = re.compile(r"^\s*\[(opus|sonnet)5?-review\](?:\s|$)")
 
 
 def _is_plan_labelled_worker(text: str) -> bool:
@@ -1332,7 +1334,13 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
     ones whose goal was explicitly prefixed for another target.
     """
     cfg = cfg if isinstance(cfg, dict) else _load_config()
-    names = [name for name in _delegation_target_names() if name != orchestrator_tier]
+    # A target whose tier is switched off is not a route: the cross-provider guard
+    # raises for it mid-session, so offering it produces a leaf that never runs.
+    names = [
+        name for name in _delegation_target_names()
+        if name != orchestrator_tier
+        and (name not in (cfg.get("models") or {}) or _is_callable_tier(name, cfg))
+    ]
     notes = _target_availability(names, cfg)
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
@@ -1368,10 +1376,10 @@ def _account_load_sentence(cfg: Dict[str, Any]) -> str:
         for account in sorted({str(v) for v in (cfg.get("tier_providers") or {}).values()})
         if counts.get(account, 0) == 0
     ]
-    tail = (
-        f" {', '.join(idle)} has taken none: prefer it for an independent leaf that suits it."
-        if idle else ""
-    )
+    # "No calls" reads as spare capacity, but it is equally what an exhausted
+    # account looks like -- which is exactly what Qwen was when this sentence
+    # last recommended it. State the fact and leave the inference alone.
+    tail = f" {', '.join(idle)} has taken none in this window." if idle else ""
     return (
         f"Recent load over the last {window // 60} minutes, in calls per account: {summary}. "
         f"These are call counts from this router's own log, not quota readings -- read them as "
@@ -1411,6 +1419,7 @@ def _prepare_orchestration_delegation(
         "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
         f"{_model_param_contract(orchestrator_tier, cfg)} "
+        "A [sonnet-review] or [opus-review] leaf is the one exception: it takes no 'model', because its route is its label. "
         "Write the goal as objective and acceptance criteria only: what must change, where, and how it is verified. "
         "Do not restate this routing policy inside the goal. The conductor already receives it verbatim as an immutable "
         "contract in the required `context` field, and the goal is re-read as a description of the work -- routing "
@@ -1448,7 +1457,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review]: those run on Claude through its own CLI and draw on a separate quota, so prefer them for review whenever the leaf writes nothing. Use [sonnet-review] for routine checks and reserve [opus-review] for consequential or hard review. Such a leaf must name the repository, receive every fact it needs in the goal, and never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review]: those run on Claude through its own CLI and draw on a separate quota, so prefer them for review whenever the leaf writes nothing. Use [sonnet-review] for routine checks and reserve [opus-review] for consequential or hard review. Such a leaf must name the repository, receive every fact it needs in the goal, and never be asked to edit, run commands, or implement. Never set 'model' on a review leaf and never count it against the load figures above: its route is the label, and naming a target instead sends it to a provider the Claude bridge cannot run on, where it silently becomes an ordinary worker on that model. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -1964,6 +1973,23 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
             cfg,
         )
 
+    # A review leaf that reached another provider cannot be handed to the Claude
+    # bridge: the execution middleware returns early off-provider, and the bridge
+    # answers in the Codex Responses shape. Without saying so it just looks like
+    # an ordinary worker on that model, which is how a [sonnet-review] leaf ran
+    # to completion on Qwen with the Claude subscription untouched.
+    if (
+        str(kwargs.get("provider", "")).casefold() != str(cfg.get("provider", "")).casefold()
+        and _CLAUDE_REVIEW_LABEL.match(_normalise(latest_user_text))
+    ):
+        decision = replace(
+            decision,
+            reason=(
+                f"Claude review unavailable on provider "
+                f"'{kwargs.get('provider')}'; ran as an ordinary {decision.tier} worker"
+            ),
+        )
+
     routed = forced_preflight_request or forced_shadow_request or dict(request)
     # TokenPlan's Anthropic-compatible Qwen endpoint rejects OpenAI/Codex
     # control fields. Sanitize the final request after every orchestration,
@@ -2384,7 +2410,26 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     provider = str(kwargs.get("provider", "")).casefold()
     configured_provider = str(cfg.get("provider", "openai-codex")).casefold()
     if not isinstance(request, dict) or not callable(next_call) or provider != configured_provider:
-        return next_call(request)
+        if not isinstance(request, dict) or not callable(next_call):
+            return next_call(request)
+        # The guard below exists because this middleware rewrites request["model"]
+        # within one provider. Noticing that an account just refused a call needs
+        # none of that, and skipping it here is why a Qwen weekly-quota 429 left
+        # no cooldown -- the conductor was still being told that account was idle.
+        try:
+            return next_call(request)
+        except Exception as error:
+            if _is_quota_exhaustion(error) or _is_transient_provider_failure(error):
+                _record_tier_failure(
+                    next(
+                        (tier for tier, model in (cfg.get("models") or {}).items()
+                         if model == str(request.get("model", ""))),
+                        "",
+                    ),
+                    cfg,
+                    quota=_is_quota_exhaustion(error),
+                )
+            raise
 
     opus_context = {key: value for key, value in kwargs.items() if key not in {"request", "next_call", "retry_call"}}
     try:

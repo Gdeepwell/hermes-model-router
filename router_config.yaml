@@ -29,6 +29,7 @@ coding_agent:
   max_turns: 8
   max_budget_usd: 5.0
   timeout_seconds: 300
+  lifecycle_path: ~/.hermes/logs/claude-code-bridge.jsonl
   explicit_ui:
     enabled: true
     max_chars: 1200

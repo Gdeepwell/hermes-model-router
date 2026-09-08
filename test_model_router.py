@@ -11,6 +11,7 @@ from model_router import (
     _is_callable_tier,
     _log_decision,
     _account_load_sentence,
+    _model_param_contract,
     _recent_account_load,
     _record_tier_failure,
     _require_callable,
@@ -1031,6 +1032,46 @@ class ModelRouterTests(unittest.TestCase):
                     )
                 self.assertFalse(_is_callable_tier("sol", cfg))
                 self.assertGreater(_tier_cooldown_remaining("sol", cfg), 600)
+
+    def test_a_failure_on_another_provider_is_still_recorded(self):
+        """The provider guard exists because this middleware rewrites
+        request["model"] within one provider. Noticing that an account just
+        refused a call needs none of that, and skipping it meant a Qwen weekly
+        quota 429 left no cooldown -- while the load report kept describing that
+        account as the one with no traffic."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._cooldown_cfg(Path(directory) / "cooldowns.json")
+
+            def exhausted(_request):
+                raise RuntimeError(
+                    "HTTP 429: Your token-plan 1-week quota has been exhausted."
+                )
+
+            cfg["models"] = {**MODELS, "qwen": "qwen3.7-plus"}
+            with patch("model_router._load_config", return_value=cfg):
+                with self.assertRaises(RuntimeError):
+                    run_llm_with_transient_failover(
+                        request={**chat_request("Anything."), "model": "qwen3.7-plus"},
+                        next_call=exhausted,
+                        provider="qwen-token",           # not the configured provider
+                        api_mode="anthropic_messages",
+                        turn_id="off-provider-turn",
+                    )
+                self.assertGreater(_tier_cooldown_remaining("qwen", cfg), 600)
+
+    def test_a_switched_off_tier_is_not_offered_as_a_target(self):
+        """The cross-provider guard raises for a disabled tier mid-session, so
+        offering it produces a leaf that never runs: exactly what happened when
+        a review leaf was sent to Qwen while qwen was callable: false."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._cooldown_cfg(Path(directory) / "cooldowns.json")
+            cfg["callable"] = {**CALLABLE, "qwen": False}
+            cfg["models"] = {**MODELS, "qwen": "qwen3.7-plus"}
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "qwen", "sol")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("luna", contract)
+        self.assertNotIn("qwen", contract)
 
     def test_a_cooling_tier_falls_back_but_a_policy_route_still_refuses(self):
         with tempfile.TemporaryDirectory() as directory:

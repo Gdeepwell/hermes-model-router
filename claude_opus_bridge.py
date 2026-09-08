@@ -108,8 +108,10 @@ def _effective_model(payload: dict[str, Any], expected: str = CANONICAL_OPUS_MOD
     return ""
 
 
-def _append_lifecycle(path: Path, event: dict[str, Any]) -> None:
+def _append_lifecycle(path: Path | None, event: dict[str, Any]) -> None:
     """Append one self-contained event without ever persisting task text."""
+    if path is None:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     line = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -151,9 +153,16 @@ def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, ma
 def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False, timeout: int | None = None,
              max_turns: int | None = None, model: str | None = None,
              parent_session_id: str | None = None, parent_turn_id: str | None = None,
-             lifecycle_path: Path = DEFAULT_LIFECYCLE_PATH) -> dict[str, Any]:
+             lifecycle_path: Path | None = None) -> dict[str, Any]:
     if review and write:
         raise ValueError("a Claude review is always read-only")
+    # Not defaulted at the signature: a caller that names no lifecycle log does
+    # not get the production one. Defaulting there is how the test suite wrote
+    # 220 mocked runs into it, which then read back as real Claude activity.
+    if lifecycle_path is None:
+        lifecycle_path = Path(os.path.expanduser(str(
+            (_load_config().get("coding_agent") or {}).get("lifecycle_path") or ""
+        ))) if (_load_config().get("coding_agent") or {}).get("lifecycle_path") else None
     eligible, reason = classify_review_dispatch(task) if review else classify_coding_dispatch(task)
     if not eligible:
         raise ValueError(reason)
