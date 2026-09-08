@@ -2,7 +2,7 @@
 
 Routing and delegation for Hermes Agent. It keeps the user-facing conversation on one durable parent model, lets that parent's plan choose which model runs each delegated worker, and records every decision in a privacy-safe audit log.
 
-The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and Claude through its own CLI. Spreading independent work across them spends separate quotas in parallel instead of draining one.
+The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and a Claude subscription (Opus 5/Sonnet 5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
 
 ## Install
 
@@ -27,7 +27,8 @@ hermes plugins enable model-router
 | **Spark** | Read-only code analysis, bounded coding subtasks |
 | **Terra** | Durable default orchestrator, general-purpose tasks |
 | **Sol** | Complex, security-sensitive, critical infrastructure |
-| **Claude (Opus / Sonnet)** | Read-only review leaves through the Claude CLI, plus a standalone diagnostic bridge |
+| **Claude Opus 5** | Separate account; delegation target for consequential work |
+| **Claude Sonnet 5** | Separate account; delegation target, the default Claude choice |
 
 ### Stable Parent Policy
 
@@ -93,8 +94,10 @@ python3 ~/.hermes/plugins/model_router/web_viewer.py
 # http://localhost:8765
 ```
 
-Routing decisions grouped by prompt, each expandable into its individual API
-calls, with a grouped/raw toggle, tier filters and search. The Agents panel
+A counter card per tier — including the two Claude tiers, whose children the
+router records without routing them — then routing decisions grouped by prompt,
+each expandable into its individual API calls, with a grouped/raw toggle, tier
+filters and search. The Agents panel
 reads Hermes's durable delegation registry and shows running and recent child
 jobs nested under their parent session, with a privacy-safe task preview, state,
 age, selected model and call count. Everything refreshes every 3 seconds.
@@ -125,7 +128,19 @@ callable:
   terra: true
   sol: true
   opus5: true
+  sonnet5: true
   qwen: true
+
+# Which account each tier spends. Claude tiers are delegation targets rather
+# than routable tiers, but they are still counted and switched here.
+tier_providers:
+  luna: openai-codex
+  spark: openai-codex
+  terra: openai-codex
+  sol: openai-codex
+  opus5: anthropic
+  sonnet5: anthropic
+  qwen: qwen-token
 
 # Default parent model
 default_model: terra
@@ -312,6 +327,8 @@ pytest
 ```
 
 ## Version
+
+**1.5.0** — Claude reached natively as a delegation target on subscription OAuth, Claude tiers counted and switchable like any other
 
 **1.4.0** — Cooldowns after quota and repeated failures, per-account load in the routing contract, policy routes that decline the fallback chain, cooling tiers and load shown in the dashboard
 
