@@ -31,8 +31,8 @@ is what keeps a single quota from carrying everything.
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
 | `sol` | GPT-5.6 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
-| `opus5` | Claude Opus 5 | Claude subscription | Delegation target for consequential work |
-| `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the default Claude choice |
+| `opus5` | Claude Opus 5 | Claude, extra usage or API key | Delegation target, off by default (see below) |
+| `sonnet5` | Claude Sonnet 5 | Claude, extra usage or API key | Delegation target, off by default (see below) |
 
 `qwen`, `opus5` and `sonnet5` are delegation targets rather than routable tiers:
 the middleware cannot move a call across providers, so they are reached by a
@@ -103,11 +103,24 @@ delegation:
       model: claude-sonnet-5
 ```
 
-Authentication is subscription OAuth, resolved from the Claude Code credentials
-or the Hermes credential pool. The adapter adds the `claude-code-20250219` and
-`oauth-2025-04-20` beta headers together with the Claude Code system identity —
-that identity is not optional, since without it Anthropic rate-limits the
-traffic, which presents as a quota problem rather than a missing header.
+**These targets are off by default, and subscription OAuth is why.** Anthropic
+does not fund third-party API access from a Claude plan: a delegated child is a
+third-party app, and every call returns
+
+```
+HTTP 400 invalid_request_error
+Third-party apps now draw from your extra usage, not your plan limits.
+```
+
+Hermes already sends the Claude Code beta headers and system identity, and the
+answer is the same — this is a deliberate boundary on the provider's side, not a
+configuration gap, and it is not something to work around. Turn these targets on
+only with extra-usage credit or an `ANTHROPIC_API_KEY` on pay-as-you-go billing.
+
+The route that does draw on the plan is the CLI bridge below: `claude -p` *is*
+Claude Code, so a `[sonnet-review]` or `[opus-review]` leaf spends the
+subscription legitimately. It is read-only and replaces a single call rather than
+running an agent, which is the trade for staying inside what the plan covers.
 
 The router does not *route* these children — `route_llm_request` returns `None`
 for a model outside its own tier map, so nothing here rewrites them — but it does
@@ -362,6 +375,8 @@ pytest
 ```
 
 ## Version
+
+**1.6.1** — Claude delegation targets switched off: a Claude plan does not fund third-party API access, so the CLI bridge is the route that spends the subscription
 
 **1.6.0** — Substitution groups across accounts, cooling targets annotated with their replacement, orchestrator selector restricted to routable tiers
 

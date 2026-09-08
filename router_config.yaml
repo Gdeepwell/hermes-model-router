@@ -11,8 +11,11 @@ callable:
   spark: false
   terra: true
   sol: true
-  opus5: true
-  sonnet5: true
+  # Off: the Anthropic subscription does not fund third-party apps. A delegated
+  # child is one, so every Claude leaf returns HTTP 400 asking for extra-usage
+  # credit. Turn these on only with extra usage or an ANTHROPIC_API_KEY.
+  opus5: false
+  sonnet5: false
   qwen: true
 fallbacks:
   spark: luna
