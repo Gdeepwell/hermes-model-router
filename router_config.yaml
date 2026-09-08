@@ -99,6 +99,15 @@ sol_opus5_preflight:
   owner: sol
   bridge_model: claude-opus-5
   require_successful_auth_probe: true
+peer_groups:
+  heavy:
+  - terra
+  - opus5
+  - qwen
+  light:
+  - luna
+  - sonnet5
+  - spark
 usage_report:
   enabled: true
   window_seconds: 3600

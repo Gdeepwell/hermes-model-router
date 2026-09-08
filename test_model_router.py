@@ -1059,6 +1059,38 @@ class ModelRouterTests(unittest.TestCase):
                     )
                 self.assertGreater(_tier_cooldown_remaining("qwen", cfg), 600)
 
+    def _peer_cfg(self, path):
+        cfg = self._cooldown_cfg(path)
+        cfg["models"] = {**MODELS, "qwen": "qwen3.7-plus"}
+        cfg["callable"] = {**CALLABLE, "qwen": True, "opus5": True, "sonnet5": True}
+        cfg["peer_groups"] = {"heavy": ["terra", "opus5", "qwen"],
+                              "light": ["luna", "sonnet5", "spark"]}
+        return cfg
+
+    def test_a_cooling_target_stays_visible_and_names_its_replacement(self):
+        """Dropping it told the planner only that it was gone. Knowing what
+        replaces it is what turns one account's exhaustion into work continuing
+        somewhere else rather than queueing."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            _record_tier_failure("opus5", cfg, quota=True)
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("opus5 [unavailable for another", contract)
+        self.assertIn("use qwen instead", contract)
+
+    def test_the_substitution_groups_are_stated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("opus5 / qwen", contract)
+        self.assertIn("luna / sonnet5", contract)
+        # Comparable strength is not comparable permission.
+        self.assertIn("Substituting is for capacity only", contract)
+
     def test_a_switched_off_tier_is_not_offered_as_a_target(self):
         """The cross-provider guard raises for a disabled tier mid-session, so
         offering it produces a leaf that never runs: exactly what happened when

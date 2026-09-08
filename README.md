@@ -37,6 +37,33 @@ is what keeps a single quota from carrying everything.
 `qwen`, `opus5` and `sonnet5` are delegation targets rather than routable tiers:
 the middleware cannot move a call across providers, so they are reached by a
 plan choosing them with `model:`, not by the router switching to them mid-turn.
+Any tier in `models` can hold the orchestrator role, including one on another
+account — that choice is made at spawn time, where the provider is still open.
+
+### Substitution groups
+
+`fallbacks` rewrites the model on a call whose provider and credentials are
+already fixed, so it can only ever move work between tiers on one account.
+Moving it between *accounts* has to happen where the provider is still being
+chosen — when the plan picks a target. So peers are expressed to the conductor
+rather than applied behind it:
+
+```yaml
+peer_groups:
+  heavy: [terra, opus5, qwen]
+  light: [luna, sonnet5, spark]
+```
+
+The contract names the groups, and an unavailable target is annotated with its
+live replacement — `opus5 [unavailable for another 15 min; use qwen instead]` —
+instead of vanishing from the list. Dropping it said only that it was gone;
+naming the replacement is what turns one account's exhaustion into work
+continuing somewhere else.
+
+Substitution is for capacity, not permission. A `[spark]` leaf must still be
+read-only wherever it runs, and design work still belongs to Sol — so a cooling
+Sol is shown as unavailable rather than hidden, because waiting for it is a
+legitimate answer and rerouting the work is not.
 
 ### Stable Parent Policy
 
@@ -335,6 +362,8 @@ pytest
 ```
 
 ## Version
+
+**1.6.0** — Substitution groups across accounts, cooling targets annotated with their replacement, orchestrator selector restricted to routable tiers
 
 **1.5.0** — Claude reached natively as a delegation target on subscription OAuth, Claude tiers counted and switchable like any other
 

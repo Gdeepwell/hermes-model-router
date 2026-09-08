@@ -130,6 +130,12 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "failure_seconds": 60,
     },
     "usage_report": {"enabled": True, "window_seconds": 3600},
+    # Targets of comparable strength, on deliberately different accounts. Used
+    # to move work off a loaded or cooling target rather than queueing on it.
+    "peer_groups": {
+        "heavy": ["terra", "opus5", "qwen"],
+        "light": ["luna", "sonnet5", "spark"],
+    },
     "shadow": {
         "enabled": False,
         "limit": 10,
@@ -1307,6 +1313,14 @@ def _recent_account_load(cfg: Dict[str, Any], window_seconds: int) -> Dict[str, 
     return counts
 
 
+def _peers_for(name: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    """Targets of comparable strength that can take this one's work."""
+    for members in (cfg.get("peer_groups") or {}).values():
+        if isinstance(members, list) and name in members:
+            return tuple(peer for peer in members if peer != name)
+    return ()
+
+
 def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str, str]:
     """Per-target cooldown note, empty when the target is available.
 
@@ -1317,10 +1331,19 @@ def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str,
     classifier then refuses outright. Saying "unavailable, and for how long"
     lets the conductor wait or narrow the objective instead.
     """
+    offered = set(names)
     notes = {}
     for name in names:
         remaining = _tier_cooldown_remaining(name, cfg)
-        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min]" if remaining else ""
+        if not remaining:
+            notes[name] = ""
+            continue
+        alive = [
+            peer for peer in _peers_for(name, cfg)
+            if peer in offered and not _tier_cooldown_remaining(peer, cfg)
+        ]
+        instead = f"; use {' or '.join(alive)} instead" if alive else ""
+        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min{instead}]"
     return notes
 
 
@@ -1367,9 +1390,12 @@ def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
     tier: the dashboard toggle otherwise reads as if it governed Claude while
     changing nothing.
     """
-    if name in (cfg.get("callable") or {}):
-        return _is_callable_tier(name, cfg)
-    return True
+    switches = cfg.get("callable") or {}
+    # Deliberately not _is_callable_tier: that folds in the cooldown, and a
+    # cooling target must stay visible. Hiding it invites the planner to route
+    # work somewhere it is not allowed -- a cooling Sol does not make design work
+    # someone else's job -- and it hides the fact that waiting is an option.
+    return switches.get(name) is True if name in switches else True
 
 
 def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None) -> str:
@@ -1398,8 +1424,34 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         "target on a separate account, so a leaf intended for one must carry model:<name>. Prefer "
         "spreading genuinely independent leaves across different targets so separate accounts and "
         "quotas absorb the work in parallel; never split work merely to use more targets. "
+        f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names)}"
         f"{_account_load_sentence(cfg)}"
+    )
+
+
+def _peer_group_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
+    """Name the substitutions, so a loaded target is a choice rather than a wait.
+
+    Dropping an unavailable target from the list told the planner only that it
+    was gone. Knowing what replaces it is what turns one account's exhaustion
+    into work continuing somewhere else.
+    """
+    offered = set(names)
+    groups = [
+        [name for name in members if name in offered]
+        for members in (cfg.get("peer_groups") or {}).values()
+        if isinstance(members, list)
+    ]
+    usable = [group for group in groups if len(group) > 1]
+    if not usable:
+        return ""
+    listed = "; ".join(" / ".join(group) for group in usable)
+    return (
+        f"Comparable in strength and on different accounts, so they substitute for each other "
+        f"when one is loaded or unavailable: {listed}. Substituting is for capacity only -- the "
+        f"rules each label carries still apply, so a Spark leaf must still be read-only and design "
+        f"work still belongs to Sol. "
     )
 
 
