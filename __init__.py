@@ -117,6 +117,17 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "rescue_min_calls": 6,
         "path": "~/.hermes/logs/terra-spark-orchestration.jsonl",
     },
+    # A tier that just rejected a call for quota is not a candidate for the next
+    # one. Held on disk because the interactive TUI and the gateway are separate
+    # processes: an in-memory note would not be seen by the other one.
+    "cooldown": {
+        "enabled": True,
+        "path": "~/.hermes/state/model-router-cooldowns.json",
+        "quota_seconds": 900,
+        "allowed_fails": 3,
+        "failure_window_seconds": 60,
+        "failure_seconds": 60,
+    },
     "shadow": {
         "enabled": False,
         "limit": 10,
@@ -156,14 +167,12 @@ def _resolve_callable_fallback(
     decision: RouteDecision, cfg: Dict[str, Any]
 ) -> RouteDecision:
     """If the chosen tier is not callable, follow the fallback chain once."""
-    callable_tiers = (cfg.get("callable") or {}).copy()
     # Fail closed: a tier is routable only when the live config explicitly says
-    # callable: true. Missing entries must never silently re-enable a model.
-    for tier in ("luna", "spark", "terra", "sol", "opus5", "qwen"):
-        callable_tiers.setdefault(tier, False)
-
+    # callable: true and it is not cooling down. Going through
+    # ``_is_callable_tier`` rather than reading the flag directly is what makes
+    # a cooling tier follow the same path as a disabled one.
     chosen_tier = decision.tier
-    if callable_tiers.get(chosen_tier, False):
+    if _is_callable_tier(chosen_tier, cfg):
         return decision
 
     # A policy route is not a preference. Design work reaches Sol because only
@@ -193,9 +202,129 @@ def _resolve_callable_fallback(
     return decision
 
 
+_COOLDOWN_LOCK = threading.Lock()
+_COOLDOWN_CACHE: Dict[str, Any] = {"key": None, "state": {}}
+
+
+def _cooldown_path(cfg: Dict[str, Any]) -> Optional[Path]:
+    """The shared state file, or None when this config did not name one.
+
+    Deliberately not defaulted to the production path. A component that writes
+    to a shared location must take that location from the config it was handed;
+    inventing one means any caller with a partial config -- a test, a probe --
+    silently writes to the real file and its state leaks into unrelated runs.
+    """
+    configured = str((cfg.get("cooldown") or {}).get("path") or "").strip()
+    return Path(os.path.expanduser(configured)) if configured else None
+
+
+def _read_cooldown_state(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Load the shared cooldown file, cached on its own mtime and size.
+
+    Read on every routing decision, so it must not cost a parse per call; it
+    must also not go stale, because the process that recorded the cooldown is
+    usually not the process that needs to honour it.
+    """
+    path = _cooldown_path(cfg)
+    if path is None:
+        return {}
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}
+    if _COOLDOWN_CACHE.get("key") == key:
+        return _COOLDOWN_CACHE["state"]
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        state = state if isinstance(state, dict) else {}
+    except Exception:
+        state = {}
+    _COOLDOWN_CACHE["key"] = key
+    _COOLDOWN_CACHE["state"] = state
+    return state
+
+
+def _write_cooldown_state(cfg: Dict[str, Any], state: Dict[str, Any]) -> None:
+    path = _cooldown_path(cfg)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:
+        # A cooldown that cannot be persisted must never break routing.
+        pass
+
+
+def _tier_cooldown_remaining(tier: str, cfg: Dict[str, Any]) -> float:
+    """Seconds left on this tier's cooldown, or 0.0 when it is available."""
+    if not (cfg.get("cooldown") or {}).get("enabled", True):
+        return 0.0
+    entry = (_read_cooldown_state(cfg).get("tiers") or {}).get(tier)
+    if not isinstance(entry, dict):
+        return 0.0
+    remaining = float(entry.get("until", 0) or 0) - datetime.now(timezone.utc).timestamp()
+    return remaining if remaining > 0 else 0.0
+
+
+def _enter_cooldown(tier: str, cfg: Dict[str, Any], *, seconds: float, reason: str) -> None:
+    if not tier or not (cfg.get("cooldown") or {}).get("enabled", True):
+        return
+    now = datetime.now(timezone.utc).timestamp()
+    with _COOLDOWN_LOCK:
+        state = dict(_read_cooldown_state(cfg))
+        tiers = dict(state.get("tiers") or {})
+        current = tiers.get(tier) or {}
+        # Never shorten a cooldown already in force: a transient blip arriving
+        # during a quota cooldown must not release the tier early.
+        until = max(float(current.get("until", 0) or 0), now + float(seconds))
+        tiers[tier] = {"until": until, "reason": reason, "recorded_at": now}
+        state["tiers"] = tiers
+        _write_cooldown_state(cfg, state)
+
+
+def _record_tier_failure(tier: str, cfg: Dict[str, Any], *, quota: bool) -> None:
+    """Cool a tier down: at once for quota, or after repeated recent failures."""
+    policy = cfg.get("cooldown") or {}
+    if not tier or not policy.get("enabled", True):
+        return
+    if quota:
+        _enter_cooldown(
+            tier, cfg,
+            seconds=float(policy.get("quota_seconds", 900) or 900),
+            reason="quota exhausted",
+        )
+        return
+    now = datetime.now(timezone.utc).timestamp()
+    window = float(policy.get("failure_window_seconds", 60) or 60)
+    allowed = max(1, int(policy.get("allowed_fails", 3) or 3))
+    with _COOLDOWN_LOCK:
+        state = dict(_read_cooldown_state(cfg))
+        failures = dict(state.get("failures") or {})
+        recent = [float(ts) for ts in (failures.get(tier) or []) if now - float(ts) < window]
+        recent.append(now)
+        failures[tier] = recent[-allowed:]
+        state["failures"] = failures
+        _write_cooldown_state(cfg, state)
+    if len(recent) >= allowed:
+        _enter_cooldown(
+            tier, cfg,
+            seconds=float(policy.get("failure_seconds", 60) or 60),
+            reason=f"{len(recent)} failures within {int(window)}s",
+        )
+
+
 def _is_callable_tier(tier: str, cfg: Dict[str, Any]) -> bool:
     # Live router policy is explicit: missing or malformed entries are disabled.
-    return (cfg.get("callable") or {}).get(tier) is True
+    if (cfg.get("callable") or {}).get(tier) is not True:
+        return False
+    # A tier serving 429s is not available, whatever the dashboard says. Routing
+    # this through callability means the existing fallback chain and the
+    # mandatory-route rule both apply with no further wiring.
+    return _tier_cooldown_remaining(tier, cfg) <= 0
 
 
 def _require_callable(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecision:
@@ -203,9 +332,13 @@ def _require_callable(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDeci
     resolved = _resolve_callable_fallback(decision, cfg)
     if not _is_callable_tier(resolved.tier, cfg):
         if decision.mandatory:
+            cooling = _tier_cooldown_remaining(decision.tier, cfg)
+            unavailable = (
+                f"cooling down for another {int(cooling)}s" if cooling else "disabled"
+            )
             raise RuntimeError(
                 f"'{decision.tier}' is required for this request ({decision.reason}) but is "
-                f"disabled; no fallback may take its place. Re-enable it or narrow the request."
+                f"{unavailable}; no fallback may take its place."
             )
         raise RuntimeError(
             f"No enabled ModelRouter tier is available for requested '{decision.tier}'"
@@ -2136,6 +2269,18 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     except Exception as error:
         active_model = str(request.get("model", ""))
         quota_exhausted = _is_quota_exhaustion(error)
+        # Record before deciding what to do about it. The gap this closes is the
+        # case with no fallback configured, where the old code re-raised and left
+        # nothing behind -- the next call walked into the same exhausted account.
+        if quota_exhausted or _is_transient_provider_failure(error):
+            _record_tier_failure(
+                next(
+                    (tier for tier, model in (cfg.get("models") or {}).items() if model == active_model),
+                    "",
+                ),
+                cfg,
+                quota=quota_exhausted,
+            )
         fallback_model = (
             _quota_fallback_model(active_model, cfg)
             if quota_exhausted

@@ -96,6 +96,13 @@ sol_opus5_preflight:
   owner: sol
   bridge_model: claude-opus-5
   require_successful_auth_probe: true
+cooldown:
+  enabled: true
+  path: ~/.hermes/state/model-router-cooldowns.json
+  quota_seconds: 900
+  allowed_fails: 3
+  failure_window_seconds: 60
+  failure_seconds: 60
 shadow:
   enabled: false
   limit: 0

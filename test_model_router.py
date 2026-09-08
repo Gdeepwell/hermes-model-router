@@ -7,8 +7,11 @@ from unittest.mock import patch
 
 from model_router import (
     RouteDecision,
+    _is_callable_tier,
     _log_decision,
+    _record_tier_failure,
     _require_callable,
+    _tier_cooldown_remaining,
     _lifecycle_event_kind,
     _prompt_preview,
     classify_request,
@@ -923,6 +926,70 @@ class ModelRouterTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, "sol")
         self.assertIn("Sol-only", decision.reason)
+
+    def _cooldown_cfg(self, path, **overrides):
+        policy = {
+            "enabled": True, "path": str(path), "quota_seconds": 900,
+            "allowed_fails": 3, "failure_window_seconds": 60, "failure_seconds": 60,
+        }
+        policy.update(overrides)
+        return {
+            "enabled": True, "provider": "openai-codex", "models": MODELS,
+            "callable": CALLABLE, "fallbacks": {"sol": "terra", "spark": "luna"},
+            "thresholds": {"sol_min_chars": 3500, "luna_max_chars": 700},
+            "cooldown": policy,
+        }
+
+    def test_a_quota_rejection_is_remembered_even_with_no_fallback(self):
+        """The gap this closes: a tier with no configured quota fallback simply
+        re-raised and left nothing behind, so the next call walked straight back
+        into the same exhausted account. The two Hermes processes do not share
+        memory either, which is why the note goes to a file."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._cooldown_cfg(Path(directory) / "cooldowns.json")
+
+            def exhausted(_request):
+                raise RuntimeError("HTTP 429: usage limit reached")
+
+            with patch("model_router._load_config", return_value=cfg):
+                self.assertTrue(_is_callable_tier("sol", cfg))
+                with self.assertRaises(RuntimeError):
+                    run_llm_with_transient_failover(
+                        request={**chat_request("Anything."), "model": MODELS["sol"]},
+                        next_call=exhausted, provider="openai-codex", turn_id="quota-turn",
+                    )
+                self.assertFalse(_is_callable_tier("sol", cfg))
+                self.assertGreater(_tier_cooldown_remaining("sol", cfg), 600)
+
+    def test_a_cooling_tier_falls_back_but_a_policy_route_still_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._cooldown_cfg(Path(directory) / "cooldowns.json")
+            _record_tier_failure("sol", cfg, quota=True)
+
+            long_request = classify_request(chat_request("Analyse this. " + "x" * 3600), config=cfg)
+            self.assertEqual(_require_callable(long_request, cfg).tier, "terra")
+
+            design = classify_request(chat_request("Design a responsive CSS card layout."), config=cfg)
+            with self.assertRaises(RuntimeError) as raised:
+                _require_callable(design, cfg)
+            self.assertIn("cooling down", str(raised.exception))
+
+    def test_repeated_failures_cool_a_tier_down_only_at_the_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._cooldown_cfg(Path(directory) / "cooldowns.json", allowed_fails=3)
+            for _ in range(2):
+                _record_tier_failure("luna", cfg, quota=False)
+                self.assertTrue(_is_callable_tier("luna", cfg))
+            _record_tier_failure("luna", cfg, quota=False)
+            self.assertFalse(_is_callable_tier("luna", cfg))
+
+    def test_a_config_without_a_cooldown_path_writes_nothing(self):
+        """A component that writes to a shared location takes that location from
+        the config it was handed. Inventing a default means any caller with a
+        partial config silently writes to the production file."""
+        cfg = {"enabled": True, "provider": "openai-codex", "models": MODELS, "callable": CALLABLE}
+        _record_tier_failure("sol", cfg, quota=True)
+        self.assertTrue(_is_callable_tier("sol", cfg))
 
     def test_a_policy_route_is_not_laundered_by_the_fallback_chain(self):
         """Design work reaches Sol because only Sol may do it. Answering "Sol is

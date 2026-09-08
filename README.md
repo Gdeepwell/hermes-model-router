@@ -139,6 +139,28 @@ Declining to dispatch is logged too. `terra-spark-orchestration.jsonl` records
 the gate that rejected it — when one is not, so a turn that ran twenty calls
 with no worker says why.
 
+### Cooldowns
+
+A tier that just rejected a call for quota is not a candidate for the next one.
+A 429 puts it in cooldown; repeated failures inside a window do the same.
+
+```yaml
+cooldown:
+  enabled: true
+  path: ~/.hermes/state/model-router-cooldowns.json
+  quota_seconds: 900
+  allowed_fails: 3
+  failure_window_seconds: 60
+  failure_seconds: 60
+```
+
+The state is a file rather than process memory because the interactive TUI and
+the gateway are separate processes — a note kept in memory would not be seen by
+the one that needs it. A cooling tier is simply not callable, so the existing
+fallback chain and the policy rule below both apply with no extra wiring: a
+preference route moves on, a policy route says which tier is cooling and for
+how long.
+
 ### Policy routes do not fall back
 
 `fallbacks` exists for preference: a long request prefers Sol for capacity, and
