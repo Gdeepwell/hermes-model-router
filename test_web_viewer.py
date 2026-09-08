@@ -74,8 +74,19 @@ class ModelRouterDashboardTests(unittest.TestCase):
         self.assertNotIn('worker-hívás', renderer)
 
     def test_final_router_renderer_refreshes_each_summary_counter(self):
+        """Asserted against the cards themselves rather than a copied literal:
+        adding a tier used to mean editing four separate lists, and a counter
+        left out of one of them renders as a card frozen at zero."""
+        import re
+
         renderer = HTML[HTML.rindex("render=function(){"):]
-        self.assertIn("for(const id of ['luna','spark','terra','sol','opus5'])$(id).textContent=summary[id]", renderer)
+        card_ids = re.findall(r'<div class="n" id="([a-z0-9]+)">', HTML)
+        loop = re.search(r"for\(const id of \[([^\]]+)\]\)\$\(id\)\.textContent=summary\[id\]", renderer)
+        self.assertIsNotNone(loop)
+        refreshed = [name.strip("'") for name in loop.group(1).split(",")]
+        # 'total' has its own line; every other card must be in the loop or it
+        # renders frozen at zero, which is what the Qwen card did.
+        self.assertEqual(sorted(refreshed), sorted(set(card_ids) - {"total"}))
         self.assertIn("$('total').textContent=summary.total", renderer)
 
     def test_recent_selector_is_a_root_prompt_limit(self):
@@ -314,7 +325,11 @@ class ModelRouterDashboardTests(unittest.TestCase):
         ]
         probe = source + "\nconst summary=executionSummary(" + json.dumps(runs) + ");console.log(JSON.stringify(summary));"
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
-        self.assertEqual(json.loads(result.stdout), {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34, "opus5": 0})
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34,
+             "opus5": 0, "sonnet5": 0, "qwen": 0},
+        )
         renderer = HTML[HTML.rindex("render=function(){"):]
         self.assertIn("const summary=executionSummary(runData.map(run=>run.scope.calls))", renderer)
         self.assertNotIn("$('total').textContent=allEntries.length", renderer)

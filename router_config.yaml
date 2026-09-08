@@ -12,6 +12,7 @@ callable:
   terra: true
   sol: true
   opus5: true
+  sonnet5: true
   qwen: true
 fallbacks:
   spark: luna
@@ -57,7 +58,8 @@ tier_providers:
   spark: openai-codex
   terra: openai-codex
   sol: openai-codex
-  opus5: openai-codex
+  opus5: anthropic
+  sonnet5: anthropic
   qwen: qwen-token
 thresholds:
   luna_max_chars: 700

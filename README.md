@@ -73,9 +73,13 @@ or the Hermes credential pool. The adapter adds the `claude-code-20250219` and
 that identity is not optional, since without it Anthropic rate-limits the
 traffic, which presents as a quota problem rather than a missing header.
 
-These children are invisible to the router: `route_llm_request` returns `None`
-for a model outside its own tier map, so nothing here rewrites them, and they do
-not appear in the per-account load figures, which count only routed calls.
+The router does not *route* these children — `route_llm_request` returns `None`
+for a model outside its own tier map, so nothing here rewrites them — but it does
+record them. Invisible to the router had meant invisible to the operator: a
+Claude worker produced no card, no count and no line in the per-account load, so
+the one account whose usage most needed watching was the one nothing reported on.
+They now appear as `opus5` and `sonnet5` alongside the other tiers, and their
+`callable` switches govern whether the conductor is offered them at all.
 
 A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
 `coding_agent.delegated_review`). It replaces a single call rather than running

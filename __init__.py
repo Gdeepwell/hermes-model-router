@@ -1324,6 +1324,54 @@ def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str,
     return notes
 
 
+def _delegation_targets_detail() -> Dict[str, Dict[str, str]]:
+    """``{name: {provider, model}}`` from Hermes's own ``delegation.targets``."""
+    if yaml is None:
+        return {}
+    try:
+        raw = yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        targets = (raw.get("delegation") or {}).get("targets") or {}
+        return {
+            str(name).strip().casefold(): {
+                "provider": str(spec.get("provider") or "").strip().casefold(),
+                "model": str(spec.get("model") or "").strip(),
+            }
+            for name, spec in targets.items()
+            if isinstance(spec, dict) and str(spec.get("model") or "").strip()
+        }
+    except Exception:
+        return {}
+
+
+def _external_target_for_model(model: str) -> Optional[str]:
+    """Target name for a model this router cannot route but should still record.
+
+    A child on another provider is invisible here by design -- the middleware
+    cannot move a call across providers, so it returns None. But invisible to
+    the router became invisible to the operator too: a Claude worker produced no
+    card, no count and no line in the per-account load, so the one account whose
+    usage most needed watching was the one nothing reported on.
+    """
+    if not model:
+        return None
+    for name, spec in _delegation_targets_detail().items():
+        if spec.get("model") == model:
+            return name
+    return None
+
+
+def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
+    """Whether a delegation target should be put in front of the conductor.
+
+    A target with a callability switch obeys it even when it is not a routable
+    tier: the dashboard toggle otherwise reads as if it governed Claude while
+    changing nothing.
+    """
+    if name in (cfg.get("callable") or {}):
+        return _is_callable_tier(name, cfg)
+    return True
+
+
 def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None) -> str:
     """The sentence that makes route choice expressible instead of implied.
 
@@ -1338,8 +1386,7 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
     # raises for it mid-session, so offering it produces a leaf that never runs.
     names = [
         name for name in _delegation_target_names()
-        if name != orchestrator_tier
-        and (name not in (cfg.get("models") or {}) or _is_callable_tier(name, cfg))
+        if name != orchestrator_tier and _target_is_offered(name, cfg)
     ]
     notes = _target_availability(names, cfg)
     scope = (
@@ -1830,6 +1877,15 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     request = kwargs.get("request")
     # Accept requests from any provider that has supported models
     if active_model not in supported_models:
+        external = _external_target_for_model(active_model)
+        if external:
+            # Observed, not routed: the decision stays the parent's, but the call
+            # now appears in the log the dashboard and the load report read.
+            _log_decision(
+                RouteDecision(external, active_model, "external delegation target", "external"),
+                kwargs,
+                cfg,
+            )
         return None
     if not isinstance(request, dict):
         return None
@@ -2442,12 +2498,13 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
             return next_call(request)
         except Exception as error:
             if _is_quota_exhaustion(error) or _is_transient_provider_failure(error):
+                failing_model = str(request.get("model", ""))
                 _record_tier_failure(
                     next(
                         (tier for tier, model in (cfg.get("models") or {}).items()
-                         if model == str(request.get("model", ""))),
+                         if model == failing_model),
                         "",
-                    ),
+                    ) or (_external_target_for_model(failing_model) or ""),
                     cfg,
                     quota=_is_quota_exhaustion(error),
                 )
