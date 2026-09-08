@@ -1351,7 +1351,29 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         "target on a separate account, so a leaf intended for one must carry model:<name>. Prefer "
         "spreading genuinely independent leaves across different targets so separate accounts and "
         "quotas absorb the work in parallel; never split work merely to use more targets. "
+        f"{_claude_target_sentence(names)}"
         f"{_account_load_sentence(cfg)}"
+    )
+
+
+def _claude_target_sentence(names: Iterable[str]) -> str:
+    """What the Claude targets are for, once they are offered at all.
+
+    A bare name in a list tells the conductor nothing about when to reach for it,
+    and these are the two that draw on a different subscription entirely -- the
+    reason the target list exists.
+    """
+    claude = [name for name in names if name in {"opus5", "sonnet5"}]
+    if not claude:
+        return ""
+    both = len(claude) == 2
+    return (
+        f"{' and '.join(claude)} run on Claude, a different subscription from every other "
+        f"target, so they are the strongest way to keep independent work off a single quota. "
+        f"They are ordinary workers with the usual tools: give them implementation or deep "
+        f"review, not just reading. "
+        + ("Use sonnet5 by default and reserve opus5 for consequential or hard work. "
+           if both else "")
     )
 
 
@@ -1457,7 +1479,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review]: those run on Claude through its own CLI and draw on a separate quota, so prefer them for review whenever the leaf writes nothing. Use [sonnet-review] for routine checks and reserve [opus-review] for consequential or hard review. Such a leaf must name the repository, receive every fact it needs in the goal, and never be asked to edit, run commands, or implement. Never set 'model' on a review leaf and never count it against the load figures above: its route is the label, and naming a target instead sends it to a provider the Claude bridge cannot run on, where it silently becomes an ordinary worker on that model. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} Reach Claude with model:sonnet5 or model:opus5 like any other target; a Claude leaf must name the repository and carry every fact it needs in the goal, because it does not share this conversation. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }

@@ -48,38 +48,39 @@ The user-facing conversation stays on one durable parent model. Classifier resul
 - Max 16 child iterations
 - Handoff capsule required for every worker task
 
-### Claude review leaves
+### Claude targets
 
-Claude cannot be a `delegation.targets` entry: a delegation target is a
-provider/model pair a child's tool loop runs *on*, and the Claude Code OAuth
-credential is not usable from a third-party tool, so the only way to reach
-Claude is to hand a task to its own CLI. It is an external agent, not a model.
-
-The integration is therefore an execution swap. A delegated leaf whose goal
-begins `[sonnet-review]` or `[opus-review]` has its single LLM call replaced by
-a `claude -p` subprocess, and the verdict becomes that leaf's answer — so the
-work draws on the Claude subscription instead of the Codex account, while still
-running in parallel with the plan's other leaves.
+Claude is reached like any other delegation target — `model: "opus5"` or
+`model: "sonnet5"`, running on the native Anthropic Messages API. The child is
+an ordinary worker with the usual tools, so it can implement rather than merely
+read, and it runs in the background alongside the plan's other leaves. It draws
+on a different subscription from every other target, which is the point.
 
 ```yaml
-coding_agent:
-  delegated_review:
-    enabled: true
-    models: [opus, sonnet]
+delegation:
+  targets:
+    opus5:
+      provider: anthropic
+      model: claude-opus-5
+    sonnet5:
+      provider: anthropic
+      model: claude-sonnet-5
 ```
 
-Deliberately separate from `coding_agent.enabled`, which also arms a
-label-free coding classifier that would capture the first call of a coding turn.
-Delegated workers only — a root turn is never diverted into a subprocess.
-Read-only (`--tools Read`, 16 turns, $5, 600s); writing is not offered because
-parallel leaves share one working tree.
+Authentication is subscription OAuth, resolved from the Claude Code credentials
+or the Hermes credential pool. The adapter adds the `claude-code-20250219` and
+`oauth-2025-04-20` beta headers together with the Claude Code system identity —
+that identity is not optional, since without it Anthropic rate-limits the
+traffic, which presents as a quota problem rather than a missing header.
 
-**A review leaf must not carry `model`.** Its route is its label. Naming a target
-sends it to a provider the bridge cannot run on — the execution middleware
-returns early off-provider, and the bridge answers in the Codex Responses shape —
-where it silently becomes an ordinary worker on that model with the Claude
-subscription untouched. The route log names that case rather than letting it read
-as a normal worker.
+These children are invisible to the router: `route_llm_request` returns `None`
+for a model outside its own tier map, so nothing here rewrites them, and they do
+not appear in the per-account load figures, which count only routed calls.
+
+A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
+`coding_agent.delegated_review`). It replaces a single call rather than running
+an agent, so it cannot write and holds a child slot for the duration; the native
+target above supersedes it for ordinary work.
 
 ### Live Dashboard
 
@@ -282,11 +283,12 @@ refuses mid-session, producing a leaf that never runs. A goal-text prefix only r
 the model *inside the default provider*, so it cannot reach a target on another
 account — a leaf meant for Qwen must carry `model: "qwen"`.
 
-A read-only review leaf goes to Claude instead, and must not carry `model` —
-its route is the label:
+Claude is one of those targets, and a Claude leaf must carry every fact it needs
+in its goal — it does not share the conversation:
 
 ```python
-{"goal": "[sonnet-review] Review the pending calendar diff in /path/to/repo. Report only."}
+{"goal": "Diagnose and fix the fullscreen calendar card in /path/to/repo. …",
+ "model": "sonnet5"}
 ```
 
 ## Policy
