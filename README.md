@@ -213,6 +213,31 @@ quota_fallbacks:
 It fires once per turn and only if the replacement is itself callable, so an
 exhausted Spark continues on Luna instead of failing the turn.
 
+### A model this account cannot use
+
+Three different unavailabilities, three different mechanisms — the distinction is
+what decides whether a leaf survives:
+
+| Condition | Recognised by | What happens |
+|---|---|---|
+| Switched off in the dashboard | `callable: false` | the `fallbacks` chain, at routing time |
+| Quota exhausted (429) | account/weekly quota wording | `quota_fallbacks`, then a 15-minute cooldown |
+| Provider blip (5xx) | 500/502/503/504, connection resets | a hardcoded substitute, then a short cooldown |
+| **Refused outright (400/404)** | *"is not supported when using…"*, *"does not exist or you do not have access"* | the configured `fallbacks` chain, then a 6-hour cooldown |
+
+The last row was a gap until 1.8.1. A tier switched **on** but refused by the
+provider — `The 'gpt-5.3-codex-spark' model is not supported when using Codex with
+a ChatGPT account.` — matched no runtime failover, so the leaf simply aborted.
+
+It deliberately walks the **configured** `fallbacks` chain rather than the
+hardcoded transient map: if you wrote `spark: luna`, a Spark that does not exist
+on your account belongs on Luna, not wherever the blip handler would have put it.
+The cooldown is long because nothing about this recovers by waiting; tune it with
+`cooldown.unavailable_seconds`. Design and image guards still apply — an
+unavailable model is no reason to break a routing policy.
+
+An ordinary malformed-request 400 is untouched and still raises.
+
 ### Preempted tiers in the log
 
 A route entry records not only the tier that won but the ones that independently
@@ -514,6 +539,8 @@ pytest
 ```
 
 ## Version
+
+**1.8.1** — A model the account cannot use (400/404 refusal) now takes the configured fallback chain and a long cooldown instead of aborting the leaf
 
 **1.8.0** — Preferred models per kind of work as an ordered chain, configurable from Settings; the reference now also documents effort levels, vision routing, quota fallback, preempted tiers, shadow benchmarking and the agent tree
 

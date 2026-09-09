@@ -2401,6 +2401,74 @@ def _quota_fallback_effort(cfg: Dict[str, Any], fallback_tier: str) -> str:
     return str((cfg.get("effort") or {}).get(fallback_tier) or "medium")
 
 
+def _is_model_unavailable(error: BaseException) -> bool:
+    """A model this account cannot use at all, as opposed to one that is busy.
+
+    Distinct from quota (recovers) and from a 5xx (a blip): the provider is saying
+    the model does not exist for these credentials, so retrying it later in the
+    same session is pointless. Matched on the message rather than the status code
+    because the same refusal arrives as 400 and as 404 depending on the endpoint.
+    """
+    text = str(error).casefold()
+    if not any(code in text for code in ("400", "404")):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "is not supported when using",
+            "model is not supported",
+            "model not supported",
+            "does not exist or you do not have access",
+            "model not found",
+            "no access to model",
+            "is not available for your",
+        )
+    )
+
+
+def _durable_fallback_model(
+    active_model: str, cfg: Dict[str, Any], request: Optional[Dict[str, Any]] = None
+) -> Optional[str]:
+    """Walk the CONFIGURED ``fallbacks`` chain for a model this account cannot use.
+
+    Deliberately not ``_transient_fallback_model``: that one holds a hardcoded map
+    for provider blips, while this case is the operator's own substitution policy —
+    if the config says ``spark: luna``, a Spark that does not exist here belongs on
+    Luna and nowhere else. Design and image guards still apply, because an
+    unavailable model is no reason to violate a routing policy.
+    """
+    models = cfg.get("models") or {}
+    active_tier = next((tier for tier, model in models.items() if model == active_model), "")
+    if not active_tier:
+        return None
+    if (
+        active_tier == "sol"
+        and isinstance(request, dict)
+        and _is_design_request(_last_user_text_and_index(_request_items(request))[0])
+    ):
+        return None
+    chain = cfg.get("fallbacks") or {}
+    visited = {active_tier}
+    current = active_tier
+    for _ in range(3):
+        nxt = str(chain.get(current) or "")
+        if not nxt or nxt in visited:
+            return None
+        visited.add(nxt)
+        candidate = models.get(nxt)
+        if candidate and candidate != active_model and _is_callable_tier(nxt, cfg):
+            if (
+                nxt == "spark"
+                and isinstance(request, dict)
+                and _request_has_image_attachment(request)
+            ):
+                current = nxt
+                continue
+            return str(candidate)
+        current = nxt
+    return None
+
+
 def _transient_fallback_model(active_model: str, cfg: Dict[str, Any], request: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Choose one fallback without violating the Sol-only design boundary."""
     models = cfg.get("models") or {}
@@ -2733,24 +2801,35 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     except Exception as error:
         active_model = str(request.get("model", ""))
         quota_exhausted = _is_quota_exhaustion(error)
+        # A model this account cannot use at all. Neither a quota (which recovers)
+        # nor a blip (which is worth retrying): switched on in the dashboard but
+        # refused by the provider, it would otherwise abort every leaf routed to it.
+        unavailable = not quota_exhausted and _is_model_unavailable(error)
+        active_tier = next(
+            (tier for tier, model in (cfg.get("models") or {}).items() if model == active_model), "",
+        )
         # Record before deciding what to do about it. The gap this closes is the
         # case with no fallback configured, where the old code re-raised and left
         # nothing behind -- the next call walked into the same exhausted account.
         if quota_exhausted or _is_transient_provider_failure(error):
-            _record_tier_failure(
-                next(
-                    (tier for tier, model in (cfg.get("models") or {}).items() if model == active_model),
-                    "",
-                ),
-                cfg,
-                quota=quota_exhausted,
+            _record_tier_failure(cfg=cfg, tier=active_tier, quota=quota_exhausted)
+        elif unavailable and active_tier:
+            # Long, and stated plainly: nothing about this recovers by waiting, so
+            # the point of the cooldown is to stop offering the tier this session.
+            _enter_cooldown(
+                active_tier, cfg,
+                seconds=float((cfg.get("cooldown") or {}).get("unavailable_seconds", 21600) or 21600),
+                reason="model unavailable on this account",
             )
-        fallback_model = (
-            _quota_fallback_model(active_model, cfg)
-            if quota_exhausted
-            else _transient_fallback_model(active_model, cfg, request)
-        )
-        if not fallback_model or (not quota_exhausted and not _is_transient_provider_failure(error)):
+        if quota_exhausted:
+            fallback_model = _quota_fallback_model(active_model, cfg)
+        elif unavailable:
+            fallback_model = _durable_fallback_model(active_model, cfg, request)
+        else:
+            fallback_model = _transient_fallback_model(active_model, cfg, request)
+        if not fallback_model or not (
+            quota_exhausted or unavailable or _is_transient_provider_failure(error)
+        ):
             raise
         if quota_exhausted:
             _remember_spark_quota_exhaustion(str(kwargs.get("turn_id") or ""))
@@ -2775,6 +2854,8 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
                 (
                     f"Spark quota exhausted; failover from {active_model}"
                     if quota_exhausted
+                    else f"{active_model} unavailable on this account; configured failover"
+                    if unavailable
                     else f"transient failover from {active_model}"
                 ),
             ),
