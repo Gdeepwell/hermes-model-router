@@ -104,28 +104,6 @@ delegation:
 ```
 
 
-### Preferred models per kind of work
-
-The Settings tab carries an ordered chain per work kind — `design`, `code`,
-`explore`, `review`, `sensitive`, `critical`, `long`, `chat`, `default`. The
-router walks the chain and takes the first entry that is switched on.
-
-A chain entry means one of two different things, and the dashboard colours them
-differently because the difference is not cosmetic:
-
-- **A tier of the router's own provider** (`luna`, `spark`, `terra`, `sol`) is a
-  real route. The router rewrites the model and the chain also replaces the
-  built-in fallback order for that kind.
-- **Anything on another account** (`opus5`, `sonnet5`, `qwen`) cannot be routed
-  to at all: `route_llm_request` runs after the provider is chosen, so it can only
-  swap models inside one provider. Such an entry is passed to the conductor as a
-  delegation recommendation instead — it reaches work through `delegate_task`.
-
-A kind with no chain keeps its built-in route, so configuring nothing changes
-nothing. A kind with a chain overrides that route **completely**, including the
-safety defaults that send design, security and deployment work to Sol. That is
-deliberate: the operator owns the mapping.
-
 **These targets are on.** They shipped switched off for months because every
 call returned:
 
@@ -171,6 +149,101 @@ A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
 an agent, so it cannot write and holds a child slot for the duration; the native
 target above supersedes it for ordinary work.
 
+### Preferred models per kind of work
+
+Configured under `preferences:` in `router_config.yaml`, or from the Settings
+tab, as an ordered chain per work kind — `design`, `code`,
+`explore`, `review`, `sensitive`, `critical`, `long`, `chat`, `default`. The
+router walks the chain and takes the first entry that is switched on.
+
+A chain entry means one of two different things, and the dashboard colours them
+differently because the difference is not cosmetic:
+
+- **A tier of the router's own provider** (`luna`, `spark`, `terra`, `sol`) is a
+  real route. The router rewrites the model and the chain also replaces the
+  built-in fallback order for that kind.
+- **Anything on another account** (`opus5`, `sonnet5`, `qwen`) cannot be routed
+  to at all: `route_llm_request` runs after the provider is chosen, so it can only
+  swap models inside one provider. Such an entry is passed to the conductor as a
+  delegation recommendation instead — it reaches work through `delegate_task`.
+
+A kind with no chain keeps its built-in route, so configuring nothing changes
+nothing. A kind with a chain overrides that route **completely**, including the
+safety defaults that send design, security and deployment work to Sol. That is
+deliberate: the operator owns the mapping.
+
+### Reasoning effort per tier
+
+A route carries an effort level, not just a model name. `effort:` sets it per tier,
+and separately for the cases where the same tier means different work:
+
+```yaml
+effort:
+  luna: low
+  terra: medium
+  sol: medium
+  sol_long: medium          # reached by length, not by choice
+  explicit_sol: medium      # you asked for Sol
+  explicit_sol_xhigh: high  # you asked for Sol and said how hard
+```
+
+`[sol:xhigh]` is the label form — the only override that carries an effort with it.
+
+### Images force a vision-capable route
+
+Spark is text-only. An attached image routes to Terra as a policy decision, ahead
+of every Spark path: label, benchmark override and tool loop alike. A `[spark]`
+tag on a message with an image is not honoured, because the alternative is a leaf
+that cannot see what it was asked about.
+
+Historical image attachments are stripped from replayed context rather than resent.
+
+### Quota fallback
+
+Distinct from `fallbacks`, which handles a *disabled* tier. `quota_fallbacks`
+handles a tier that answered `429` mid-turn:
+
+```yaml
+quota_fallbacks:
+  spark:
+    model: luna
+    effort: medium
+```
+
+It fires once per turn and only if the replacement is itself callable, so an
+exhausted Spark continues on Luna instead of failing the turn.
+
+### Preempted tiers in the log
+
+A route entry records not only the tier that won but the ones that independently
+qualified and lost (`vetoed_by`). Without it a tier that never fires looks exactly
+like a tier whose preconditions are never met — the log cannot tell you whether a
+gate is dead or merely outranked.
+
+### Shadow benchmarking
+
+Off by default. When enabled, a turn can be run a second time on a forced tier and
+both outcomes recorded, so a routing rule can be judged on results rather than on
+the argument that produced it:
+
+```yaml
+shadow:
+  enabled: false
+  limit: 0
+  path: ~/.hermes/logs/spark-shadow-benchmark.jsonl
+```
+
+`MODEL_ROUTER_BENCHMARK_FORCE_MODEL=<tier>` forces a single run from the
+environment. The Spark read-only and image restrictions still apply — a benchmark
+may not route work somewhere policy forbids.
+
+### Retrying a failed downstream request
+
+The plugin can re-issue one failed provider call through Hermes's `llm_execution`
+middleware (`retry_call`), which is what lets a route that fails on arrival be
+answered by a different model without failing the turn. It needs a Hermes new
+enough to pass `retry_call` to execution middleware.
+
 ### Live Dashboard
 
 ```bash
@@ -178,15 +251,29 @@ python3 ~/.hermes/plugins/model_router/web_viewer.py
 # http://localhost:8765
 ```
 
-A counter card per tier — including the two Claude tiers, whose children the
-router records without routing them — then routing decisions grouped by prompt,
-each expandable into its individual API calls, with a grouped/raw toggle, tier
-filters and search. The Agents panel
-reads Hermes's durable delegation registry and shows running and recent child
-jobs nested under their parent session, with a privacy-safe task preview, state,
-age, selected model and call count. Everything refreshes every 3 seconds.
+Three tabs: **Model Router**, **Settings**, and an embedded **Hermes Command
+Center**. The interface is available in English and Hungarian.
 
-The Settings tab shows availability alongside the switches. A tier that is
+The router tab opens with a counter card per tier — including the two Claude
+tiers, whose children the router records without routing them — then routing
+decisions grouped by prompt, each expandable into its individual API calls, with
+a grouped/raw toggle, tier filters and search.
+
+Below that, the live agent tree. It reads Hermes's durable delegation registry
+and the `turn_lifecycle` table, and nests running and recent children under their
+parent session with a privacy-safe task preview, state and age. Each row carries
+`own N · total N` — the calls that agent made itself, and the calls its whole
+subtree made — so a conductor that is quietly doing the work instead of
+delegating it (`own 21 · total 21`) is visible at a glance, as is a leaf that
+correctly does not delegate further (`own 9 · total 9`). The pills beside it name
+the tiers those calls went to; an `external` pill means the router observed the
+call rather than routing it, because the model belongs to another provider.
+
+Everything refreshes every 3 seconds.
+
+The Settings tab holds the callability switches, the default orchestrator, the
+per-work-kind preference chains described above, and the interface language. It
+shows availability alongside the switches. A tier that is
 enabled but cooling carries a pill with the remaining time and the reason, since
 the switch alone would not explain why traffic went elsewhere; underneath, the
 per-account call counts for the same window the conductor is given. Both are read
@@ -194,9 +281,14 @@ through the router's own helpers rather than recomputed, so the panel and the
 routing decision cannot disagree.
 
 The server binds to `127.0.0.1` only, so it is not reachable from the local
-network. Model callability and the default orchestrator can be changed from the
-Settings tab; those writes land in `router_config.yaml` and take effect on the
-next routed call, with no restart needed.
+network. Every setting on that tab writes to `router_config.yaml` and takes effect
+on the **next routed call, with no restart** — the config is re-read on every
+decision rather than cached. Changing the plugin's *code* does need a restart of
+the Hermes process that loaded it.
+
+One caveat: those writes go through a plain YAML dump, so **comments in
+`router_config.yaml` are lost** the first time you save from the dashboard. Keep
+anything you need to remember in this README rather than in the config.
 
 ## Configuration
 
@@ -228,6 +320,12 @@ tier_providers:
 
 # Default parent model
 default_model: terra
+
+# Preferred models per kind of work, best first (see the section above).
+# Unset kinds keep their built-in route.
+preferences:
+  review: [sonnet5, terra]
+  design: [sol, opus5]
 
 # Delegation limits (in ~/.hermes/config.yaml)
 delegation:
@@ -328,6 +426,11 @@ of quota and the rule matters most.
 Such a decision is marked at the point it is made and declines the chain, so a
 disabled Sol fails loudly instead of quietly landing design work on Terra.
 
+This is the *default*. A preference chain configured for that work kind replaces
+it — see above — because the operator asked to own the mapping. A single-entry
+chain (`sensitive: [sol]`) keeps the loud failure; add a second entry only if you
+would rather the work continue elsewhere than stop.
+
 ## Usage
 
 ### Explicit Model Override
@@ -412,7 +515,11 @@ pytest
 
 ## Version
 
-**1.6.2** — Claude delegation targets ship off pending an account-side 400; what was ruled out, and how to check it, is documented rather than guessed at
+**1.8.0** — Preferred models per kind of work as an ordered chain, configurable from Settings; the reference now also documents effort levels, vision routing, quota fallback, preempted tiers, shadow benchmarking and the agent tree
+
+**1.7.0** — Claude tiers on: the 400 was a Hermes version authenticating with its own OAuth app, not an account or plan limit
+
+**1.6.2** — Claude delegation targets ship off pending an account-side 400; what was ruled out, and how to check it, is documented rather than guessed at (superseded by 1.7.0)
 
 **1.6.0** — Substitution groups across accounts, cooling targets annotated with their replacement, orchestrator selector restricted to routable tiers
 
