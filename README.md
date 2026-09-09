@@ -103,7 +103,8 @@ delegation:
       model: claude-sonnet-5
 ```
 
-**These targets ship switched off, because on some accounts every call returns:**
+**These targets are on.** They shipped switched off for months because every
+call returned:
 
 ```
 HTTP 400 invalid_request_error
@@ -111,26 +112,24 @@ Third-party apps now draw from your extra usage, not your plan limits.
 Add more at claude.ai/settings/usage and keep going.
 ```
 
-Easy to misread as a policy prohibition. It is not one: the same Hermes on
-another Pro account draws on plan limits and works. On the failing account these
-were ruled out by measurement — the credential (both pooled tokens, and the
-Claude Code login with the pool emptied), request size (a 12k-token probe
-passes), the presence of tools, the Hermes version (its OAuth path is identical
-to upstream), and delegation itself, since a plain
-`hermes -z -m claude-sonnet-5 --provider anthropic` reproduces it.
+That reads like a policy prohibition. It was not one, and it was not an account
+limit either — the earlier diagnosis here ruled out the credential, request
+size, tools, delegation, and the account's extra-usage setting, then wrongly
+concluded the Hermes version was identical to upstream and could be excluded.
 
-The only difference found against a working account is visible here:
+**The version was the whole difference.** Proved by running the same
+`auth.json` and `HERMES_HOME` against two trees: `HTTP 400` on the old one,
+`OK` on current upstream. The old tree authenticated with Hermes's own OAuth
+app — a `manual:hermes_pkce` token in the credential pool — which the API
+correctly classifies as a third-party app. Current upstream instead borrows the
+Claude Code login (`agent/anthropic_credentials.py` plus the credential pool's
+`_seed_from_singletons`), which is the same grant Claude Code itself uses.
 
-```bash
-curl -s https://api.anthropic.com/api/oauth/usage \
-  -H "Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN" \
-  -H "anthropic-beta: oauth-2025-04-20" | jq '.extra_usage, .five_hour, .seven_day'
-```
+After migrating to the current tree on 2026-09-09, the same account answers on
+both paths — a direct `hermes -z --provider anthropic --model claude-opus-5`,
+and the delegated credential path that `_task_credentials` resolves per child.
+If you are on an older Hermes and see the 400, update before you buy credit.
 
-The working account had `credits_ever_enabled: true` while spending nothing
-(`used_credits: 0.0`); the failing one had never enabled extra usage at all.
-Once your calls succeed, turn the targets on with `callable.opus5` and
-`callable.sonnet5`.
 
 Meanwhile the CLI bridge below does draw on the plan: `claude -p` *is* Claude
 Code, so a `[sonnet-review]` or `[opus-review]` leaf works regardless. It is

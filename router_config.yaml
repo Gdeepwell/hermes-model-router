@@ -11,11 +11,14 @@ callable:
   spark: false
   terra: true
   sol: true
-  # Off: the Anthropic subscription does not fund third-party apps. A delegated
-  # child is one, so every Claude leaf returns HTTP 400 asking for extra-usage
-  # credit. Turn these on only with extra usage or an ANTHROPIC_API_KEY.
-  opus5: false
-  sonnet5: false
+  # On since 2026-09-09. The HTTP 400 that kept these off was a Hermes version
+  # difference, not an account or plan limit: the old tree authenticated with
+  # Hermes's own OAuth app (a `manual:hermes_pkce` pool token), which the API
+  # treats as a third-party app. The current tree borrows the Claude Code login
+  # instead, and the same account now answers on both the direct and the
+  # delegated credential path.
+  opus5: true
+  sonnet5: true
   qwen: true
 fallbacks:
   spark: luna
