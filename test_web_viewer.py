@@ -13,7 +13,13 @@ import web_viewer
 from web_viewer import HTML, Handler
 
 
-class ModelRouterDashboardTests(unittest.TestCase):
+class DashboardProbeMixin:
+    """Helpers that slice the shipped dashboard source so probes stay honest.
+
+    Separate from the test classes so a suite can reuse them without inheriting —
+    and re-running — every test the other class declares.
+    """
+
     def execution_source(self):
         start = HTML.index("/* Reference execution-tree renderer:")
         end = HTML.index("function executionState", start)
@@ -62,6 +68,7 @@ class ModelRouterDashboardTests(unittest.TestCase):
                     return HTML[start:index + 1]
         self.fail(f"unterminated JavaScript function: {name}")
 
+class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
     def test_execution_tree_counts_are_labeled_as_routing_decisions(self):
         self.assertIn('<div class="cards"><div class="card"><div class="n" id="total">0</div>', HTML)
         self.assertIn('<div class="k" data-i18n="card.total">', HTML)
@@ -552,3 +559,101 @@ class RouterStatusTests(unittest.TestCase):
         for entry in status["cooldowns"].values():
             self.assertIn("seconds", entry)
             self.assertIn("reason", entry)
+
+
+class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
+    """The per-work-kind chain editor. The reordering logic runs in node, not in
+    a Python re-implementation, so a bug in the shipped source fails here."""
+
+    def _mutate(self, prefs, kind, index, act):
+        """Run the real mutatePreference against a stub DOM and return the new prefs."""
+        source = self.javascript_function("mutatePreference")
+        probe = (
+            "let currentConfig=" + json.dumps({"preferences": prefs}) + ";"
+            "function renderSettings(){};function saveSettings(){};"
+            + source
+            + f"\nmutatePreference({json.dumps(kind)},{index},{json.dumps(act)});"
+            "console.log(JSON.stringify(currentConfig.preferences));"
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return json.loads(result.stdout)
+
+    def test_moving_an_entry_up_reorders_the_chain(self):
+        self.assertEqual(
+            self._mutate({"design": ["sol", "opus5", "terra"]}, "design", 1, "up"),
+            {"design": ["opus5", "sol", "terra"]},
+        )
+
+    def test_moving_the_first_entry_up_is_a_no_op(self):
+        self.assertEqual(
+            self._mutate({"design": ["sol", "opus5"]}, "design", 0, "up"),
+            {"design": ["sol", "opus5"]},
+        )
+
+    def test_moving_the_last_entry_down_is_a_no_op(self):
+        self.assertEqual(
+            self._mutate({"design": ["sol", "opus5"]}, "design", 1, "down"),
+            {"design": ["sol", "opus5"]},
+        )
+
+    def test_removing_the_last_entry_drops_the_kind_entirely(self):
+        """An empty list is not "no preference" to the router — the absent key is."""
+        self.assertEqual(self._mutate({"design": ["sol"]}, "design", 0, "del"), {})
+
+    def test_removing_one_of_several_keeps_the_rest_in_order(self):
+        self.assertEqual(
+            self._mutate({"code": ["sol", "terra", "luna"]}, "code", 1, "del"),
+            {"code": ["sol", "luna"]},
+        )
+
+    def _render(self, config, language="en"):
+        source = self.javascript_function("renderPreferences")
+        labels = {m: m.upper() for m in
+                  ("luna", "spark", "terra", "sol", "opus5", "sonnet5", "qwen")}
+        probe = (
+            self.i18n_runtime(language)
+            + "let html='';const box={set innerHTML(v){html=v;},appendChild(el){html+=el.outerHTML||el.textContent;}};"
+            "function $(id){return id==='pref-kinds'?box:null;}"
+            "let currentConfig=" + json.dumps(config) + ";"
+            "document={createElement:()=>({className:'',set innerHTML(v){this._h=v;},"
+            "get outerHTML(){return this._h||'';},textContent:''})};"
+            + source
+            + f"\nrenderPreferences({json.dumps(labels)});console.log(html);"
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout
+
+    def test_a_delegation_only_target_is_marked_apart_from_a_routed_one(self):
+        """A purple chip means "handed to the conductor", not "routed here"."""
+        html = self._render({
+            "work_kinds": ["design"], "preferences": {"design": ["opus5", "sol"]},
+            "routable": ["luna", "spark", "terra", "sol"],
+            "callable": {"opus5": True, "sol": True},
+        })
+        self.assertIn("pref-chip external", html)
+        self.assertIn("1.", html)
+
+    def test_a_kind_without_a_preference_says_the_built_in_route_applies(self):
+        html = self._render({
+            "work_kinds": ["review"], "preferences": {},
+            "routable": ["terra"], "callable": {"terra": True},
+        })
+        self.assertIn("pref-empty", html)
+
+    def test_a_switched_off_model_is_not_offered(self):
+        """Offering it would let you configure a chain entry that can never run."""
+        html = self._render({
+            "work_kinds": ["code"], "preferences": {},
+            "routable": ["terra", "sol"], "callable": {"terra": True, "sol": False, "qwen": False},
+        })
+        self.assertIn('value="terra"', html)
+        self.assertNotIn('value="sol"', html)
+
+    def test_every_work_kind_has_a_label_in_both_languages(self):
+        from model_router import WORK_KINDS
+
+        for kind in WORK_KINDS:
+            english, hungarian = self.i18n(f"kind.{kind}")
+            self.assertTrue(english.strip(), kind)
+            self.assertTrue(hungarian.strip(), kind)
+            self.assertNotEqual(english, hungarian, f"kind.{kind} is untranslated")

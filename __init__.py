@@ -159,6 +159,14 @@ class RouteDecision:
     # than preference. Such a route must not be satisfied by the fallback chain:
     # falling back from it grants exactly the access the decision denied.
     mandatory: bool = False
+    # The work kind the gate recognised ("design", "code", "explore", ...). It is
+    # what a user preference list is keyed on, and it is recorded in the route log
+    # so a surprising route can be traced back to the category that produced it.
+    kind: str = ""
+    # The external delegation target preferred for this kind, when the preference
+    # list names one. The router cannot route across providers, so this travels
+    # as advice to the conductor rather than as the route itself.
+    prefer_target: str = ""
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,6 +179,89 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
+# Work kinds a preference list may be keyed on. Kept as an explicit tuple so the
+# dashboard, the config validator and the router cannot drift apart on the names.
+WORK_KINDS: Tuple[str, ...] = (
+    "design", "code", "explore", "review", "sensitive", "critical", "long", "chat", "default",
+)
+
+
+def _preference_list(kind: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    """The configured order of preferred tiers for one work kind, or () when unset.
+
+    Unset is meaningful: it means "keep the built-in route", which is why a missing
+    or malformed entry never silently becomes an empty preference.
+    """
+    if not kind:
+        return ()
+    raw = (cfg.get("preferences") or {}).get(kind)
+    if not isinstance(raw, list):
+        return ()
+    seen: list[str] = []
+    for item in raw:
+        name = str(item or "").strip().casefold()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
+
+
+def _is_routable_tier(tier: str, cfg: Dict[str, Any]) -> bool:
+    """Whether the router itself can serve this tier by rewriting the model name.
+
+    ``route_llm_request`` runs after the provider is chosen, so it can only swap
+    models inside its own provider. Anything else (Claude, Qwen) reaches work
+    through delegation, never through a route.
+    """
+    return tier in (cfg.get("models") or {})
+
+
+def _preferred_route(kind: str, cfg: Dict[str, Any]) -> Optional[str]:
+    """First routable+callable tier of the kind's preference list, else None."""
+    for tier in _preference_list(kind, cfg):
+        if _is_routable_tier(tier, cfg) and _is_callable_tier(tier, cfg):
+            return tier
+    return None
+
+
+def _preferred_target(kind: str, cfg: Dict[str, Any]) -> str:
+    """First callable EXTERNAL entry of the kind's preference list, else "".
+
+    Ranked above the routable tiers on purpose: if the user put ``opus5`` first for
+    design work, the router cannot honour that as a route, but it can tell the
+    conductor that design leaves belong on Opus.
+    """
+    for tier in _preference_list(kind, cfg):
+        if _is_routable_tier(tier, cfg):
+            continue
+        if _is_callable_tier(tier, cfg):
+            return tier
+    return ""
+
+
+def _apply_preferences(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecision:
+    """Overlay the user's per-kind preference onto a built-in decision.
+
+    A configured list is authoritative: it replaces the tier AND the fallback
+    chain, and it clears ``mandatory`` because the built-in policy it would have
+    enforced is exactly what the user chose to override. With no list configured
+    the decision is returned untouched, so the shipped defaults still apply.
+    """
+    prefs = _preference_list(decision.kind, cfg)
+    if not prefs:
+        return decision
+    target = _preferred_target(decision.kind, cfg)
+    tier = _preferred_route(decision.kind, cfg)
+    if tier is None or tier == decision.tier:
+        # Nothing routable in the list (or it already agrees): keep the route and
+        # carry only the delegation advice.
+        return replace(decision, prefer_target=target) if target else decision
+    try:
+        preferred = _decision(tier, f"preferred {decision.kind} route", cfg, kind=decision.kind)
+    except (KeyError, ValueError):
+        return decision
+    return replace(preferred, vetoed_by=decision.vetoed_by, prefer_target=target)
+
+
 def _resolve_callable_fallback(
     decision: RouteDecision, cfg: Dict[str, Any]
 ) -> RouteDecision:
@@ -181,6 +272,21 @@ def _resolve_callable_fallback(
     # a cooling tier follow the same path as a disabled one.
     chosen_tier = decision.tier
     if _is_callable_tier(chosen_tier, cfg):
+        return decision
+
+    # A configured preference list IS the fallback chain for its kind: the user
+    # wrote the order, so walk it before anything built-in and never leave it.
+    prefs = _preference_list(decision.kind, cfg)
+    if prefs:
+        for tier in prefs:
+            if tier != chosen_tier and _is_routable_tier(tier, cfg) and _is_callable_tier(tier, cfg):
+                try:
+                    return _decision(
+                        tier, f"preferred {decision.kind} fallback from {chosen_tier}",
+                        cfg, kind=decision.kind,
+                    )
+                except (KeyError, ValueError):
+                    continue
         return decision
 
     # A policy route is not a preference. Design work reaches Sol because only
@@ -706,6 +812,11 @@ def _current_turn_has_tool_activity(items: list, last_user_index: int) -> bool:
     return any(_is_tool_item(item) for item in items[last_user_index + 1 :])
 
 
+# Default effort per tier. ``.get`` rather than ``[]``: a preference list may name a
+# tier this map never anticipated, and an unknown tier must not raise inside routing.
+_DEFAULT_EFFORT = {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium"}
+
+
 def _decision(
     tier: str,
     reason: str,
@@ -714,13 +825,15 @@ def _decision(
     explicit: bool = False,
     effort_key: Optional[str] = None,
     mandatory: bool = False,
+    kind: str = "",
 ) -> RouteDecision:
     if effort_key is None:
         effort_key = "explicit_sol" if explicit and tier == "sol" else tier
-    fallback = {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium"}[tier]
+    fallback = _DEFAULT_EFFORT.get(tier, "medium")
     effort = str((cfg.get("effort") or {}).get(effort_key) or fallback).casefold()
     return RouteDecision(
-        tier=tier, model=cfg["models"][tier], reason=reason, effort=effort, mandatory=mandatory
+        tier=tier, model=cfg["models"][tier], reason=reason, effort=effort,
+        mandatory=mandatory, kind=kind,
     )
 
 
@@ -787,7 +900,11 @@ def classify_request(
         is_tool_loop=_current_turn_has_tool_activity(items, user_index),
     )
     vetoed = tuple(tier for tier in eligible if tier != decision.tier)
-    return replace(decision, vetoed_by=vetoed) if vetoed else decision
+    if vetoed:
+        decision = replace(decision, vetoed_by=vetoed)
+    # Last, so a preference is applied to whatever the gates decided rather than
+    # competing with them, and so the veto list still records the built-in view.
+    return _apply_preferences(decision, config or _load_config())
 
 
 def _classify_request(
@@ -808,7 +925,7 @@ def _classify_request(
     # it before the design boundary so a mention of UI/CSS does not by itself
     # create an unnecessary Sol delegation.
     if _is_acknowledgement_only(user_text):
-        return _decision("luna", "acknowledgement-only follow-up", cfg)
+        return _decision("luna", "acknowledgement-only follow-up", cfg, kind="chat")
 
     # Role separation is a hard policy boundary: only Sol performs visual/product
     # design analysis or design implementation. Terra may coordinate and approve
@@ -825,7 +942,7 @@ def _classify_request(
     if _is_design_request(user_text) and not (
         allow_plan_label_over_design and _is_plan_labelled_worker(text)
     ):
-        return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True)
+        return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True, kind="design")
 
     benchmark_force = _normalise(os.getenv("MODEL_ROUTER_BENCHMARK_FORCE_MODEL", ""))
     if benchmark_force in ("luna", "spark", "terra", "sol"):
@@ -853,7 +970,7 @@ def _classify_request(
             if _is_consequential_spark_request(user_text):
                 return _decision("sol", "consequential Spark task requires Sol", cfg, mandatory=True)
             if _is_design_request(user_text):
-                return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True)
+                return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True, kind="design")
             return _decision("terra", "Spark is restricted to non-design read-only subtasks", cfg)
         requested_effort = override.group(2)
         effort_key = "explicit_sol_xhigh" if tier == "sol" and requested_effort == "xhigh" else None
@@ -869,7 +986,7 @@ def _classify_request(
 
     sol_min_chars = int(cfg.get("thresholds", {}).get("sol_min_chars", 3500))
     if len(user_text) >= sol_min_chars:
-        return _decision("sol", f"long request ({len(user_text)} characters)", cfg, effort_key="sol_long")
+        return _decision("sol", f"long request ({len(user_text)} characters)", cfg, effort_key="sol_long", kind="long")
 
     # Consequential domains are biased toward Sol even when the prompt is short.
     sensitive = re.compile(
@@ -880,7 +997,7 @@ def _classify_request(
         r"orvosi|medical|diagnos|gyogyszer|befektetes|investment|adozas|tax)\b"
     )
     if sensitive.search(text):
-        return _decision("sol", "sensitive or consequential domain", cfg, mandatory=True)
+        return _decision("sol", "sensitive or consequential domain", cfg, mandatory=True, kind="sensitive")
 
     # High-consequence engineering stays on Sol. Ordinary repository debugging,
     # refactoring and test execution stay on Terra: the implementation benchmark
@@ -891,7 +1008,7 @@ def _classify_request(
         r"deep research|mely kutatas|kutass reszletesen)\b"
     )
     if critical_work.search(text):
-        return _decision("sol", "consequential engineering or research task", cfg, mandatory=True)
+        return _decision("sol", "consequential engineering or research task", cfg, mandatory=True, kind="critical")
 
     action = re.compile(
         r"\b(modositsd|konfigurald|configure|restart|ujraindit|torol(?:d|j)|delete|remove|"
@@ -903,7 +1020,7 @@ def _classify_request(
         r"hosting|gateway|docker|kubernetes|systemd|config|konfiguracio)\b"
     )
     if action.search(text) and consequential_system.search(text):
-        return _decision("sol", "consequential system action", cfg, mandatory=True)
+        return _decision("sol", "consequential system action", cfg, mandatory=True, kind="critical")
 
     # Spark is text-only. This hard route sits after the higher-priority Sol
     # safety routes and before every Spark classifier, so an image cannot be
@@ -920,16 +1037,29 @@ def _classify_request(
             return _decision("terra", "ordinary current-turn tool loop", cfg)
         return _decision("terra", "repeated current-turn call safety promotion", cfg)
 
+    # Review and exploration are recognised so a preference list can reach them.
+    # Both deliberately keep Terra as their built-in route: naming the category
+    # must not change any behaviour on its own, only make it addressable.
+    review_request = re.compile(
+        r"\b(review|reviewold|nezd at|nezd meg a kodot|code review|atnezes|"
+        r"velemenyezd|critique|audit|ellenorizd a kodot)\b"
+    )
+    if review_request.search(text):
+        return _decision("terra", "code review or critique", cfg, kind="review")
+
+    if _is_spark_read_only_request(user_text) and not _is_consequential_spark_request(user_text):
+        return _decision("terra", "read-only inspection", cfg, kind="explore")
+
     repo_implementation = re.compile(
         r"\b(debug|debugold|hibakeres|traceback|stack trace|root cause|"
         r"refactor|teszteld|run the tests|futtasd a teszt|javitsd|fix|"
         r"implement|repo|kod|code)\b"
     )
     if repo_implementation.search(text):
-        return _decision("terra", "normal repository implementation owner", cfg)
+        return _decision("terra", "normal repository implementation owner", cfg, kind="code")
 
     if re.search(r"\b(csinald meg|hajtsd vegre|do it|make the changes|folytasd)\b", text):
-        return _decision("terra", "context-dependent action owned by Terra", cfg)
+        return _decision("terra", "context-dependent action owned by Terra", cfg, kind="code")
 
 
 
@@ -956,20 +1086,21 @@ def _classify_request(
             r"production|config|konfiguracio|debug|teszt|test|security|biztonsag)\b"
         )
         if greeting.search(text):
-            return _decision("luna", "greeting or acknowledgement", cfg)
+            return _decision("luna", "greeting or acknowledgement", cfg, kind="chat")
         if simple_transform.search(text) and "```" not in user_text:
-            return _decision("luna", "simple language transformation", cfg)
+            return _decision("luna", "simple language transformation", cfg, kind="chat")
         if simple_definition.search(text):
-            return _decision("luna", "short definition request", cfg)
+            return _decision("luna", "short definition request", cfg, kind="chat")
         if brief_chat.search(text):
-            return _decision("luna", "brief non-actionable conversation", cfg)
+            return _decision("luna", "brief non-actionable conversation", cfg, kind="chat")
         if short_explanation.search(text) and not technical.search(text):
-            return _decision("luna", "short low-risk explanation", cfg)
+            return _decision("luna", "short low-risk explanation", cfg, kind="chat")
 
     return _decision(
         str(cfg.get("default_model", "terra")),
         "default general-purpose route",
         cfg,
+        kind="default",
     )
 
 
@@ -1426,7 +1557,31 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names)}"
+        f"{_preference_sentence(names, cfg)}"
         f"{_account_load_sentence(cfg)}"
+    )
+
+
+def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
+    """State the user's per-work-kind target preferences to the conductor.
+
+    The router cannot route across providers, so a preference naming an external
+    account is only ever realisable here: the conductor is the one that picks a
+    delegate_task target. Only offered targets are mentioned — advising a leaf onto
+    a switched-off account would produce a child that never runs.
+    """
+    offered = set(names)
+    pairs = []
+    for kind in WORK_KINDS:
+        target = _preferred_target(kind, cfg)
+        if target and target in offered:
+            pairs.append(f"{kind} -> model:{target}")
+    if not pairs:
+        return ""
+    return (
+        "The operator has set preferred targets per kind of work: "
+        + "; ".join(pairs)
+        + ". Honour these when a leaf matches the kind and the target is free. "
     )
 
 

@@ -20,6 +20,25 @@ callable:
   opus5: true
   sonnet5: true
   qwen: true
+# Preferred models per kind of work, best first. The router takes the first entry
+# that is callable; if that entry is a Codex tier it becomes the route, and if it is
+# an external account (opus5, sonnet5, qwen) it becomes a delegation recommendation
+# to the conductor -- the router cannot rewrite a request's provider, only its model.
+#
+# A kind left out here keeps its built-in route. A kind listed here overrides that
+# route completely, including the safety defaults (design/sensitive/critical), so
+# the order you write is the order that applies.
+preferences: {}
+#  design:    [sol, opus5, terra]
+#  code:      [terra, sol]
+#  explore:   [spark, luna, qwen]
+#  review:    [sonnet5, opus5, terra]
+#  sensitive: [sol, opus5]
+#  critical:  [sol, opus5]
+#  long:      [sol, opus5]
+#  chat:      [luna, spark]
+#  default:   [terra]
+
 fallbacks:
   spark: luna
   luna: terra

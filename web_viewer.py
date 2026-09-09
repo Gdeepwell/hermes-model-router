@@ -25,6 +25,74 @@ RAW_HISTORY_LIMIT = 10000
 CONFIG_PATH = Path("~/.hermes/plugins/model_router/router_config.yaml").expanduser()
 
 
+def _router_module():
+    """Import the router package from this standalone script, or None.
+
+    The dashboard runs as a plain file with its own directory as cwd, so the
+    package only becomes importable once its PARENT is on sys.path. Every call
+    site needs that, which is why it lives here rather than being repeated —
+    an import that skipped it silently returned empty data to the settings page.
+    """
+    try:
+        import sys
+
+        parent = str(Path(__file__).resolve().parent.parent)
+        if parent not in sys.path:
+            sys.path.insert(0, parent)
+        import model_router
+
+        return model_router
+    except Exception:
+        return None
+
+
+def _known_tier_names(config: dict) -> set:
+    """Tier names a preference may legally contain: routable models plus delegation targets."""
+    names = set(config.get("models") or {})
+    names |= set(config.get("callable") or {})
+    router = _router_module()
+    if router is not None:
+        try:
+            names |= set(router._delegation_target_names())
+        except Exception:
+            pass
+    return {str(n).strip().casefold() for n in names if str(n).strip()}
+
+
+def _clean_preferences(raw, config: dict):
+    """``(cleaned, None)`` for a valid preferences map, ``(None, error)`` otherwise.
+
+    Rejects rather than silently drops: a typo'd tier that vanished on save would
+    look like the setting simply did not work.
+    """
+    router = _router_module()
+    WORK_KINDS = tuple(getattr(router, "WORK_KINDS", ())) if router else ()
+    if not isinstance(raw, dict):
+        return None, "preferences must be an object of kind -> ordered list"
+    known = _known_tier_names(config)
+    cleaned = {}
+    for kind, value in raw.items():
+        key = str(kind).strip().casefold()
+        if WORK_KINDS and key not in WORK_KINDS:
+            return None, f"Unknown work kind '{kind}'"
+        if not isinstance(value, list):
+            return None, f"Preference for '{key}' must be a list"
+        order = []
+        for item in value:
+            name = str(item or "").strip().casefold()
+            if not name:
+                continue
+            if name not in known:
+                return None, f"Unknown model '{item}' in '{key}'"
+            if name not in order:
+                order.append(name)
+        # An empty list means "no preference": store nothing rather than a shape
+        # the router would have to special-case.
+        if order:
+            cleaned[key] = order
+    return cleaned, None
+
+
 def _router_status() -> dict:
     """Cooldown state and per-account load, read through the router's own code.
 
@@ -87,7 +155,7 @@ main{max-width:1500px;margin:auto;padding:28px}h1{font-size:26px;margin:0}.sub{c
 label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button{background:#0b111c;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font:inherit}input[type=search]{min-width:260px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{cursor:wait;opacity:.72}.status.refreshing{color:#c4b5fd}.check{display:flex;align-items:center;gap:7px;padding:9px 2px}.check input{accent-color:var(--accent)}
 .card{min-width:135px;flex:1;background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.card .n{font-size:25px;font-weight:750}.card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.luna .n{color:var(--luna)}.spark .n{color:var(--spark)}.terra .n{color:var(--terra)}.sol .n{color:var(--sol)}.opus5 .n{color:var(--opus5)}.sonnet5 .n{color:var(--sonnet5)}.qwen .n{color:var(--qwen)}
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:14px;background:rgba(13,18,29,.92)}table{border-collapse:collapse;table-layout:fixed;width:1405px;min-width:100%}th{position:sticky;top:0;background:#161e2c;color:var(--muted);font-size:11px;letter-spacing:.07em;text-align:left;text-transform:uppercase;user-select:none}th,td{padding:11px 13px;border-bottom:1px solid #1e2838;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.prompt-text{min-width:0}.word-wrap .prompt-text{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}.resizer{position:absolute;z-index:2;top:0;right:-4px;width:9px;height:100%;cursor:col-resize;touch-action:none}.resizer::after{content:'';position:absolute;left:4px;top:20%;width:1px;height:60%;background:#3b4a62}.resizer:hover::after,.resizer.dragging::after{width:2px;background:var(--accent)}body.resizing{cursor:col-resize;user-select:none}tbody tr:hover{background:#151d2b}code{color:#b9c5d8}.pill{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:2px 8px;font-size:12px;font-weight:700;margin-right:4px}.pill.luna{color:var(--luna)}.pill.spark{color:var(--spark)}.pill.terra{color:var(--terra)}.pill.sol{color:var(--sol)}.pill.opus5{color:var(--opus5)}.pill.sonnet5{color:var(--sonnet5)}.pill.qwen{color:var(--qwen)}.route{white-space:nowrap}.reason{color:#c2ccdb}.running-agent-pill{display:inline-block;margin-left:8px;padding:2px 7px;border:1px solid #88e36f;border-radius:99px;color:#88e36f;font-size:10px;font-weight:800;letter-spacing:.06em;vertical-align:middle;animation:agentPulse 1.4s ease-in-out infinite}@keyframes agentPulse{50%{box-shadow:0 0 11px rgba(136,227,111,.7)}}.play-indicator{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;margin-left:8px;border-radius:50%;background:#54d66a;color:#07110b;font-size:10px;font-weight:900;vertical-align:middle;box-shadow:0 0 12px rgba(84,214,106,.75);animation:agentPulse 1.4s ease-in-out infinite}.active-router-row{background:rgba(84,214,106,.055)}.calls,.expand{text-align:center}.prompt-toggle{border:0;background:transparent;padding:0;color:var(--accent);font-size:15px;line-height:1}.prompt-toggle:hover{border:0;color:#c4b5fd}.detail>td{padding:10px 13px 14px;background:#0b111c;overflow:visible}.details-table{width:calc(100% - 28px);min-width:0;margin-left:28px;border:1px solid #253044;border-radius:8px;table-layout:fixed}.details-table th{position:static;background:#111927}.details-table th,.details-table td{padding:8px 10px;font-size:12px}.details-table tbody tr:last-child td{border-bottom:0}.status{margin-left:auto;color:var(--muted);padding:9px 4px}.empty{text-align:center;color:#8997ad;padding:40px}.error{color:#ff6b7a} @media(max-width:700px){main{padding:16px}input[type=search]{min-width:180px}.status{width:100%;margin:0}}
-</style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:nowrap}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
+</style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:nowrap}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
 </head>
 <body><main>
 <div class="lab-header"><div><div class="lab-kicker" data-i18n="lab.kicker">HERMES · LOCAL OBSERVABILITY</div><div class="lab-title" data-i18n="lab.title">AI Home Lab</div><div class="sub" data-i18n="lab.sub">Modellek, háttéragentek és élő munkafolyamatok egy helyen</div></div><nav class="tabs" aria-label="AI Home Lab nézetek"><button class="tab active" data-tab="router"><span data-i18n="tab.router">Model Router</span></button><button class="tab" data-tab="settings"><span data-i18n="tab.settings">Beállítások</span></button><button class="tab" data-tab="command"><span data-i18n="tab.command">Hermes Command Center</span></button></nav></div>
@@ -103,7 +171,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 </div>
 <div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-5.6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-5.6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
 <div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.callable">Modellek hívhatósága</h3><div class="toggle-grid" id="callable-toggles"></div><div class="account-load" id="account-load"></div></div><div class="settings-section"><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
+<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.callable">Modellek hívhatósága</h3><div class="toggle-grid" id="callable-toggles"></div><div class="account-load" id="account-load"></div></div><div class="settings-section"><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
 <section id="command-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="tab.command">Hermes Command Center</span></h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
 </main>
 <script>
@@ -200,6 +268,23 @@ const I18N = {
     'settings.load.empty': 'No routed calls in the window.',
     'settings.default.heading': 'Default model (Orchestrator)',
     'settings.default.desc': 'This model handles default routing and the orchestrator role',
+    'settings.prefs.heading': 'Preferred models per kind of work',
+    'settings.prefs.sub': 'In order, best first. The router takes the first callable entry.',
+    'settings.prefs.add': 'add model...',
+    'settings.prefs.empty': 'No preference — the built-in route applies.',
+    'settings.prefs.note': 'A grey chip is routed by the router itself. A purple one is on another account, so it is passed to the conductor as a delegation recommendation.',
+    'settings.prefs.up': 'move up',
+    'settings.prefs.down': 'move down',
+    'settings.prefs.remove': 'remove',
+    'kind.design': 'UI and visual design',
+    'kind.code': 'Writing code',
+    'kind.explore': 'Exploring, read-only inspection',
+    'kind.review': 'Review, critique',
+    'kind.sensitive': 'Security sensitive (auth, payment)',
+    'kind.critical': 'Critical (deploy, migration, production)',
+    'kind.long': 'Long requests',
+    'kind.chat': 'Short conversation',
+    'kind.default': 'Everything else',
     'settings.language': 'Language',
     'settings.lang.en': 'English',
     'settings.lang.hu': 'Magyar',
@@ -351,6 +436,23 @@ const I18N = {
     'settings.load.empty': 'Nincs routolt hívás az ablakban.',
     'settings.default.heading': 'Alapértelmezett modell (Orchestrator)',
     'settings.default.desc': 'Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört',
+    'settings.prefs.heading': 'Preferált modellek munkatípusonként',
+    'settings.prefs.sub': 'Sorrendben, a legjobb elöl. A router az első hívható elemet választja.',
+    'settings.prefs.add': 'modell hozzáadása...',
+    'settings.prefs.empty': 'Nincs preferencia — a beépített útvonal érvényes.',
+    'settings.prefs.note': 'A szürke elemet maga a router irányítja. A lila másik fiókon van, ezért delegációs ajánlásként kerül a karmesterhez.',
+    'settings.prefs.up': 'előrébb',
+    'settings.prefs.down': 'hátrébb',
+    'settings.prefs.remove': 'eltávolítás',
+    'kind.design': 'UI és vizuális tervezés',
+    'kind.code': 'Kódírás',
+    'kind.explore': 'Feltárás, csak olvasó vizsgálat',
+    'kind.review': 'Review, véleményezés',
+    'kind.sensitive': 'Biztonságérzékeny (auth, fizetés)',
+    'kind.critical': 'Kritikus (deploy, migráció, produkció)',
+    'kind.long': 'Hosszú kérések',
+    'kind.chat': 'Rövid beszélgetés',
+    'kind.default': 'Minden más',
     'settings.language': 'Nyelv',
     'settings.lang.en': 'English',
     'settings.lang.hu': 'Magyar',
@@ -491,6 +593,7 @@ function renderSettings(){
     `;
     togglesContainer.appendChild(item);
   }
+  renderPreferences(modelLabels);
   const loadBox=$('account-load');
   if(loadBox){
     const load=currentConfig.load||{},accounts=Object.keys(load).sort((a,b)=>load[b]-load[a]||a.localeCompare(b));
@@ -548,6 +651,22 @@ function setWordWrap(){const enabled=$('word-wrap').checked;$('log-table').class
 document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>setTab(tab.dataset.tab)));for(const id of ['tier','search','grouped'])$(id).addEventListener('input',render);$('word-wrap').checked=localStorage.getItem('model-router-word-wrap')==='1';$('word-wrap').addEventListener('input',setWordWrap);setWordWrap();initColumnResize();setTab(selectedTab||'router',false); applyLanguage();
 
 // Settings event listeners
+document.getElementById('pref-kinds').addEventListener('click',(e)=>{
+  const btn=e.target.closest('button[data-act]');
+  if(!btn||!currentConfig)return;
+  mutatePreference(btn.dataset.kind,Number(btn.dataset.index),btn.dataset.act);
+});
+
+document.getElementById('pref-kinds').addEventListener('change',(e)=>{
+  const select=e.target.closest('select.pref-add');
+  if(!select||!select.value||!currentConfig)return;
+  const kind=select.dataset.kind;
+  const prefs=currentConfig.preferences=currentConfig.preferences||{};
+  prefs[kind]=(prefs[kind]||[]).concat([select.value]);
+  renderSettings();
+  saveSettings();
+});
+
 document.getElementById('callable-toggles').addEventListener('change',async(e)=>{
   if(e.target.type!=='checkbox'||!currentConfig)return;
   const model=e.target.dataset.model;
@@ -572,13 +691,67 @@ document.getElementById('language-select').addEventListener('change',async(e)=>{
 });
 // Initialize language select value on load
 document.getElementById('language-select').value=currentLang;
+function renderPreferences(modelLabels){
+  const box=$('pref-kinds');
+  if(!box)return;
+  const kinds=currentConfig.work_kinds||[];
+  const prefs=currentConfig.preferences||{};
+  const routable=currentConfig.routable||[];
+  const callable=currentConfig.callable||{};
+  // Only offer what is switched on: a chain entry that can never be called is a
+  // setting that silently does nothing.
+  const available=Object.keys(modelLabels).filter(m=>callable[m]!==false);
+  box.innerHTML='';
+  for(const kind of kinds){
+    const chain=prefs[kind]||[];
+    const row=document.createElement('div');
+    row.className='pref-kind';
+    const chips=chain.map((m,i)=>{
+      const external=!routable.includes(m);
+      return `<span class="pref-chip${external?' external':''}">`
+        +`<span class="rank">${i+1}.</span>${modelLabels[m]||m}`
+        +`<button data-kind="${kind}" data-index="${i}" data-act="up" title="${t('settings.prefs.up')}">&#9650;</button>`
+        +`<button data-kind="${kind}" data-index="${i}" data-act="down" title="${t('settings.prefs.down')}">&#9660;</button>`
+        +`<button data-kind="${kind}" data-index="${i}" data-act="del" title="${t('settings.prefs.remove')}">&times;</button>`
+        +`</span>`;
+    }).join('');
+    const options=available.filter(m=>!chain.includes(m))
+      .map(m=>`<option value="${m}">${modelLabels[m]||m}</option>`).join('');
+    row.innerHTML=`<div class="pref-kind-head"><div>`
+      +`<div class="pref-kind-name">${t('kind.'+kind)}</div>`
+      +`<div class="pref-kind-desc">${kind}</div></div></div>`
+      +`<div class="pref-chain">${chips||`<span class="pref-empty">${t('settings.prefs.empty')}</span>`}`
+      +(options?`<select class="pref-add" data-kind="${kind}"><option value="">${t('settings.prefs.add')}</option>${options}</select>`:'')
+      +`</div>`;
+    box.appendChild(row);
+  }
+  const note=document.createElement('div');
+  note.className='pref-note';
+  note.textContent=t('settings.prefs.note');
+  box.appendChild(note);
+}
+
+function mutatePreference(kind,index,act){
+  const prefs=currentConfig.preferences=currentConfig.preferences||{};
+  const chain=(prefs[kind]||[]).slice();
+  if(act==='del')chain.splice(index,1);
+  else if(act==='up'&&index>0){[chain[index-1],chain[index]]=[chain[index],chain[index-1]];}
+  else if(act==='down'&&index<chain.length-1){[chain[index],chain[index+1]]=[chain[index+1],chain[index]];}
+  else return;
+  // An emptied chain means "no preference": drop the key so the router keeps its
+  // built-in route rather than seeing an empty list it would have to interpret.
+  if(chain.length)prefs[kind]=chain; else delete prefs[kind];
+  renderSettings();
+  saveSettings();
+}
+
 async function saveSettings(){
   if(!currentConfig)return;
   const statusEl=$('settings-status');
   statusEl.textContent=t('settings.saving');
   statusEl.style.color='#c4b5fd';
   try{
-    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,default_model:currentConfig.default_model})});
+    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,default_model:currentConfig.default_model,preferences:currentConfig.preferences||{}})});
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
     const result=await response.json();
     if(result.success){
@@ -742,6 +915,16 @@ class Handler(BaseHTTPRequestHandler):
                     config = yaml.safe_load(f) or {}
                 if "callable" in data:
                     config["callable"] = data["callable"]
+                if "preferences" in data:
+                    cleaned, error = _clean_preferences(data["preferences"], config)
+                    if error:
+                        self._send(
+                            400,
+                            json.dumps({"error": error, "success": False}).encode("utf-8"),
+                            "application/json",
+                        )
+                        return
+                    config["preferences"] = cleaned
                 if "default_model" in data:
                     requested_default = str(data["default_model"])
                     callable_tiers = config.get("callable") or {}
@@ -878,9 +1061,15 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                     config = yaml.safe_load(f) or {}
+                router = _router_module()
+                work_kinds = list(getattr(router, "WORK_KINDS", ())) if router else []
                 response = {
                     "callable": config.get("callable", {}),
                     "default_model": config.get("default_model", "terra"),
+                    "preferences": config.get("preferences") or {},
+                    "work_kinds": work_kinds,
+                    # ``routable`` (which names the router can serve itself, as opposed to
+                    # delegation-only targets) already comes from _router_status().
                     **_router_status(),
                 }
                 self._send(200, json.dumps(response).encode("utf-8"), "application/json")

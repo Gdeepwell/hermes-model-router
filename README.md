@@ -103,6 +103,29 @@ delegation:
       model: claude-sonnet-5
 ```
 
+
+### Preferred models per kind of work
+
+The Settings tab carries an ordered chain per work kind — `design`, `code`,
+`explore`, `review`, `sensitive`, `critical`, `long`, `chat`, `default`. The
+router walks the chain and takes the first entry that is switched on.
+
+A chain entry means one of two different things, and the dashboard colours them
+differently because the difference is not cosmetic:
+
+- **A tier of the router's own provider** (`luna`, `spark`, `terra`, `sol`) is a
+  real route. The router rewrites the model and the chain also replaces the
+  built-in fallback order for that kind.
+- **Anything on another account** (`opus5`, `sonnet5`, `qwen`) cannot be routed
+  to at all: `route_llm_request` runs after the provider is chosen, so it can only
+  swap models inside one provider. Such an entry is passed to the conductor as a
+  delegation recommendation instead — it reaches work through `delegate_task`.
+
+A kind with no chain keeps its built-in route, so configuring nothing changes
+nothing. A kind with a chain overrides that route **completely**, including the
+safety defaults that send design, security and deployment work to Sol. That is
+deliberate: the operator owns the mapping.
+
 **These targets are on.** They shipped switched off for months because every
 call returned:
 
