@@ -172,6 +172,31 @@ nothing. A kind with a chain overrides that route **completely**, including the
 safety defaults that send design, security and deployment work to Sol. That is
 deliberate: the operator owns the mapping.
 
+### Hermes fallback chains
+
+The Settings tab also edits the two chains that live in **Hermes's** config rather
+than the router's, because that is where a cross-account rescue is decided:
+
+| Chain | Key in `~/.hermes/config.yaml` | Applies to |
+|---|---|---|
+| Orchestrator | `fallback_providers` | the main agent, when its own provider cannot serve |
+| Delegated workers | `delegation.fallback_providers` | every child spawned by `delegate_task` |
+
+The second is not optional in practice. A child pinned to a target — anything
+spawned with `model: "opus5"` and friends — **never inherits the orchestrator's
+chain**, so without its own it runs with no fallback at all: a quota-exhausted
+leaf simply dies mid-task. An empty list there means "no fallback", which is a
+different instruction from the key being absent.
+
+Do not confuse either with the router's own `fallbacks:`, which substitutes tiers
+*within* one provider and cannot cross accounts.
+
+The picker offers only routes that exist as `delegation.targets`, so a chain
+cannot name something the installation cannot run. Because this file is not the
+router's — it also carries providers, approvals and the command allowlist — every
+save first copies it to `config.yaml.bak-router-<timestamp>`, and a config that
+cannot be read is refused rather than overwritten.
+
 ### Reasoning effort per tier
 
 A route carries an effort level, not just a model name. `effort:` sets it per tier,
@@ -555,6 +580,8 @@ pytest
 ```
 
 ## Version
+
+**1.9.0** — Hermes's orchestrator and delegated-worker fallback chains are editable from Settings, with a restore point before every write
 
 **1.8.2** — Quota cooldowns last as long as the provider says and cover every tier on that account, instead of 15 minutes on the one tier that happened to ask
 

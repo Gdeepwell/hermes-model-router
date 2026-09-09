@@ -657,3 +657,92 @@ class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
             self.assertTrue(english.strip(), kind)
             self.assertTrue(hungarian.strip(), kind)
             self.assertNotEqual(english, hungarian, f"kind.{kind} is untranslated")
+
+
+class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
+    """The chains live in Hermes's config, not the router's — so the editor has to be
+    careful with a file it does not own, and the UI has to say which file it writes."""
+
+    OPTIONS = [
+        {"key": "opus5", "provider": "anthropic", "model": "claude-opus-5"},
+        {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"},
+        {"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"},
+    ]
+
+    def test_a_route_outside_the_configured_targets_is_rejected(self):
+        """Offering a route the installation lacks would configure a leaf that cannot run."""
+        chain, error = web_viewer._clean_fallback_chain(
+            [{"provider": "evil", "model": "x"}], self.OPTIONS)
+        self.assertIsNone(chain)
+        self.assertIn("Unknown route", error)
+
+    def test_an_incomplete_entry_is_rejected(self):
+        chain, error = web_viewer._clean_fallback_chain([{"provider": "anthropic"}], self.OPTIONS)
+        self.assertIsNone(chain)
+        self.assertIn("needs a provider and a model", error)
+
+    def test_duplicates_collapse_and_order_is_kept(self):
+        chain, error = web_viewer._clean_fallback_chain([
+            {"provider": "qwen-token", "model": "qwen3.7-plus"},
+            {"provider": "anthropic", "model": "claude-opus-5"},
+            {"provider": "qwen-token", "model": "qwen3.7-plus"},
+        ], self.OPTIONS)
+        self.assertIsNone(error)
+        self.assertEqual([e["model"] for e in chain], ["qwen3.7-plus", "claude-opus-5"])
+
+    def test_an_empty_chain_is_preserved_not_dropped(self):
+        """For a delegated worker [] means "no fallback" — not "inherit the parent's"."""
+        chain, error = web_viewer._clean_fallback_chain([], self.OPTIONS)
+        self.assertIsNone(error)
+        self.assertEqual(chain, [])
+
+    def test_an_absent_chain_is_left_alone(self):
+        self.assertEqual(web_viewer._clean_fallback_chain(None, self.OPTIONS), (None, None))
+
+    def test_a_write_keeps_a_restore_point(self):
+        """This file carries providers, approvals and the command allowlist."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text("model:\n  default: gpt-5.6-terra\n", encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                web_viewer._write_hermes_config({"model": {"default": "changed"}})
+            backups = list(Path(directory).glob("config.yaml.bak-router-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("gpt-5.6-terra", backups[0].read_text(encoding="utf-8"))
+            self.assertIn("changed", target.read_text(encoding="utf-8"))
+
+    def test_saving_one_chain_does_not_clear_the_other(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text(
+                "delegation:\n  fallback_providers:\n  - provider: anthropic\n    model: claude-opus-5\n",
+                encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_fallback_chain_options", return_value=self.OPTIONS):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [{"provider": "qwen-token", "model": "qwen3.7-plus"}]}, {})
+            self.assertIsNone(error)
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["delegation"]["fallback_providers"][0]["model"], "claude-opus-5")
+            self.assertEqual(written["fallback_providers"][0]["model"], "qwen3.7-plus")
+
+    def test_an_unreadable_config_is_never_overwritten(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "absent.yaml"
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", missing), \
+                 patch.object(web_viewer, "_fallback_chain_options", return_value=self.OPTIONS):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [{"provider": "qwen-token", "model": "qwen3.7-plus"}]}, {})
+            self.assertIn("could not be read", error)
+            self.assertFalse(missing.exists())
+
+    def test_the_section_names_the_file_it_writes_in_both_languages(self):
+        english, hungarian = self.i18n("settings.fb.file")
+        for text in (english, hungarian):
+            self.assertIn("~/.hermes/config.yaml", text)
