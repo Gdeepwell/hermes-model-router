@@ -35,12 +35,12 @@ def _cfg(temp_dir, **overrides):
     return cfg
 
 
-def _delegating_request(model="claude-sonnet-5"):
+def _delegating_request(model="claude-sonnet-5", tool_name="delegate_task"):
     request = chat_request(ACTIONABLE)
     # The body carries the model actually in use, as it does in a real call.
     request["model"] = model
     request["tools"] = [{
-        "type": "function", "name": "delegate_task",
+        "type": "function", "name": tool_name,
         "parameters": {"type": "object", "properties": {"goal": {"type": "string"},
                                                         "role": {"type": "string"}}},
     }]
@@ -48,13 +48,27 @@ def _delegating_request(model="claude-sonnet-5"):
 
 
 class ExternalParentOrchestrationTests(unittest.TestCase):
-    def _route(self, model, cfg):
+    def _route(self, model, cfg, tool_name="delegate_task"):
         with patch("model_router._load_config", return_value=cfg), \
              patch("model_router._log_decision"), \
              patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")):
             return route_llm_request(
-                request=_delegating_request(model), provider="anthropic", model=model,
+                request=_delegating_request(model, tool_name), provider="anthropic", model=model,
                 api_call_count=1, turn_id="external-parent-turn")
+
+    def test_the_claude_code_mcp_prefix_still_counts_as_the_delegate_tool(self):
+        """Anthropic OAuth requests are normalised for Claude Code, which renames every
+        tool to mcp__<name>. Matching the bare name told a Claude parent it had no
+        delegate_task and skipped its preflight — measured live before this fix."""
+        with tempfile.TemporaryDirectory() as d:
+            routed = self._route("claude-sonnet-5", _cfg(d), tool_name="mcp__delegate_task")
+        self.assertIsNotNone(routed, "the mcp__-prefixed tool was not recognised")
+        schema = routed["request"]["tools"][0]["parameters"]
+        self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
+
+    def test_a_request_with_no_delegate_tool_is_still_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(self._route("claude-sonnet-5", _cfg(d), tool_name="read_file"))
 
     def test_a_parent_on_another_account_still_gets_the_preflight(self):
         with tempfile.TemporaryDirectory() as d:

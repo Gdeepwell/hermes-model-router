@@ -167,6 +167,17 @@ The forced conductor follows `default_model` when that tier is callable, and its
 `fallbacks` chain when it is not — pinning the planner to an account that has just
 run out is how the preflight used to fail exactly when it was needed.
 
+One more thing had to change for this to actually fire. An Anthropic OAuth request
+is normalised for Claude Code compatibility, which renames every tool to
+`mcp__<name>` — so a Claude parent was told it had no `delegate_task` tool and
+skipped its preflight. The lookup accepts both names now, and the four places that
+each carried their own copy of it share one function, which is why the mismatch
+survived as long as it did.
+
+`preflight_skipped` events record the tool names that were on offer, so "no
+delegate_task tool" can be told apart from "no tools at all" and from "a name this
+router does not recognise" without adding instrumentation after the fact.
+
 ### Preferred models per kind of work
 
 Configured under `preferences:` in `router_config.yaml`, or from the Settings
@@ -598,6 +609,8 @@ pytest
 ```
 
 ## Version
+
+**1.9.2** — A Claude parent's `mcp__`-prefixed delegate_task is recognised, so the preflight it was granted in 1.9.1 actually fires
 
 **1.9.1** — A parent moved onto a fallback account keeps its delegation contract, the forced conductor follows the callable chain, and the contract no longer claims Claude is unavailable
 

@@ -1332,12 +1332,9 @@ def _prepare_shadow_delegation(request: Dict[str, Any], benchmark_id: str) -> Di
         "actions. Request a concise evidence-based plan, risks, test/review checklist, and proposed answer.\n"
     )
     _append_user_instruction(shadow, instruction)
-    delegate_tool = next(
-        tool
-        for tool in shadow.get("tools") or []
-        if isinstance(tool, dict)
-        and (tool.get("name") == "delegate_task" or (tool.get("function") or {}).get("name") == "delegate_task")
-    )
+    delegate_tool = _find_delegate_tool(shadow)
+    if delegate_tool is None:
+        return shadow
     # Codex Responses has historically treated a named function choice as a
     # best-effort hint. A one-tool, required call is deterministic and leaves
     # the normal complete toolset untouched on the following parent iteration.
@@ -1375,12 +1372,36 @@ def _append_user_instruction(request: Dict[str, Any], instruction: str) -> None:
         items[index]["content"] = [*content, {"type": block_type, "text": instruction}]
 
 
+def _tool_names(request: Any) -> list:
+    """Tool names in a request, in either wire shape; [] when there are none."""
+    if not isinstance(request, dict):
+        return []
+    names = []
+    for tool in request.get("tools") or []:
+        if isinstance(tool, dict):
+            name = tool.get("name") or (tool.get("function") or {}).get("name")
+            if name:
+                names.append(str(name))
+    return names
+
+
+# Anthropic OAuth requests are normalised for Claude Code compatibility, which
+# prefixes every tool name with ``mcp__``. Matching the bare name there found
+# nothing, so a parent on a Claude account was told it had no delegate_task tool
+# and skipped its preflight — the one path where spreading work matters most.
+_DELEGATE_TOOL_NAMES = frozenset({"delegate_task", "mcp__delegate_task"})
+
+
+def _is_delegate_tool_name(name: Any) -> bool:
+    return isinstance(name, str) and name in _DELEGATE_TOOL_NAMES
+
+
 def _find_delegate_tool(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return the delegate_task tool definition in either wire shape."""
+    """Return the delegate_task tool definition in any wire shape or naming."""
     for tool in request.get("tools") or []:
         if isinstance(tool, dict) and (
-            tool.get("name") == "delegate_task"
-            or (tool.get("function") or {}).get("name") == "delegate_task"
+            _is_delegate_tool_name(tool.get("name"))
+            or _is_delegate_tool_name((tool.get("function") or {}).get("name"))
         ):
             return tool
     return None
@@ -1789,12 +1810,11 @@ def _prepare_orchestration_delegation(
         f"The current parent must not perform normal implementation; the {orchestrator_tier} conductor owns the reviewed result.\n"
     )
     _append_user_instruction(routed, instruction)
-    delegate_tool = next(
-        tool
-        for tool in routed.get("tools") or []
-        if isinstance(tool, dict)
-        and (tool.get("name") == "delegate_task" or (tool.get("function") or {}).get("name") == "delegate_task")
-    )
+    # Third copy of the same lookup, and the one that raised rather than skipping when
+    # the name did not match. All three now go through _find_delegate_tool.
+    delegate_tool = _find_delegate_tool(routed)
+    if delegate_tool is None:
+        return routed
     # Do not merely ask the parent to create an orchestrator: constrain the
     # one permitted tool schema so the runtime receives an actual
     # ``role=orchestrator`` child. Natural-language instructions alone are not
@@ -1877,11 +1897,9 @@ def _prepare_sol_opus5_preflight(request: Dict[str, Any], plan_id: str) -> Dict[
         "payments, or production changes during preflight. Spark and Terra are not preflight targets for this request.\n"
     )
     _append_user_instruction(routed, instruction)
-    delegate_tool = next(
-        tool for tool in routed.get("tools") or []
-        if isinstance(tool, dict)
-        and (tool.get("name") == "delegate_task" or (tool.get("function") or {}).get("name") == "delegate_task")
-    )
+    delegate_tool = _find_delegate_tool(routed)
+    if delegate_tool is None:
+        return routed
     routed["tools"] = [delegate_tool]
     routed["tool_choice"] = "required"
     routed["parallel_tool_calls"] = False
@@ -1957,12 +1975,9 @@ def _orchestration_skip_reason(
         return f"mid_loop_call:{api_call_count}"
     if str(kwargs.get("platform", "")).casefold() == "subagent" or ":sa-" in str(kwargs.get("turn_id", "")):
         return "subagent_turn"
-    tools = request.get("tools") or []
-    if not any(
-        isinstance(tool, dict)
-        and (tool.get("name") == "delegate_task" or (tool.get("function") or {}).get("name") == "delegate_task")
-        for tool in tools
-    ):
+    # One owner for "is delegate_task on offer": this duplicated the check inline and
+    # the two copies drifted the moment Anthropic's mcp__ prefix appeared.
+    if _find_delegate_tool(request) is None:
         return "no_delegate_task_tool"
     items = _request_items(request)
     user_text, user_index = _last_user_text_and_index(items)
@@ -2051,6 +2066,10 @@ def _force_terra_supervisor_preflight(
                         "turn_id": turn_id,
                         "parent_model": decision.tier,
                         "skip_reason": skip_reason,
+                        # Names only, no schemas: "no delegate_task tool" is otherwise
+                        # indistinguishable from "no tools at all" or "a different wire
+                        # shape", and those need different fixes.
+                        "tools_seen": _tool_names(kwargs.get("request")),
                     },
                 )
         return None
@@ -2103,12 +2122,7 @@ def _shadow_eligible(kwargs: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
         return False
     if "[image attached" in _normalise(text) or "[screenshot]" in _normalise(text):
         return False
-    tools = request.get("tools") or []
-    has_delegate_tool = any(
-        isinstance(tool, dict)
-        and (tool.get("name") == "delegate_task" or (tool.get("function") or {}).get("name") == "delegate_task")
-        for tool in tools
-    )
+    has_delegate_tool = _find_delegate_tool(request) is not None
     if not has_delegate_tool:
         return False
     return classify_request(request, api_call_count=1, config=cfg).tier == "terra"
