@@ -149,6 +149,24 @@ A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
 an agent, so it cannot write and holds a child slot for the duration; the native
 target above supersedes it for ordinary work.
 
+### A parent on a fallback account still orchestrates
+
+Rewriting a model is provider-bound; orchestrating is not. When Hermes's own
+fallback chain moves the orchestrator onto another account — Codex out of quota,
+so the parent continues on Sonnet — that parent is still the orchestrator and
+still gets the preflight, the delegation contract and the `model:` parameter
+contract. Its model is never rewritten, because this middleware cannot change a
+request's provider; only the instructions are added.
+
+Until 1.9.1 it did not: `route_llm_request` returned early for any model outside
+its own provider, so a parent on a fallback account silently lost its contract
+and worked alone. A second gate compounded it by recognising only Sol and
+`default_model` as orchestrators.
+
+The forced conductor follows `default_model` when that tier is callable, and its
+`fallbacks` chain when it is not — pinning the planner to an account that has just
+run out is how the preflight used to fail exactly when it was needed.
+
 ### Preferred models per kind of work
 
 Configured under `preferences:` in `router_config.yaml`, or from the Settings
@@ -580,6 +598,8 @@ pytest
 ```
 
 ## Version
+
+**1.9.1** — A parent moved onto a fallback account keeps its delegation contract, the forced conductor follows the callable chain, and the contract no longer claims Claude is unavailable
 
 **1.9.0** — Hermes's orchestrator and delegated-worker fallback chains are editable from Settings, with a restore point before every write
 

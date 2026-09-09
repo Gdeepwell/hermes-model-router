@@ -1718,6 +1718,35 @@ def _account_load_sentence(cfg: Dict[str, Any]) -> str:
     )
 
 
+def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
+    """The tier the forced conductor child should run on.
+
+    ``default_model`` when it can actually be called, otherwise the first callable
+    tier its ``fallbacks`` chain reaches. Pinning the conductor to a configured
+    default is what made an exhausted account fail the whole preflight: the parent
+    had already moved to a working account, and its planner was still being sent
+    to the one that had run out.
+    """
+    cfg = cfg or {}
+    default = str(cfg.get("default_model", "terra"))
+    if _is_callable_tier(default, cfg):
+        return default
+    chain = cfg.get("fallbacks") or {}
+    seen, current = {default}, default
+    for _ in range(3):
+        nxt = str(chain.get(current) or "")
+        if not nxt or nxt in seen:
+            break
+        if _is_callable_tier(nxt, cfg):
+            return nxt
+        seen.add(nxt)
+        current = nxt
+    for tier in (cfg.get("models") or {}):
+        if _is_callable_tier(tier, cfg):
+            return tier
+    return default
+
+
 def _prepare_orchestration_delegation(
     request: Dict[str, Any],
     plan_id: str,
@@ -1732,10 +1761,7 @@ def _prepare_orchestration_delegation(
     parent must use returned evidence, explicitly accept/reject it, and retain
     integration ownership.
     """
-    # Determine orchestrator tier from config (respects default_model set in web UI)
-    orchestrator_tier = "qwen"  # default
-    if cfg:
-        orchestrator_tier = str(cfg.get("default_model", "qwen"))
+    orchestrator_tier = _conductor_tier(cfg)
     
     routed = deepcopy(request)
     instruction = (
@@ -1750,8 +1776,9 @@ def _prepare_orchestration_delegation(
         "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
         f"{_model_param_contract(orchestrator_tier, cfg)} "
-        "A [sonnet-review] or [opus-review] leaf is the one exception: it takes no 'model', because its route is its label. "
-        "That is the only route to Claude here -- the Anthropic subscription does not fund third-party API access, so a Claude delegation target is switched off. "
+        "A [sonnet-review] or [opus-review] leaf takes no 'model', because its route is its label; it is read-only "
+        "and replaces a single call rather than running an agent. For real work prefer a native Claude target via "
+        "model:opus5 / model:sonnet5 when one is offered. "
         "Write the goal as objective and acceptance criteria only: what must change, where, and how it is verified. "
         "Do not restate this routing policy inside the goal. The conductor already receives it verbatim as an immutable "
         "contract in the required `context` field, and the goal is re-read as a description of the work -- routing "
@@ -1907,7 +1934,11 @@ def _orchestration_skip_reason(
     sol_preflight = decision.tier == "sol" and _sol_opus5_preflight_enabled(cfg)
     # Orchestration is enabled for Sol (design preflight) and the configured
     # default_model (which acts as the general-purpose orchestrator).
-    orchestration_tiers = {"sol"} | {str(cfg.get("default_model", "terra"))}
+    # An external parent (a fallback account) orchestrates exactly like a local one:
+    # only the model rewrite is provider-bound, the delegation contract is not.
+    orchestration_tiers = (
+        {"sol"} | {str(cfg.get("default_model", "terra"))} | set(_delegation_target_names())
+    )
     if not policy.get("enabled"):
         return "orchestration_disabled"
     if decision.tier not in orchestration_tiers:
@@ -2139,17 +2170,21 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     supported_models = set(cfg.get("models", {}).values())
     request = kwargs.get("request")
     # Accept requests from any provider that has supported models
+    external_parent = ""
     if active_model not in supported_models:
         external = _external_target_for_model(active_model)
-        if external:
-            # Observed, not routed: the decision stays the parent's, but the call
-            # now appears in the log the dashboard and the load report read.
-            _log_decision(
-                RouteDecision(external, active_model, "external delegation target", "external"),
-                kwargs,
-                cfg,
-            )
-        return None
+        if not external:
+            return None
+        # Observed, not routed: the model stays the parent's, because this middleware
+        # can only rewrite within one provider. Orchestration is not provider-bound
+        # though, and returning here meant a parent on a fallback account silently
+        # lost its delegation contract and worked alone.
+        _log_decision(
+            RouteDecision(external, active_model, "external delegation target", "external"),
+            kwargs,
+            cfg,
+        )
+        external_parent = external
     if not isinstance(request, dict):
         return None
 
@@ -2157,6 +2192,29 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         str(kwargs.get("platform", "")).casefold() == "subagent"
         or ":sa-" in str(kwargs.get("turn_id", ""))
     )
+
+    if external_parent:
+        # No classification and no rewrite: the route is not ours to choose. The only
+        # thing owed here is the preflight that turns a lone parent into a conductor.
+        decision = RouteDecision(
+            external_parent, active_model, "external delegation target", "external",
+        )
+        forced = _force_terra_supervisor_preflight(kwargs, cfg, decision)
+        if forced is None:
+            return None
+        # Same envelope as the normal path, minus any model/provider change: the
+        # request carries the added contract, the route stays exactly as it arrived.
+        return {
+            "request": forced,
+            "source": "model-router",
+            "reason": decision.reason,
+            "metadata": {
+                "tier": decision.tier,
+                "model": active_model,
+                "effort": decision.effort,
+                "provider": kwargs.get("provider"),
+            },
+        }
 
     decision = classify_request(
         request,

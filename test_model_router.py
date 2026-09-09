@@ -1543,7 +1543,10 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIn("context", schema["required"])
         self.assertEqual(len(schema["properties"]["context"]["enum"]), 1)
         contract = schema["properties"]["context"]["enum"][0]
-        self.assertIn("qwen planning conductor", contract)
+        # "terra": the conductor tier follows default_model, which this config omits.
+        # The fallback used to differ between the contract builder ("qwen") and the
+        # orchestration gate ("terra") — one key, two answers. Now there is one.
+        self.assertIn("terra planning conductor", contract)
         self.assertIn("Do not perform design analysis or design implementation", contract)
         self.assertIn("Sol", contract)
         self.assertIn("non-design read-only", contract)
