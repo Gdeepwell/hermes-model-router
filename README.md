@@ -178,6 +178,23 @@ survived as long as it did.
 delegate_task tool" can be told apart from "no tools at all" and from "a name this
 router does not recognise" without adding instrumentation after the fact.
 
+### Default model vs. preference chains
+
+These look redundant and are not. `default_model` decides five things; a
+preference chain overrides exactly one of them:
+
+| | overridden by a chain? |
+|---|---|
+| the general-purpose route when no gate matches | **yes**, by the `default` kind |
+| which tier counts as an orchestrator at all | no |
+| the tier the forced conductor runs on | no |
+| whether the preflight dispatches | no |
+| **the model Hermes itself starts on** (`model.default`, `model.provider`) | no |
+
+The last row is the one that matters: a chain re-routes a turn, it does not change
+which model the process launches with. Setting `default_model` in the dashboard
+writes Hermes's own config as well as the router's.
+
 ### Preferred models per kind of work
 
 Configured under `preferences:` in `router_config.yaml`, or from the Settings
@@ -652,6 +669,8 @@ pytest
 ```
 
 ## Version
+
+**1.9.3** — A long cooldown reason wraps inside its card instead of displacing the switch; the settings labels say what only they control
 
 **1.9.2** — A Claude parent's `mcp__`-prefixed delegate_task is recognised, so the preflight it was granted in 1.9.1 actually fires
 

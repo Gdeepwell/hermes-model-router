@@ -746,3 +746,50 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         english, hungarian = self.i18n("settings.fb.file")
         for text in (english, hungarian):
             self.assertIn("~/.hermes/config.yaml", text)
+
+
+class CooldownPillLayoutTests(DashboardProbeMixin, unittest.TestCase):
+    """A long cooldown reason must stay inside its card.
+
+    Observed 2026-09-09: "cooling down · 355m · model unavailable on this account"
+    spilled out of the Spark card and pushed its switch onto the neighbouring one.
+    The reason text grew when durable-unavailability cooldowns were added, and the
+    pill was pinned to a single line.
+    """
+
+    def _rule(self, selector):
+        import re
+
+        match = re.search(re.escape(selector) + r"\{([^}]*)\}", HTML)
+        self.assertIsNotNone(match, f"{selector} has no rule")
+        return match.group(1)
+
+    def test_the_pill_may_wrap(self):
+        rule = self._rule(".cooldown-pill")
+        self.assertNotIn("white-space:nowrap", rule)
+        self.assertIn("overflow-wrap:anywhere", rule)
+
+    def test_the_pill_cannot_exceed_the_card(self):
+        self.assertIn("max-width:100%", self._rule(".cooldown-pill"))
+
+    def test_the_label_column_is_allowed_to_shrink(self):
+        """Without min-width:0 a flex item never shrinks below its content, which is
+        what pushed the switch out rather than wrapping the text."""
+        self.assertIn("min-width:0", self._rule(".toggle-label"))
+
+    def test_the_switch_keeps_its_size(self):
+        self.assertIn("flex:0 0 44px", self._rule(".switch"))
+
+
+class SettingsLabelTests(DashboardProbeMixin, unittest.TestCase):
+    def test_the_default_model_says_what_only_it_controls(self):
+        """It reads as redundant next to the preference chains unless it names the
+        one thing a chain cannot change: the model Hermes itself starts on."""
+        english, hungarian = self.i18n("settings.default.desc")
+        self.assertIn("starts on", english)
+        self.assertIn("indul", hungarian)
+
+    def test_the_preference_chains_say_what_they_do_not_change(self):
+        english, hungarian = self.i18n("settings.prefs.sub")
+        self.assertIn("does not change the model Hermes starts on", english)
+        self.assertIn("indulási modelljét nem", hungarian)
