@@ -424,6 +424,17 @@ orchestration:
   min_chars: 60        # too short to decompose; skip the planner round trip
   max_tasks: 2         # must not exceed delegation.max_concurrent_children
   rescue_min_calls: 6  # a turn this deep with no worker gets one late checkpoint
+
+# Benching a tier that just refused. quota_seconds is only the fallback for a
+# provider that does not say when the allowance returns.
+cooldown:
+  enabled: true
+  quota_seconds: 900          # no reset hint in the error
+  quota_max_seconds: 21600    # ceiling for a provider-stated reset
+  unavailable_seconds: 21600  # a 400/404 "model not supported" refusal
+  allowed_fails: 3            # repeated non-quota failures within the window
+  failure_window_seconds: 60
+  failure_seconds: 60
 ```
 
 `max_tasks` above `max_concurrent_children` is a hard error, not a partial
@@ -591,6 +602,38 @@ in its goal — it does not share the conversation:
 {"goal": "Diagnose and fix the fullscreen calendar card in /path/to/repo. …",
  "model": "sonnet5"}
 ```
+
+## Diagnosing a parent that will not delegate
+
+`~/.hermes/logs/terra-spark-orchestration.jsonl` records why a preflight did not
+run. Read its tail first — the answer is usually one field:
+
+```bash
+tail -5 ~/.hermes/logs/terra-spark-orchestration.jsonl \
+  | jq '{event, parent_model, skip_reason, tools_seen}'
+```
+
+`preflight_forced` means the contract went out and the parent was asked to
+delegate; what it does next is the model's decision. `preflight_skipped` names
+the gate instead:
+
+| `skip_reason` | Meaning |
+|---|---|
+| `orchestration_disabled` | `orchestration.enabled: false` |
+| `tier_not_orchestrator:<tier>` | neither Sol, `default_model`, nor a delegation target |
+| `subagent_turn` | already a delegated child; children do not orchestrate |
+| `no_delegate_task_tool` | no delegation tool in the request — `tools_seen` lists what was there |
+| `sol_preflight_disabled` | `sol_opus5_preflight.enabled: false` |
+| `delegation_completion_delivery` | the turn is delivering a finished child's result |
+
+`tools_seen` exists because `no_delegate_task_tool` reads identically whether the
+request had no tools at all, the wrong wire shape, or a name the router did not
+recognise — and those need different fixes. Establishing that distinction took a
+live probe before the field was added.
+
+If the parent *is* orchestrating and the work still lands on one account, read the
+routing log instead: an `external delegation target` line means the router observed
+the call rather than routing it, which is normal for Claude and Qwen.
 
 ## Policy
 
