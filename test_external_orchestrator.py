@@ -97,6 +97,24 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
 class ConductorTierTests(unittest.TestCase):
     """The forced conductor must not be pinned to an account that has run out."""
 
+    def test_the_code_chain_outranks_the_configured_default(self):
+        """Measured need: six conductors in a row ran to their iteration cap on the
+        Codex account, spending 36% of a five-hour limit before a leaf did real work.
+        The operator's own order decides where planning happens."""
+        cfg = {"models": MODELS, "callable": {**CALLABLE, "opus5": True},
+               "default_model": "terra", "preferences": {"code": ["opus5", "terra"]}}
+        self.assertEqual(_conductor_tier(cfg), "opus5")
+
+    def test_an_uncallable_preference_falls_through_to_the_next(self):
+        cfg = {"models": MODELS, "callable": {**CALLABLE, "opus5": False},
+               "default_model": "terra", "preferences": {"code": ["opus5", "terra"]}}
+        self.assertEqual(_conductor_tier(cfg), "terra")
+
+    def test_without_a_code_chain_the_default_still_wins(self):
+        cfg = {"models": MODELS, "callable": dict(CALLABLE), "default_model": "terra",
+               "preferences": {"design": ["sol"]}}
+        self.assertEqual(_conductor_tier(cfg), "terra")
+
     def test_the_configured_default_is_used_when_callable(self):
         self.assertEqual(_conductor_tier({"models": MODELS, "callable": dict(CALLABLE),
                                           "default_model": "terra"}), "terra")

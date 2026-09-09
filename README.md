@@ -163,9 +163,14 @@ its own provider, so a parent on a fallback account silently lost its contract
 and worked alone. A second gate compounded it by recognising only Sol and
 `default_model` as orchestrators.
 
-The forced conductor follows `default_model` when that tier is callable, and its
-`fallbacks` chain when it is not — pinning the planner to an account that has just
-run out is how the preflight used to fail exactly when it was needed.
+The forced conductor follows the `code` preference chain when one is set, then
+`default_model` when that tier is callable, then its `fallbacks` chain. Planning and
+coordination are code work, and the conductor is not cheap: six consecutive
+conductors on the Codex account each ran to the 16-iteration cap and spent 36% of a
+five-hour limit before a leaf did any real work. Putting `opus5` first in `code`
+moves the planning to another subscription and leaves the primary quota for the
+work itself. Pinning it to `default_model` regardless was also how the preflight
+used to fail exactly when it was needed — on the account that had just run out.
 
 One more thing had to change for this to actually fire. An Anthropic OAuth request
 is normalised for Claude Code compatibility, which renames every tool to
@@ -669,6 +674,8 @@ pytest
 ```
 
 ## Version
+
+**1.9.4** — The forced conductor follows the `code` preference chain, so planning does not have to sit on the primary quota
 
 **1.9.3** — A long cooldown reason wraps inside its card instead of displacing the switch; the settings labels say what only they control
 

@@ -1749,6 +1749,13 @@ def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
     to the one that had run out.
     """
     cfg = cfg or {}
+    # The operator's own order comes first. Planning and coordination are code work,
+    # so the conductor follows the `code` chain when one is set — measured need: six
+    # consecutive conductors ran to their 16-iteration cap on the Codex account and
+    # spent 36% of a five-hour limit before any leaf did real work.
+    for tier in _preference_list("code", cfg):
+        if _is_callable_tier(tier, cfg):
+            return tier
     default = str(cfg.get("default_model", "terra"))
     if _is_callable_tier(default, cfg):
         return default
