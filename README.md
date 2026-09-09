@@ -439,6 +439,22 @@ fallback chain and the policy rule below both apply with no extra wiring: a
 preference route moves on, a policy route says which tier is cooling and for
 how long.
 
+A quota cooldown lasts as long as the provider says, not as long as the config
+guesses. Codex answers a usage-limit 429 with `resets_in_seconds` / `resets_at`;
+that value wins, capped by `cooldown.quota_max_seconds` (6h) so a malformed hint
+cannot bench a tier for a day. `cooldown.quota_seconds` remains the fallback for
+providers that say nothing.
+
+This matters more than it sounds. A three-hour account reset benched for the
+configured 15 minutes produces a loop: the cooldown lapses, the tier is offered
+again, and the next leaf spends its retries rediscovering the same wall.
+
+A usage quota also belongs to the **account**, not the model. `tier_providers`
+says which account each tier spends, so one tier's quota 429 benches its siblings
+for the same duration — all four Codex tiers together, or Opus and Sonnet
+together. Targets on other accounts are untouched, which is the point: the
+planner should be reaching for them.
+
 ### Policy routes do not fall back
 
 `fallbacks` exists for preference: a long request prefers Sol for capacity, and
@@ -539,6 +555,8 @@ pytest
 ```
 
 ## Version
+
+**1.8.2** — Quota cooldowns last as long as the provider says and cover every tier on that account, instead of 15 minutes on the one tier that happened to ask
 
 **1.8.1** — A model the account cannot use (400/404 refusal) now takes the configured fallback chain and a long cooldown instead of aborting the leaf
 

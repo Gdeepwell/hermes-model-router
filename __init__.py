@@ -403,17 +403,72 @@ def _enter_cooldown(tier: str, cfg: Dict[str, Any], *, seconds: float, reason: s
         _write_cooldown_state(cfg, state)
 
 
-def _record_tier_failure(tier: str, cfg: Dict[str, Any], *, quota: bool) -> None:
+def _reset_hint_seconds(error: BaseException) -> Optional[float]:
+    """Seconds until the provider says the quota returns, from the error body.
+
+    Codex answers a usage-limit 429 with ``resets_in_seconds`` and ``resets_at``.
+    Benching for a fixed 15 minutes against a three-hour reset is what turns one
+    refusal into a loop: the cooldown lapses, the tier is offered again, and the
+    next leaf spends its retries rediscovering the same wall.
+    """
+    text = str(error)
+    match = re.search(r"'?\"?resets_in_seconds\"?'?\s*:\s*([0-9]+)", text)
+    if match:
+        return float(match.group(1))
+    match = re.search(r"'?\"?resets_at\"?'?\s*:\s*([0-9]{9,13})", text)
+    if match:
+        value = float(match.group(1))
+        if value > 1e11:  # milliseconds
+            value /= 1000.0
+        remaining = value - datetime.now(timezone.utc).timestamp()
+        return remaining if remaining > 0 else None
+    return None
+
+
+def _account_siblings(tier: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    """Other tiers billed to the same account as ``tier``.
+
+    A session/usage quota belongs to the account, not the model, so benching only
+    the tier that happened to ask leaves its siblings looking available — and the
+    next leaf burns another call learning what this one already established.
+    """
+    providers = cfg.get("tier_providers") or {}
+    account = providers.get(tier)
+    if not account:
+        return ()
+    # Not restricted to routable models: a delegation-only target such as sonnet5
+    # shares Opus's account, and benching it is what stops the conductor being
+    # advised to send the next leaf into the same exhausted subscription.
+    known = set(cfg.get("models") or {}) | set(cfg.get("callable") or {})
+    return tuple(
+        name for name, owner in providers.items()
+        if owner == account and name != tier and name in known
+    )
+
+
+def _record_tier_failure(
+    tier: str, cfg: Dict[str, Any], *, quota: bool, error: Optional[BaseException] = None
+) -> None:
     """Cool a tier down: at once for quota, or after repeated recent failures."""
     policy = cfg.get("cooldown") or {}
     if not tier or not policy.get("enabled", True):
         return
     if quota:
-        _enter_cooldown(
-            tier, cfg,
-            seconds=float(policy.get("quota_seconds", 900) or 900),
-            reason="quota exhausted",
-        )
+        # Prefer what the provider actually said over the configured guess, capped so
+        # a malformed or absurd hint cannot bench a tier for a day.
+        hint = _reset_hint_seconds(error) if error is not None else None
+        configured = float(policy.get("quota_seconds", 900) or 900)
+        cap = float(policy.get("quota_max_seconds", 21600) or 21600)
+        seconds = min(hint, cap) if hint else configured
+        reason = "quota exhausted (provider reset)" if hint else "quota exhausted"
+        _enter_cooldown(tier, cfg, seconds=seconds, reason=reason)
+        # A usage quota is the account's, not the model's.
+        for sibling in _account_siblings(tier, cfg):
+            if _tier_cooldown_remaining(sibling, cfg) < seconds:
+                _enter_cooldown(
+                    sibling, cfg, seconds=seconds,
+                    reason=f"{reason}; shares an account with {tier}",
+                )
         return
     now = datetime.now(timezone.utc).timestamp()
     window = float(policy.get("failure_window_seconds", 60) or 60)
@@ -2783,6 +2838,7 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
                     ) or (_external_target_for_model(failing_model) or ""),
                     cfg,
                     quota=_is_quota_exhaustion(error),
+                    error=error,
                 )
             raise
 
@@ -2812,7 +2868,7 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
         # case with no fallback configured, where the old code re-raised and left
         # nothing behind -- the next call walked into the same exhausted account.
         if quota_exhausted or _is_transient_provider_failure(error):
-            _record_tier_failure(cfg=cfg, tier=active_tier, quota=quota_exhausted)
+            _record_tier_failure(cfg=cfg, tier=active_tier, quota=quota_exhausted, error=error)
         elif unavailable and active_tier:
             # Long, and stated plainly: nothing about this recovers by waiting, so
             # the point of the cooldown is to stop offering the tier this session.

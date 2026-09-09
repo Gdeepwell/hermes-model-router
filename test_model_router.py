@@ -984,9 +984,14 @@ class ModelRouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cfg = self._usage_cfg(Path(directory) / "route.jsonl", Path(directory) / "cool.json")
             _record_tier_failure("sol", cfg, quota=True)
-            notes = _target_availability(["luna", "sol"], cfg)
-            self.assertEqual(notes["luna"], "")
+            notes = _target_availability(["luna", "sol", "opus5"], cfg)
             self.assertIn("unavailable for another", notes["sol"])
+            # Luna shares Sol's account, so a usage quota takes it down too — but it
+            # is still listed, annotated, for the same reason Sol is.
+            self.assertIn("unavailable for another", notes["luna"])
+            # A target on a different account must stay clean, or benching Codex
+            # would quietly remove the alternative the planner is meant to reach for.
+            self.assertEqual(notes["opus5"], "")
 
     def test_a_config_without_a_log_path_writes_nothing(self):
         """Test-suite entries appended to the real audit log then read back as
