@@ -271,9 +271,14 @@ class DispatchFailureTests(unittest.TestCase):
 
     The quota notice reads a delegation outcome, and there is none here: the tool
     returns an error inline, no child runs, and nothing is ever delivered to
-    explain it. With the Codex account exhausted a parent believed its opus5
-    delegation had failed — the call had named no target, so it resolved the
-    configured default and reported that default's account.
+    explain it.
+
+    And the error is not a fact about the account it names. delegate_task
+    resolves the configured default delegation provider once for the whole call,
+    before `_normalize_task_list` has even parsed the tasks, and returns
+    tool_error on failure -- so an exhausted default blocks every delegation,
+    including a task naming a target on a healthy account, whose model: value is
+    never read. Advising a retry with a different model: would loop.
     """
 
     def _instruction(self, request, cooling=()):
@@ -284,30 +289,31 @@ class DispatchFailureTests(unittest.TestCase):
             from model_router import _dispatch_failure_instruction
             return _dispatch_failure_instruction(request, CFG)
 
-    def test_it_says_the_named_account_is_not_the_one_you_meant(self):
+    def test_it_says_the_block_is_at_the_host_not_at_that_account(self):
         instruction = self._instruction(request_with_tool_error(DISPATCH_ERROR))
-        self.assertIn("NAMED NO TARGET", instruction)
-        self.assertIn("its own quota is untouched", instruction)
+        self.assertIn("BLOCKED AT THE HOST", instruction)
+        self.assertIn("before it reads the tasks", instruction)
 
-    def test_it_lists_the_targets_that_are_actually_available(self):
+    def test_it_does_not_advise_a_retry_that_would_fail_identically(self):
+        """The first version of this notice said "re-issue with model: X". Naming
+        a target does not bypass the default resolution, so that looped."""
+        instruction = self._instruction(request_with_tool_error(DISPATCH_ERROR))
+        self.assertIn("will fail identically", instruction)
+        self.assertIn("delegation.provider", instruction)
+
+    def test_it_separates_a_healthy_target_from_an_unreachable_one(self):
         instruction = self._instruction(request_with_tool_error(DISPATCH_ERROR), cooling={"sol", "terra"})
         self.assertIn("opus5", instruction)
-        self.assertNotIn("Every target is cooling", instruction)
+        self.assertIn("unreachable only because the default route is down", instruction)
 
-    def test_it_says_what_to_wait_for_when_none_are_free(self):
+    def test_it_still_speaks_when_every_target_is_cooling(self):
+        """The host block is the point, and it holds whatever the targets say."""
         instruction = self._instruction(
             request_with_tool_error(DISPATCH_ERROR),
             cooling=set(TARGETS),
         )
-        self.assertIn("Every target is cooling", instruction)
-        self.assertIn("min", instruction)
-
-    def test_it_repeats_that_the_goal_text_selects_nothing(self):
-        """The same parent had already tried putting the target in the goal."""
-        self.assertIn(
-            "only the model parameter selects a route",
-            self._instruction(request_with_tool_error(DISPATCH_ERROR)),
-        )
+        self.assertIn("BLOCKED AT THE HOST", instruction)
+        self.assertNotIn("Targets that are themselves fine", instruction)
 
     def test_another_tools_error_is_left_alone(self):
         request = request_with_tool_error('{"error": "npm ERR! missing script test"}')
@@ -327,4 +333,4 @@ class DispatchFailureTests(unittest.TestCase):
                 request=request_with_tool_error(DISPATCH_ERROR), provider="openai-codex",
                 model="gpt-terra", api_call_count=2, turn_id="turn-dispatch-failure",
             )
-        self.assertIn("NAMED NO TARGET", result["request"]["messages"][0]["content"])
+        self.assertIn("BLOCKED AT THE HOST", result["request"]["messages"][0]["content"])

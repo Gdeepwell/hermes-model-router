@@ -636,25 +636,34 @@ The notice above reads a delegation *outcome*. Sometimes there is none: the tool
 returns an error inline, no child ever runs, and nothing will be delivered later
 to explain it.
 
-The error is actively misleading when it happens. An absent or unrecognised
-`model:` value does not fail — it degrades to the configured default — so a call
-that meant to reach Claude comes back as:
+The error is also not a fact about the account it names, and this one is worth
+stating precisely because it is easy to get backwards. `delegate_task` resolves
+the configured **default** delegation provider once for the whole call — at
+`delegate_tool.py:496`, before `_normalize_task_list` has even parsed the tasks
+— and returns `tool_error` if that fails. The per-task target is resolved much
+later, inside the dispatch loop.
+
+**So an unavailable default provider blocks every delegation, including a task
+that names a target on a healthy account.** Its `model:` value is never read.
+With Codex exhausted, a `model: "opus5"` task fails on the Codex quota although
+Opus 5 runs on Anthropic and was never contacted:
 
 ```
 Cannot resolve delegation provider 'openai-codex':
 Codex provider quota exhausted (429); retry after 3731s.
 ```
 
-That is the *default's* account, not the one the parent had in mind. Observed
-with Codex exhausted: the parent concluded "the Codex quota is out, so the opus5
-delegation failed" — true as stated, and wrong, because opus5 runs on Anthropic
-and was never contacted. It then spent its reasoning working out which tier sits
-on which account, from a premise about its own call that was false.
+The parent's own conclusion — "the Codex quota is out, so the opus5 delegation
+failed" — is therefore literally correct, however wrong it sounds.
 
-So a `delegate_task` provider failure now comes back with the diagnosis and the
-targets that are actually free right now, or what to wait for when none are —
-and a reminder that only the `model` parameter selects a route, since the same
-parent had already tried putting the target in the goal text.
+The notice says that, and deliberately does **not** advise a retry with a
+different `model:`, which would loop. It separates the targets that are
+themselves healthy from the fact that none of them is reachable, and names the
+three ways out: repoint `delegation.provider`/`delegation.model` at a working
+route, do the work in the turn, or wait.
+
+The real fix is in the host: resolve the default lazily, or tolerate its failure
+when every task names its own target.
 
 **It names the target and stops there.** Re-dispatching by itself would be the
 hardcoded selection this design exists to avoid: what to do with a stopped leaf —
@@ -908,7 +917,7 @@ pytest
 
 **1.10.8** — A cooling `sonnet5` shows its cooldown in the dashboard: the status panel walked a hardcoded tier list that omitted it, so that account read as merely idle
 
-**1.10.7** — A `delegate_task` that fails to resolve its provider comes back naming the free targets: an absent `model:` degrades to the default, so the error reports an account the parent never meant to use
+**1.10.7** — A `delegate_task` that cannot resolve its provider comes back explaining that the host resolves the default route before it reads the tasks, so an exhausted default blocks even a task naming a healthy account — and that retrying with another `model:` would loop
 
 **1.10.6** — A goal that names the base commit it builds on, as the contract requires, no longer reads as an instruction to commit: a read-only `[spark]` leaf was being escalated off Spark for complying
 

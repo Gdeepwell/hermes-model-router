@@ -1083,34 +1083,21 @@ def _dispatch_failure_instruction(request: Any, cfg: Dict[str, Any]) -> str:
     ):
         return ""
     available = _available_delegation_targets(cfg)
-    default_model = str((cfg.get("models") or {}).get(str(cfg.get("default_model", "terra"))) or "")
-    head = (
-        "\n\n[ROUTER — THAT DELEGATION NAMED NO TARGET]\n"
-        "delegate_task resolved the configured default route"
-        + (f" ({default_model})" if default_model else "")
-        + ", which is what an absent or unrecognised model: value falls back to. The account it "
-        "names in the error is that default's, not the one you meant: a target you did not name "
-        "was never contacted, so its own quota is untouched.\n"
-    )
-    if available:
-        return head + (
-            "Available targets right now: " + ", ".join(available) + ". Re-issue the call with "
-            "model: set to one of them, spelled exactly as listed. Do not put the target in the "
-            "goal text; only the model parameter selects a route.\n"
+    return (
+        "\n\n[ROUTER — DELEGATION IS BLOCKED AT THE HOST, NOT AT THAT TARGET]\n"
+        "This is not a fact about the account named in the error. delegate_task resolves the "
+        "configured default delegation provider once, for the whole call, before it reads the "
+        "tasks at all -- so when that provider is unavailable every delegation fails, including "
+        "a task that names a target on a healthy account. Its model: value is never reached.\n"
+        "Retrying with a different model: will fail identically. "
+        + (
+            "Targets that are themselves fine right now: " + ", ".join(available) + " -- "
+            "unreachable only because the default route is down. "
+            if available else ""
         )
-    waiting = sorted(
-        (
-            (name, _tier_cooldown_remaining(name, cfg))
-            for name in _delegation_target_names() if _target_is_offered(name, cfg)
-        ),
-        key=lambda item: item[1],
-    )
-    if not waiting:
-        return head + "No delegation target is switched on; the work has to be done in this turn.\n"
-    name, remaining = waiting[0]
-    return head + (
-        f"Every target is cooling; {name} frees up first, in about {int(remaining // 60) + 1} min. "
-        f"Wait for it or narrow the objective to what this turn can do itself.\n"
+        + "Either point delegation.provider and delegation.model at a route that works, or do "
+        "the work in this turn, or wait for the default route to recover. Say which of those you "
+        "chose rather than re-issuing the same call.\n"
     )
 
 
