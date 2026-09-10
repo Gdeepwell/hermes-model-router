@@ -214,6 +214,58 @@ def _bridge_runs(path: Path | None) -> List[Dict[str, Any]]:
     return list(runs.values())
 
 
+def _goal_fingerprint(value: Any) -> str:
+    """A goal in comparable form: leading label, case and spacing removed.
+
+    The label has to go because the two texts being compared are deliberately
+    not identical -- a re-dispatch after a misrouted ``[opus5]`` prefix carries
+    the same work with the prefix stripped, and that is exactly the pair that
+    must still be recognised as the same task.
+    """
+    text = re.sub(r"^\s*\[[^\]]{1,24}\]\s*", "", str(value or "")).strip().casefold()
+    return re.sub(r"\s+", " ", text)[:200]
+
+
+def _match_child_session(
+    candidates: List[tuple],
+    claimed: set,
+    child_goal: Any,
+    user_messages: Dict[str, List[tuple]],
+) -> tuple | None:
+    """Pick the session row that actually ran this delegated child.
+
+    Position within a time window used to decide this, and it silently collapsed
+    whenever a parent dispatched twice inside the window. Both delegations then
+    selected the same first session -- the dashboard showed one worker twice,
+    under the wrong model, while the other ran unlisted with no row at all.
+    Delegations are also read newest-first, so the newest one was matched to the
+    oldest session.
+
+    The goal text is the reliable key: the child stores it as its own first user
+    message. Position remains the fallback for a child whose message is not in
+    the loaded window, and a session is claimed once so two children can never
+    share one.
+    """
+    available = [session for session in candidates if str(session[0]) not in claimed]
+    if not available:
+        return None
+    wanted = _goal_fingerprint(child_goal)
+    if wanted:
+        for session in available:
+            received = user_messages.get(str(session[0]), [])
+            if not received:
+                continue
+            stored = _goal_fingerprint(min(received, key=lambda entry: entry[0])[1])
+            if not stored:
+                continue
+            if stored == wanted or (
+                len(stored) >= 40 and len(wanted) >= 40
+                and (stored.startswith(wanted) or wanted.startswith(stored))
+            ):
+                return session
+    return available[0]
+
+
 def load_agent_activity(
     db_path: Path,
     now: float | None = None,
@@ -287,6 +339,9 @@ def load_agent_activity(
     for events in console_by_session.values():
         events.reverse()
     grouped: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
+    # One session belongs to one child. Without this two delegations dispatched
+    # inside the same window both took the first one.
+    claimed_sessions: set = set()
     for delegation_id, origin, parent, state, dispatched, completed, updated, task_json, result_json in rows:
         task, result = _as_object(task_json), _as_object(result_json)
         raw_results = result.get("results") if isinstance(result.get("results"), list) else []
@@ -323,8 +378,10 @@ def load_agent_activity(
                 summary["failed"] += 1
             else:
                 summary["completed"] += 1
-            selected_session = matching[index] if index < len(matching) else None
+            selected_session = _match_child_session(matching, claimed_sessions, child_goal, user_messages)
             child_session_id = str(selected_session[0]) if selected_session else None
+            if child_session_id:
+                claimed_sessions.add(child_session_id)
             routed_calls = [
                 {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", "")}
                 for call in raw_calls_by_session.get(child_session_id or "", [])

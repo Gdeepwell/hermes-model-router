@@ -109,7 +109,13 @@ class AgentActivityTests(unittest.TestCase):
         self.assertEqual(activity["parents"][0]["children"][0]["model"], "gpt-5.6-sol")
         self.assertEqual(activity["parents"][0]["children"][0]["console"][0]["tool"], "terminal")
         self.assertNotIn("output", activity["parents"][0]["children"][0]["console"][0])
-        self.assertEqual(activity["parents"][0]["children"][1]["api_calls"], 2)
+        # "Review tests" has no session row of its own in this fixture — only
+        # "Build dashboard" does. It used to be handed that child's two router
+        # calls, because both delegations resolved to the same first session in
+        # the window; now an unmatched delegation reports the count it recorded
+        # for itself.
+        self.assertEqual(activity["parents"][0]["children"][1]["api_calls"], 4)
+        self.assertIsNone(activity["parents"][0]["children"][1]["agent_session_id"])
         self.assertEqual(activity["parents"][0]["children"][1]["access_mode"], "requested_read_only")
         self.assertEqual(activity["parents"][0]["children"][1]["reason"], "Review / ellenőrzés")
 
@@ -229,3 +235,79 @@ class AgentActivityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
+    """A parent that dispatches twice within the matching window.
+
+    Position inside a ±90s window used to decide which session ran which child,
+    so both delegations selected the first one: the dashboard showed one worker
+    twice, under the wrong model, while the other ran with no row at all. Rows
+    are read newest-first, so the newest delegation took the oldest session.
+    """
+
+    def _fixture(self, directory):
+        db_path = Path(directory) / "state.db"
+        stopped = "[opus5] Implement the safe, tenant-scoped customer profile merge feature in /home/x"
+        retried = "Implement the safe, tenant-scoped customer profile merge feature in /home/x"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("""CREATE TABLE async_delegations (
+                delegation_id TEXT PRIMARY KEY, origin_session TEXT, parent_session_id TEXT,
+                state TEXT, dispatched_at REAL, completed_at REAL, updated_at REAL,
+                task_json TEXT, result_json TEXT
+            )""")
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, started_at REAL, ended_at REAL, model TEXT)")
+            conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_name TEXT, timestamp REAL)")
+            conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (1, "parent", "user", "inplementald", None, 90.0))
+            conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-stopped", "parent", 100.0, None, "gpt-5.6-terra"))
+            conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-opus", "parent", 118.0, None, "claude-opus-5"))
+            conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (2, "child-stopped", "user", stopped, None, 100.0))
+            conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (3, "child-opus", "user", retried, None, 118.0))
+            conn.execute("INSERT INTO async_delegations VALUES (?,?,?,?,?,?,?,?,?)", (
+                "deleg-stopped", "parent", "parent", "completed", 100.0, 110.0, 110.0,
+                json.dumps({"goal": stopped}),
+                json.dumps({"results": [{"task_index": 0, "status": "completed", "api_calls": 1}]}),
+            ))
+            conn.execute("INSERT INTO async_delegations VALUES (?,?,?,?,?,?,?,?,?)", (
+                "deleg-opus", "parent", "parent", "completed", 118.0, 200.0, 200.0,
+                json.dumps({"goal": retried}),
+                json.dumps({"results": [{"task_index": 0, "status": "completed", "api_calls": 16}]}),
+            ))
+        router_log_path = Path(directory) / "router.jsonl"
+        router_log_path.write_text("\n".join([
+            json.dumps({"turn_id": "child-stopped:sa-0:t", "tier": "sol", "model": "gpt-5.6-sol"}),
+            *(json.dumps({"turn_id": "child-opus:sa-0:t", "tier": "opus5", "model": "claude-opus-5"})
+              for _ in range(16)),
+        ]) + "\n", encoding="utf-8")
+        return db_path, router_log_path
+
+    def _children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path, router_log_path = self._fixture(directory)
+            activity = load_agent_activity(db_path, now=210.0, router_log_path=router_log_path)
+        return activity["parents"][0]["children"]
+
+    def test_each_delegation_gets_its_own_session(self):
+        sessions = {child["agent_session_id"] for child in self._children()}
+        self.assertEqual(sessions, {"child-stopped", "child-opus"})
+
+    def test_the_worker_on_the_other_account_is_listed(self):
+        """It ran sixteen calls on a separate subscription and had no row at all."""
+        models = {child["model"] for child in self._children()}
+        self.assertIn("claude-opus-5", models)
+
+    def test_no_session_is_shown_twice(self):
+        sessions = [child["agent_session_id"] for child in self._children()]
+        self.assertEqual(len(sessions), len(set(sessions)))
+
+    def test_the_call_counts_follow_the_right_session(self):
+        by_model = {child["model"]: child["api_calls"] for child in self._children()}
+        self.assertEqual(by_model["claude-opus-5"], 16)
+        self.assertEqual(by_model["gpt-5.6-sol"], 1)
+
+    def test_a_relabelled_retry_still_matches_its_own_session(self):
+        """The retry carries the same work with the [opus5] prefix stripped —
+        exactly the pair that has to be recognised as two distinct tasks."""
+        goals = {child["agent_session_id"]: child["goal"] for child in self._children()}
+        self.assertTrue(goals["child-stopped"].startswith("[opus5]"))
+        self.assertFalse(goals["child-opus"].startswith("[opus5]"))

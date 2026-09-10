@@ -857,6 +857,8 @@ pytest
 
 ## Version
 
+**1.10.4** — A parent that dispatches twice inside the matching window no longer shows one worker twice under the wrong model while the other runs unlisted: a child session is matched by its goal and claimed once
+
 **1.10.3** — The goal requirements ride on the `delegate_task` schema too, so a parent that never got a preflight — a root prompt under `orchestration.min_chars` creates no conductor — still writes goals that carry a worktree, a branch and a boundary
 
 **1.10.2** — The contract requires a goal to carry what the worker cannot see — worktree, branch, base commit, scope, verification — after an Opus leaf spent all sixteen iterations rediscovering a repository its goal never described, and made no edit
