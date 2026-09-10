@@ -2001,6 +2001,14 @@ def _goal_orientation_sentence() -> str:
     )
 
 
+_CONTEXT_CONTRACT_MARKER = "worktree it runs in"
+_CONTEXT_CONTRACT_DESCRIPTION = (
+    "Required. The orientation this child cannot see for itself: the absolute path of the "
+    "worktree it runs in, the branch and the commit it builds on, what already exists there, "
+    "which files or modules are in scope, and how its result is verified. Each child sees only "
+    "its own context, so repeat shared background in every task that needs it. Write \"none\" "
+    "only when the goal genuinely depends on no repository state."
+)
 _GOAL_CONTRACT_MARKER = "absolute worktree path"
 _GOAL_CONTRACT_CLAUSE = (
     " Every fact it needs must be here: the absolute worktree path, the branch and the "
@@ -2044,19 +2052,34 @@ def _with_goal_contract(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     # The advertised batch shape, plus the legacy single-goal one the handler
     # still accepts: a request carrying either must not slip through unannotated.
-    slots = [((properties.get("tasks") or {}).get("items") or {}).get("properties"), properties]
+    objects = [(properties.get("tasks") or {}).get("items"), schema]
     changed = False
-    for slot in slots:
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        slot = obj.get("properties")
         if not isinstance(slot, dict):
             continue
         goal = slot.get("goal")
-        if not isinstance(goal, dict):
-            continue
-        description = str(goal.get("description") or "")
-        if _GOAL_CONTRACT_MARKER in description:
-            continue
-        goal["description"] = description + _GOAL_CONTRACT_CLAUSE
-        changed = True
+        if isinstance(goal, dict):
+            description = str(goal.get("description") or "")
+            if _GOAL_CONTRACT_MARKER not in description:
+                goal["description"] = description + _GOAL_CONTRACT_CLAUSE
+                changed = True
+        context = slot.get("context")
+        if isinstance(context, dict):
+            if _CONTEXT_CONTRACT_MARKER not in str(context.get("description") or ""):
+                context["description"] = _CONTEXT_CONTRACT_DESCRIPTION
+                changed = True
+            # The forcing step. A description is advice and lost three times over
+            # -- against the built-in tie-breaker, against the [spark]/[sol]
+            # vocabulary, and here against nothing at all. Requiring the field
+            # makes a context-free call invalid rather than merely discouraged,
+            # and on a `strict` tool the provider is the one enforcing it.
+            required = obj.get("required")
+            if isinstance(required, list) and "context" not in required:
+                required.append("context")
+                changed = True
     return routed if changed else None
 
 

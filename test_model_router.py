@@ -2079,9 +2079,14 @@ class GoalContractOnTheSchemaTests(unittest.TestCase):
         "parameters": {
             "type": "object",
             "properties": {
-                "tasks": {"type": "array", "items": {"type": "object", "properties": {
-                    "goal": {"type": "string", "description": "What this subagent should accomplish."},
-                }}},
+                "tasks": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {
+                        "goal": {"type": "string", "description": "What this subagent should accomplish."},
+                        "context": {"type": "string", "description": "Background THIS child needs."},
+                    },
+                    "required": ["goal"],
+                }},
             },
         },
     }
@@ -2135,3 +2140,32 @@ class GoalContractOnTheSchemaTests(unittest.TestCase):
         from model_router import _with_goal_contract
 
         self.assertIsNone(_with_goal_contract({"tools": [{"name": "terminal"}]}))
+
+    def _task_schema(self, request):
+        tool = next(t for t in request["tools"] if t.get("name") == "delegate_task")
+        return tool["parameters"]["properties"]["tasks"]["items"]
+
+    def test_context_becomes_required(self):
+        """Three descriptions have now lost to something: the built-in
+        tie-breaker, the [spark]/[sol] vocabulary, and here to nothing at all.
+        Requiring the field makes a context-free call invalid instead."""
+        items = self._task_schema(self._route(self._request())["request"])
+        self.assertEqual(items["required"], ["goal", "context"])
+
+    def test_the_context_description_says_what_belongs_in_it(self):
+        items = self._task_schema(self._route(self._request())["request"])
+        description = items["properties"]["context"]["description"]
+        self.assertIn("worktree it runs in", description)
+        self.assertIn("branch and the commit it builds on", description)
+
+    def test_requiring_it_twice_changes_nothing(self):
+        from model_router import _with_goal_contract
+
+        once = self._route(self._request())["request"]
+        self.assertIsNone(_with_goal_contract(once))
+        self.assertEqual(self._task_schema(once)["required"], ["goal", "context"])
+
+    def test_the_callers_own_required_list_is_not_mutated(self):
+        request = self._request()
+        self._route(request)
+        self.assertEqual(self._task_schema(request)["required"], ["goal"])

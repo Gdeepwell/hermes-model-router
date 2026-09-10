@@ -807,6 +807,22 @@ to be repeated on every one of them; a tool description is read once, exactly
 where the goal is written. When a preflight *does* fire, the conductor's contract
 already carries the same rules and the schema is left alone.
 
+**And `context` is required, because a description is advice.** Measured after
+the description shipped and was live: the parent read it and dispatched
+"read-only release readiness review of *the customer-profile merge worktree*"
+anyway — no path — and the reviewer spent 31 shell commands over 16 iterations
+without reaching a verdict. That was the third time a description lost, after
+the built-in `sonnet5` tie-breaker and the `[opus5]` prefix rule.
+
+So the per-task `context` — which the schema already describes as the place for
+"file paths, error messages, constraints", and which genuinely reaches the child
+— is moved into `required`, and its description says what belongs in it. A
+context-free call is now invalid rather than merely discouraged, and on a tool
+carrying `strict: true` the provider is the one enforcing it. This is the same
+move the preflight already makes for `role` and `context` on a conductor, for
+the reason its own comment gives: *natural-language instructions alone are not a
+reliable control plane*.
+
 ## Diagnosing a parent that will not delegate
 
 `~/.hermes/logs/terra-spark-orchestration.jsonl` records why a preflight did not
@@ -856,6 +872,8 @@ pytest
 ```
 
 ## Version
+
+**1.10.5** — Per-task `context` is required on the delegate_task schema, with a description that says what belongs in it: the goal description alone was live, read, and ignored
 
 **1.10.4** — A parent that dispatches twice inside the matching window no longer shows one worker twice under the wrong model while the other runs unlisted: a child session is matched by its goal and claimed once
 
