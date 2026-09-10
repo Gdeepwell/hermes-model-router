@@ -50,8 +50,8 @@ rather than applied behind it:
 
 ```yaml
 peer_groups:
-  heavy: [terra, opus5, qwen]
-  light: [luna, sonnet5, spark]
+  heavy: [terra, opus5, qwen, sonnet5]
+  light: [luna, spark]
 ```
 
 The contract names the groups, and an unavailable target is annotated with its
@@ -59,6 +59,13 @@ live replacement — `opus5 [unavailable for another 15 min; use qwen instead]` 
 instead of vanishing from the list. Dropping it said only that it was gone;
 naming the replacement is what turns one account's exhaustion into work
 continuing somewhere else.
+
+**"Comparable in strength" is quoted to the conductor verbatim, so a wrong
+grouping is an instruction to misroute.** `sonnet5` sat in the light group until
+1.9.5, next to a tier bounded at 700 characters and `low` effort. The conductor
+duly substituted Luna for it whenever the Codex account looked loaded, and
+"stabilize, correct, test and commit the dirty foundation" ran on Luna twelve
+times. Group by what a target can actually carry, not by what it costs.
 
 Substitution is for capacity, not permission. A `[spark]` leaf must still be
 read-only wherever it runs, and design work still belongs to Sol — so a cooling
@@ -144,6 +151,17 @@ the one account whose usage most needed watching was the one nothing reported on
 They now appear as `opus5` and `sonnet5` alongside the other tiers, and their
 `callable` switches govern whether the conductor is offered them at all.
 
+When both are offered the contract used to add "use `sonnet5` by default and
+reserve `opus5` for consequential or hard work". That sentence dates from the
+commit that made these targets reachable at all, when no preference mechanism
+existed and a bare list of two names told the conductor nothing. One arrived 23
+hours later and the older answer was never withdrawn, so two contradictory
+instructions sat in the same paragraph — and the unconditional one beat the
+hedged one every time. It is now emitted **only where the operator has configured
+nothing**, and the check reads the configured chain rather than its currently
+available winner, so a cooling `opus5` cannot revive the built-in default at the
+one moment the operator's own order needs to be what speaks.
+
 A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
 `coding_agent.delegated_review`). It replaces a single call rather than running
 an agent, so it cannot write and holds a child slot for the duration; the native
@@ -216,12 +234,35 @@ differently because the difference is not cosmetic:
 - **Anything on another account** (`opus5`, `sonnet5`, `qwen`) cannot be routed
   to at all: `route_llm_request` runs after the provider is chosen, so it can only
   swap models inside one provider. Such an entry is passed to the conductor as a
-  delegation recommendation instead — it reaches work through `delegate_task`.
+  delegation instruction instead — it reaches work through `delegate_task`, and
+  the conductor is the one that has to honour it.
 
 A kind with no chain keeps its built-in route, so configuring nothing changes
 nothing. A kind with a chain overrides that route **completely**, including the
 safety defaults that send design, security and deployment work to Sol. That is
 deliberate: the operator owns the mapping.
+
+**The whole order reaches the conductor, not just its winner.** Availability
+folds in the cooldown, so naming only the first *available* entry meant a cooling
+`opus5` erased `code` from the contract entirely — indistinguishable from a kind
+nobody configured, and the conductor could not advance to an entry it was never
+told existed. Cooling entries are annotated instead, and the conductor's own tier
+belongs in the chain too: `code: opus5 > terra` rendered as `code: opus5` and
+lost the very entry that has to take over.
+
+```
+The operator's target order per kind of work, highest priority first --
+  design: sol > opus5; code: opus5 > terra; review: sonnet5 > terra.
+A leaf of one of these kinds must take the first target in that kind's order,
+and when an entry is marked unavailable must move to the next entry in the same
+order rather than choosing freely.
+```
+
+**It is phrased as an instruction because advice loses.** It shares a paragraph
+with the `[spark]` and `[sol]` rules, which are imperatives. Until 1.9.5 the
+chain arrived as "Honour these when a leaf matches the kind and the target is
+free" while an unconditional built-in default sat two sentences earlier — so
+`code -> model:opus5` never once decided a leaf.
 
 ### Hermes fallback chains
 
@@ -258,12 +299,24 @@ effort:
   luna: low
   terra: medium
   sol: medium
-  sol_long: medium          # reached by length, not by choice
-  explicit_sol: medium      # you asked for Sol
-  explicit_sol_xhigh: high  # you asked for Sol and said how hard
+  sol_long: medium            # reached by length, not by choice
+  explicit_sol: medium        # you asked for Sol
+  explicit_sol_xhigh: high    # you asked for Sol and said how hard
+  explicit_luna_xhigh: high   # ...and the same for every other tier
+  explicit_terra_xhigh: high
 ```
 
-`[sol:xhigh]` is the label form — the only override that carries an effort with it.
+`[<tier>:xhigh]` is the label form. It parsed for every tier from the start but
+was honoured only for Sol, so `[luna:xhigh]` ran silently at Luna's floor with no
+way to say otherwise; `explicit_<tier>` was unreadable config everywhere else for
+the same reason. Both keys are general since 1.9.5.
+
+Resolution walks from the most specific key to the plain tier, and **a key you
+have not written changes nothing** — that is what makes adding a tier here
+optional rather than a behaviour change. An escalation degrades to its tier's
+`explicit_` key rather than to the tier's floor, so a missing
+`explicit_<tier>_xhigh` means "no escalation configured" instead of silently
+capping the request.
 
 ### Images force a vision-capable route
 
@@ -288,6 +341,15 @@ quota_fallbacks:
 
 It fires once per turn and only if the replacement is itself callable, so an
 exhausted Spark continues on Luna instead of failing the turn.
+
+Note what that last condition rules out. A usage quota belongs to the account, and
+the failure is recorded **before** a replacement is looked for — which benches
+every sibling on that account first. So on a genuine quota exhaustion this
+substitution cannot fire at all: the configured replacement is already cooling.
+What survives here is the case it is actually good for — a transient blip, or a
+model this account cannot use — where a same-account sibling is the right answer.
+Moving quota-stopped work needs a different account, and that is a dispatch
+decision, not a model swap.
 
 ### A model this account cannot use
 
@@ -542,6 +604,49 @@ for the same duration — all four Codex tiers together, or Opus and Sonnet
 together. Targets on other accounts are untouched, which is the point: the
 planner should be reaching for them.
 
+### A worker stopped by a quota comes back as a re-dispatch
+
+A leaf that dies on an account limit has not failed at its task, but nothing in
+the delegation envelope says so. It reports the goal, the status and the
+provider's error, and the conductor is left to guess whether to retry, re-plan or
+drop — while re-sending the same goal to the same target fails identically until
+the cooldown lapses.
+
+Everything needed to answer that is already here: the cooldown state says which
+accounts are refusing calls and for how long, the preference chain says what comes
+next, and the classifier that decides every route can tell what kind of work the
+goal is. So a delegation outcome carrying a quota-stopped task comes back with the
+target named:
+
+```
+[ROUTER — A WORKER STOPPED ON AN ACCOUNT LIMIT]
+- Implement and commit the backend portion of the reliability ledger.
+  code work -> re-dispatch with model:opus5
+Re-dispatch each one with the model: parameter named above and tell the retry to
+continue from what the stopped worker already committed in its worktree instead
+of starting over. Do not re-plan or narrow the goal: only the account changed.
+```
+
+When the whole chain is cooling it says what to wait for and for how long, so
+waiting stays a legible option instead of a guess.
+
+**It names the target and stops there.** Re-dispatching by itself would be the
+hardcoded selection this design exists to avoid: what to do with a stopped leaf —
+retry, narrow, wait, drop — is the conductor's call.
+
+Both outcome shapes are answered: the consolidated batch envelope, and the early
+single-child notice that arrives while siblings are still running, which exists
+precisely so the conductor can act then rather than at batch end. The off-provider
+path answers too — a `code` chain starting with `opus5` puts the conductor itself
+on Claude, and that branch returns early, so the setup that needs this most would
+otherwise have been the one to miss it.
+
+Two false positives are excluded by construction. An ordinary failure is left
+alone, because only a limit is safe to re-send unchanged. And the reason is read
+from the envelope's own status/error lines rather than from the whole block — a
+worker whose subject *is* quota handling otherwise reports itself as
+quota-stopped, which the leaves of this very plugin do.
+
 ### Policy routes do not fall back
 
 `fallbacks` exists for preference: a long request prefers Sol for capacity, and
@@ -582,11 +687,36 @@ the label was written by a conductor that saw the objective, the repository and
 any screenshot — a better-informed decision than a keyword test on the goal
 text. So a plan label is authoritative, and the design gate does not re-judge it.
 
-The label still has to be true. A `[spark]` leaf must actually be read-only:
-one that writes is rejected, and one touching production, security, credentials
-or payments escalates to Sol. Both are judged from the verbs, independently of
-the subject matter — "identify the layout branches" is source discovery, not
-design work.
+The label still has to be true. A `[spark]` **or `[luna]`** leaf must actually be
+read-only: one that writes is rejected, and one touching production, security,
+credentials or payments escalates to Sol. Both are judged from the verbs,
+independently of the subject matter — "identify the layout branches" is source
+discovery, not design work.
+
+Luna faced no check at all until 1.9.5, which is how a conductor handed it
+"Stabilize, correct, test, and commit the dirty foundation now" and the router
+obeyed. The write-verb list had a matching hole: `commit` was not in it, and
+neither were any Hungarian imperatives, so the guard would have passed that goal
+even once it existed.
+
+**`[opus5]` and `[sonnet5]` are not labels.** They read like `[sol]` and do the
+opposite of what the writer meant: the override vocabulary knows only this
+provider's four tiers, so the prefix is inert, the goal is classified on its
+remaining text, and the leaf works to completion on the account the dispatcher
+was trying to spare. A delegated leaf whose goal opens with one — while running
+on one of this provider's models — is stopped at its first call, its tool use
+switched off, and its single answer is the correction, which reaches the parent
+as the leaf's own summary:
+
+```
+MISDISPATCHED: this goal names opus5 in its text, which is not a route.
+Re-dispatch it unchanged with delegate_task(model="opus5").
+```
+
+Both facts are required. A leaf already on that account has a redundant prefix
+rather than a wrong one, and a **root** turn carrying `[opus5]` is you asking for
+Opus, not a dispatch bug. `[opus-review]` and `[sonnet-review]` are unaffected:
+those are real labels, routed to the read-only CLI bridge.
 
 The check looks for contradiction, not corroboration. A leaf that names no write
 verb passes, because the conductor already declared it read-only by labelling it;
@@ -616,6 +746,12 @@ without that filter a planner can pick a tier the cross-provider guard then
 refuses mid-session, producing a leaf that never runs. A goal-text prefix only renames
 the model *inside the default provider*, so it cannot reach a target on another
 account — a leaf meant for Qwen must carry `model: "qwen"`.
+
+That rule was here from the start and lost anyway, seven goals running, because it
+shares a paragraph with `[spark]` and `[sol]` — which *are* prefixes. `[opus5]` is
+the obvious blend of the two mechanisms. Since 1.10.1 the contract names the
+mistake rather than restating the rule, and a leaf that makes it is stopped
+instead of quietly becoming a Sol leaf.
 
 Claude is one of those targets, and a Claude leaf must carry every fact it needs
 in its goal — it does not share the conversation:
@@ -674,6 +810,12 @@ pytest
 ```
 
 ## Version
+
+**1.10.1** — A goal naming `opus5` or `sonnet5` in its text is stopped at its first call and returned for re-dispatch, instead of running to completion on Sol; the contract names that mistake rather than restating the rule
+
+**1.10.0** — A worker stopped by an account limit comes back as a re-dispatch with the next target named, from both the batch envelope and the early single-child notice
+
+**1.9.5** — Implementation work stops landing on Luna and on a hardcoded default: `sonnet5` leaves the light substitution group, `[luna]` faces the read-only check `[spark]` already had, `explicit_<tier>` and `[<tier>:xhigh]` work for every tier, and the operator's chain is stated in full as an instruction rather than as advice
 
 **1.9.4** — The forced conductor follows the `code` preference chain, so planning does not have to sit on the primary quota
 
