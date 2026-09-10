@@ -906,6 +906,8 @@ pytest
 
 ## Version
 
+**1.10.8** — A cooling `sonnet5` shows its cooldown in the dashboard: the status panel walked a hardcoded tier list that omitted it, so that account read as merely idle
+
 **1.10.7** — A `delegate_task` that fails to resolve its provider comes back naming the free targets: an absent `model:` degrades to the default, so the error reports an account the parent never meant to use
 
 **1.10.6** — A goal that names the base commit it builds on, as the contract requires, no longer reads as an instruction to commit: a read-only `[spark]` leaf was being escalated off Spark for complying

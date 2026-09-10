@@ -251,7 +251,13 @@ def _router_status() -> dict:
         window = int((config.get("usage_report") or {}).get("window_seconds") or 3600)
         recorded = _read_cooldown_state(config).get("tiers") or {}
         cooldowns = {}
-        for tier in ("luna", "spark", "terra", "sol", "opus5", "qwen"):
+        # Every tier the router knows, from the router's own config rather than a
+        # list repeated here: sonnet5 was missing from the hardcoded tuple, so a
+        # cooling Sonnet reported no cooldown at all and the dashboard showed the
+        # account as merely idle. The `routable` field below already learned this
+        # lesson; the loop two lines up had not.
+        tracked = sorted(set(config.get("models") or {}) | set(config.get("callable") or {}))
+        for tier in tracked:
             remaining = _tier_cooldown_remaining(tier, config)
             if remaining > 0:
                 cooldowns[tier] = {

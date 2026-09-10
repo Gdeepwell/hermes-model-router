@@ -560,6 +560,29 @@ class RouterStatusTests(unittest.TestCase):
             self.assertIn("seconds", entry)
             self.assertIn("reason", entry)
 
+    def test_every_tier_the_router_knows_can_report_a_cooldown(self):
+        """sonnet5 was missing from a hardcoded tuple here, so a cooling Sonnet
+        reported nothing and the dashboard showed that account as merely idle —
+        the one reading the operator most needs when Claude is the spare."""
+        from unittest.mock import patch
+
+        config = {
+            "models": {"luna": "m", "terra": "m", "sol": "m", "qwen": "m"},
+            "callable": {"luna": True, "terra": True, "sol": True,
+                         "opus5": True, "sonnet5": True, "qwen": True},
+            "usage_report": {"window_seconds": 3600},
+        }
+        with patch("model_router._load_config", return_value=config), \
+             patch("model_router._read_cooldown_state",
+                   return_value={"tiers": {"sonnet5": {"reason": "quota exhausted"}}}), \
+             patch("model_router._tier_cooldown_remaining",
+                   side_effect=lambda tier, cfg: 600.0 if tier == "sonnet5" else 0.0), \
+             patch("model_router._recent_account_load", return_value={}):
+            status = web_viewer._router_status()
+
+        self.assertIn("sonnet5", status["cooldowns"])
+        self.assertEqual(status["cooldowns"]["sonnet5"]["reason"], "quota exhausted")
+
 
 class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
     """The per-work-kind chain editor. The reordering logic runs in node, not in
