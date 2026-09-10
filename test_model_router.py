@@ -1096,6 +1096,20 @@ class ModelRouterTests(unittest.TestCase):
         # Comparable strength is not comparable permission.
         self.assertIn("Substituting is for capacity only", contract)
 
+    def test_the_goal_must_carry_what_the_worker_cannot_see(self):
+        """A worker starts at history=0 on every target. One Opus leaf spent all
+        sixteen iterations and twenty tool calls rediscovering a repository its
+        goal never described, and made no edit; the leaf whose goal carried its
+        own state finished in nine with one write."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("does not share this conversation", contract)
+        self.assertIn("absolute worktree path", contract)
+        self.assertIn("one finishable artefact", contract)
+
     def test_a_switched_off_tier_is_not_offered_as_a_target(self):
         """The cross-provider guard raises for a disabled tier mid-session, so
         offering it produces a leaf that never runs: exactly what happened when

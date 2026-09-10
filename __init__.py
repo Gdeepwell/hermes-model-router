@@ -1926,6 +1926,7 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names, cfg)}"
         f"{_preference_sentence(preference_names, cfg)}"
+        f"{_goal_orientation_sentence()}"
         f"{_account_load_sentence(cfg)}"
     )
 
@@ -1970,6 +1971,33 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
         "and when an entry is marked unavailable must move to the next entry in the same "
         "order rather than choosing freely. This is the operator's configuration, not a "
         "suggestion, and it decides the leaf's model: parameter. "
+    )
+
+
+def _goal_orientation_sentence() -> str:
+    """Require the goal to carry what the worker cannot see for itself.
+
+    Every delegated worker starts at ``history=0``. It does not share this
+    conversation on any target, so a fact the conductor knows and does not write
+    down is a fact the worker must spend iterations rediscovering -- against a
+    budget that ``delegate_task`` cannot raise per leaf, because the host treats
+    ``delegation.max_iterations`` as authoritative and ignores the argument.
+
+    Measured, on one Opus leaf: sixteen iterations, twenty tool calls, an input
+    context grown from 20k to 56k, and not one edit -- the entire budget spent
+    reconstructing a repository the goal never described. The leaf whose goal
+    carried its own state and asked for a single artefact finished in nine with
+    one write. The difference was the goal, not the model and not the budget.
+    """
+    return (
+        "A worker sees its goal and nothing else: it does not share this conversation, so a "
+        "fact you leave out is one it must spend iterations rediscovering, and its iteration "
+        "budget is fixed and cannot be raised per leaf. Every goal therefore states the "
+        "absolute worktree path, the branch and the commit it builds on, what already exists "
+        "there, which files or modules are in scope, and how the result is verified. Give one "
+        "worker one finishable artefact rather than a feature to implement: a goal phrased as "
+        "a product requirement has no boundary, and it is spent on orientation before the "
+        "first edit. "
     )
 
 

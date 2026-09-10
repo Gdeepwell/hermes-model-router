@@ -1,5 +1,5 @@
 name: model-router
-version: "1.10.1"
+version: "1.10.2"
 description: "Smart LLM routing for OpenAI Codex models. Routes between Luna (simple tasks), Spark (read-only coding), Terra (default orchestrator), Sol (complex/sensitive), and read-only Claude review leaves through the Claude CLI. Privacy-safe audit logging, bounded delegation, live dashboard."
 author: "SENTINEL"
 middleware:

@@ -761,6 +761,38 @@ in its goal — it does not share the conversation:
  "model": "sonnet5"}
 ```
 
+### A goal carries what the worker cannot see
+
+That rule is not specific to Claude. **Every** delegated worker starts at
+`history=0` on every target, so a fact the conductor knows and does not write
+down is a fact the worker spends iterations rediscovering — against a budget it
+cannot raise: `delegate_task` accepts a `max_iterations` argument and the host
+ignores it, because `delegation.max_iterations` is authoritative "so budgets stay
+predictable".
+
+Measured on one Opus leaf: sixteen iterations, twenty tool calls (13 `terminal`,
+6 `read_file`, 1 `search_files`), context grown from 20k to 56k, and **not one
+edit**. The whole budget went on reconstructing a repository the goal never
+described, because the goal was a product requirement:
+
+> Implement a tenant-scoped, safe customer-profile merge capability for Booking
+> SaaS: an authorized admin can review two duplicate customer profiles and merge
+> a phone-only and email-only record into one canonical profile…
+
+No path, no branch, no base commit, no files. The leaf that finished did so in
+nine iterations with one write, and the only difference was its goal: it carried
+its own state ("the user already ran the `ALTER USER` command, it succeeded") and
+asked for a single artefact.
+
+So the contract now requires every goal to state the absolute worktree path, the
+branch and the commit it builds on, what already exists there, which files or
+modules are in scope, and how the result is verified — and to give one worker one
+finishable artefact rather than a feature to implement. A goal phrased as a
+product requirement has no boundary, and it is spent before the first edit.
+
+Raising `delegation.max_iterations` is the blunt instrument here, not the first
+move: it is global, so it also widens every Codex leaf on the shared quota.
+
 ## Diagnosing a parent that will not delegate
 
 `~/.hermes/logs/terra-spark-orchestration.jsonl` records why a preflight did not
@@ -810,6 +842,8 @@ pytest
 ```
 
 ## Version
+
+**1.10.2** — The contract requires a goal to carry what the worker cannot see — worktree, branch, base commit, scope, verification — after an Opus leaf spent all sixteen iterations rediscovering a repository its goal never described, and made no edit
 
 **1.10.1** — A goal naming `opus5` or `sonnet5` in its text is stopped at its first call and returned for re-dispatch, instead of running to completion on Sol; the contract names that mistake rather than restating the rule
 
