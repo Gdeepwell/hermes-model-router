@@ -677,6 +677,23 @@ def _is_acknowledgement_only(text: str) -> bool:
     return bool(_ACKNOWLEDGEMENT_ONLY.fullmatch(_normalise(text)))
 
 
+# "at commit 7abc123", "the commit it builds on", "base commit": a reference to a
+# commit, not an act of committing. Stripped before the write-verb test because
+# the goal contract *requires* a base commit, so every well-formed read-only goal
+# now names one -- and `commit` was added to the write verbs in the same series
+# of changes. The better the goal, the more certainly it read as mutating.
+_COMMIT_REFERENCE = re.compile(
+    r"\b(?:at|base|the|from|on|since|after|before|parent|head|onto|against)\s+commit\b"
+    r"|\bcommit\s+(?:hash|sha|id|[0-9a-f]{6,40})\b",
+    re.I,
+)
+
+
+def _without_commit_references(text: str) -> str:
+    """Remove commit *references* so only an instruction to commit is a write."""
+    return _COMMIT_REFERENCE.sub(" ", text or "")
+
+
 def _is_spark_read_only_work(text: str) -> bool:
     """A plan-labelled leaf is read-only unless it says otherwise.
 
@@ -694,7 +711,10 @@ def _is_spark_read_only_work(text: str) -> bool:
     read-only phrasings are open-ended.
     """
     affirmative = _normalise(_without_negated_safety_constraints(text))
-    return bool(affirmative and not _SPARK_MUTATING_WORK.search(affirmative))
+    return bool(
+        affirmative
+        and not _SPARK_MUTATING_WORK.search(_without_commit_references(affirmative))
+    )
 
 
 def _is_spark_read_only_request(text: str) -> bool:

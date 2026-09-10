@@ -9,6 +9,7 @@ from unittest.mock import patch
 from model_router import (
     RouteDecision,
     _is_callable_tier,
+    _is_spark_read_only_work,
     _log_decision,
     _account_load_sentence,
     _model_param_contract,
@@ -2169,3 +2170,40 @@ class GoalContractOnTheSchemaTests(unittest.TestCase):
         request = self._request()
         self._route(request)
         self.assertEqual(self._task_schema(request)["required"], ["goal"])
+
+
+class CommitReferenceIsNotAWriteTests(unittest.TestCase):
+    """`commit` as a noun, in the base commit the goal contract requires.
+
+    Two changes in the same series collided: `commit` joined the write verbs, and
+    the contract began requiring the goal to name the commit it builds on. The
+    better the goal, the more certainly a read-only leaf read as mutating — a
+    `[spark]` source map ending "at commit 7abc123" was escalated off Spark.
+    """
+
+    def test_a_named_base_commit_is_not_an_instruction_to_commit(self):
+        for text in (
+            "[spark] Map the role/scope logic in /home/x (branch feat/y, at commit 7abc123).",
+            "[spark] Inspect /home/x on branch feat/y, base commit 9def456.",
+            "[spark] Report the exports in /home/x at the commit it builds on.",
+            "[spark] Read /home/x from commit hash abc1234 and list the migrations.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_an_instruction_to_commit_still_is_one(self):
+        for text in (
+            "[luna] Finish and commit the already-started foundation.",
+            "[spark] Fix the parser and commit the change.",
+            "[luna] Implementáld és commitold a ledger integrációt.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+    def test_a_well_formed_read_only_leaf_keeps_its_label(self):
+        """It used to be escalated to Sol; the label survives the contract now."""
+        goal = ("[spark] Produce a factual, read-only source map of customer-management "
+                "role/scope logic in the Next.js repository at absolute path /home/x "
+                "(git branch feat/tenant-wide-customer-access, at commit 7abc123).")
+        decision = classify_request(chat_request(goal), 1, allow_plan_label_over_design=True)
+        self.assertNotEqual(decision.reason, "consequential Spark task requires Sol")

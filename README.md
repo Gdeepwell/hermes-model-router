@@ -699,6 +699,13 @@ obeyed. The write-verb list had a matching hole: `commit` was not in it, and
 neither were any Hungarian imperatives, so the guard would have passed that goal
 even once it existed.
 
+Closing that hole opened another one, and the two changes were in the same
+series. `commit` is also a noun, and the goal contract requires a goal to name
+the commit it builds on — so "…at commit 7abc123" made a read-only source map
+read as mutating, and a `[spark]` leaf was escalated off Spark for saying exactly
+what it had been told to say. A commit *reference* is stripped before the
+write-verb test; an instruction to commit still counts.
+
 **`[opus5]` and `[sonnet5]` are not labels.** They read like `[sol]` and do the
 opposite of what the writer meant: the override vocabulary knows only this
 provider's four tiers, so the prefix is inert, the goal is classified on its
@@ -872,6 +879,8 @@ pytest
 ```
 
 ## Version
+
+**1.10.6** — A goal that names the base commit it builds on, as the contract requires, no longer reads as an instruction to commit: a read-only `[spark]` leaf was being escalated off Spark for complying
 
 **1.10.5** — Per-task `context` is required on the delegate_task schema, with a description that says what belongs in it: the goal description alone was live, read, and ignored
 
