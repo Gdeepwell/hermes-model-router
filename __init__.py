@@ -599,6 +599,32 @@ _SPARK_CONSEQUENTIAL_WORK = re.compile(
 
 _PLAN_LABEL = re.compile(r"^\s*\[(luna|spark|terra|sol)(?::xhigh)?\](?:\s|$)")
 _CLAUDE_REVIEW_LABEL = re.compile(r"^\s*\[(opus|sonnet)5?-review\](?:\s|$)")
+# A goal that names an external target the way a Sol or Spark goal names its
+# tier. It is not a route and never has been -- the override regex knows only
+# the four tiers of the default provider -- so the leaf runs on whatever the
+# classifier makes of the rest of the text. The bracket closes on the name, so
+# the legitimate [opus5-review] / [sonnet-review] labels do not match.
+_EXTERNAL_TARGET_LABEL = re.compile(r"^\s*\[(opus5?|sonnet5?)\](?:\s|$)", re.I)
+
+
+def _misdispatched_external_label(text: str, active_model: str, cfg: Dict[str, Any]) -> str:
+    """The external target a goal names in its text while running somewhere else.
+
+    Two facts together are proof of a wrong dispatch, and neither is enough
+    alone: the goal opens with an external target's name, and the leaf carrying
+    it is on one of this provider's models. The dispatcher meant Claude and used
+    the prefix mechanism, which only renames a model inside one provider.
+
+    Returns "" when the leaf is already on the named account -- there the prefix
+    is redundant, not wrong.
+    """
+    match = _EXTERNAL_TARGET_LABEL.match(text or "")
+    if not match:
+        return ""
+    if active_model not in set((cfg.get("models") or {}).values()):
+        return ""
+    name = match.group(1).casefold()
+    return name if name.endswith("5") else f"{name}5"
 
 
 def _is_plan_labelled_worker(text: str) -> bool:
@@ -989,6 +1015,26 @@ def _earliest_free_entry(kind: str, cfg: Dict[str, Any]) -> Optional[Tuple[str, 
         return None
     name, remaining = min(waiting, key=lambda item: item[1])
     return name, int(remaining // 60) + 1
+
+
+def _misdispatch_instruction(target: str, running_on: str) -> str:
+    """Tell a misdispatched leaf to report the correction instead of working.
+
+    Addressed to the leaf because that is who this router can still reach: the
+    parent has already dispatched and will not be consulted again until the leaf
+    reports. Making the leaf's one answer *be* the correction turns a wasted
+    branch into the message the parent needs.
+    """
+    return (
+        f"\n\n[ROUTER — WRONG DISPATCH MECHANISM]\n"
+        f"This goal opens with [{target}], which is not a route. A goal-text prefix only "
+        f"renames the model inside the default provider, so this leaf is running on "
+        f"{running_on}, not on {target}, and its tool use has been switched off.\n"
+        f"Do not begin the work and do not plan it. Reply with exactly this line and "
+        f"nothing else:\n"
+        f"MISDISPATCHED: this goal names {target} in its text, which is not a route. "
+        f"Re-dispatch it unchanged with delegate_task(model=\"{target}\").\n"
+    )
 
 
 def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
@@ -1866,7 +1912,15 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
     return (
         f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
         "A goal-text prefix only renames the model inside the default provider and cannot reach a "
-        "target on a separate account, so a leaf intended for one must carry model:<name>. Prefer "
+        "target on a separate account, so a leaf intended for one must carry model:<name>. "
+        # The general rule was already here and lost anyway, seven goals running.
+        # It shares a paragraph with [spark]/[sol], which *are* prefixes, so
+        # [opus5] is the obvious blend of the two mechanisms -- and it silently
+        # became a Sol leaf. Naming the mistake beats restating the rule.
+        "Concretely: [opus5] and [sonnet5] are not labels. A goal beginning with one is not "
+        "routed to Claude; the prefix is inert, the goal is classified on its remaining text, "
+        "and the leaf runs on this provider -- so it is stopped at its first call and returned "
+        "for re-dispatch. Name those targets only in the model parameter. Prefer "
         "spreading genuinely independent leaves across different targets so separate accounts and "
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
@@ -2708,6 +2762,32 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         if redispatch:
             routed = deepcopy(routed)
             _append_user_instruction(routed, redispatch)
+    # A goal that names an external target in its text is a dispatch error, and
+    # the expensive thing about it was that nothing said so: the label is inert,
+    # the classifier reads the rest of the goal, and the leaf works to completion
+    # on the account the dispatcher was trying to spare -- fourteen Sol calls in
+    # the case that prompted this. Stop it at its first call instead and let it
+    # report the correction, which reaches the parent as the leaf's own summary.
+    #
+    # Not raised: a middleware exception is fail-open here. Hermes logs it and
+    # sends the request unrouted, which is worse than the silence it replaces.
+    # ``tool_choice: none`` is the lever that actually bounds the leaf -- and the
+    # toolset is left intact deliberately, because an emptied ``tools`` array
+    # alongside it is the combination providers are most likely to reject, and a
+    # 400 here would trade a quiet waste for a noisy crash.
+    misdispatched = _misdispatched_external_label(latest_user_text, active_model, cfg)
+    if misdispatched and subagent_marker:
+        routed = deepcopy(routed)
+        _append_user_instruction(routed, _misdispatch_instruction(misdispatched, decision.model))
+        routed["tool_choice"] = "none"
+        routed.pop("parallel_tool_calls", None)
+        decision = replace(
+            decision,
+            reason=(
+                f"goal names '{misdispatched}' in its text, which is not a route; "
+                f"leaf stopped for re-dispatch"
+            ),
+        )
     # TokenPlan's Anthropic-compatible Qwen endpoint rejects OpenAI/Codex
     # control fields. Sanitize the final request after every orchestration,
     # shadow, fallback, and cross-provider rewrite has run.
