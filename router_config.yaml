@@ -98,6 +98,9 @@ effort:
   sol_long: medium
   explicit_sol: medium
   explicit_sol_xhigh: medium
+  explicit_luna_xhigh: high
+  explicit_spark_xhigh: high
+  explicit_terra_xhigh: high
 quota_fallbacks:
   spark:
     model: luna
@@ -129,9 +132,9 @@ peer_groups:
   - terra
   - opus5
   - qwen
+  - sonnet5
   light:
   - luna
-  - sonnet5
   - spark
 usage_report:
   enabled: true

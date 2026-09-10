@@ -70,7 +70,15 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "luna_max_chars": 700,
         "sol_min_chars": 3500,
     },
-    "effort": {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium", "explicit_sol": "xhigh"},
+    # Keyed by tier, by ``explicit_<tier>`` for a labelled route, and by
+    # ``explicit_<tier>_xhigh`` for one that asked to be escalated. Unset keys
+    # degrade to the plain tier, so adding a tier here is optional.
+    "effort": {
+        "luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium",
+        "explicit_sol": "xhigh",
+        "explicit_luna_xhigh": "high", "explicit_spark_xhigh": "high",
+        "explicit_terra_xhigh": "high", "explicit_sol_xhigh": "xhigh",
+    },
     # Provider mapping per tier: which Hermes provider handles each tier.
     "tier_providers": {
         "luna": "openai-codex",
@@ -132,9 +140,14 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "usage_report": {"enabled": True, "window_seconds": 3600},
     # Targets of comparable strength, on deliberately different accounts. Used
     # to move work off a loaded or cooling target rather than queueing on it.
+    # "Comparable in strength" is stated to the conductor verbatim, so a wrong
+    # grouping is an instruction to misroute: sonnet5 sat in the light group and
+    # the conductor duly substituted Luna for it whenever the Codex account
+    # looked loaded -- implementation leaves on the 700-char, low-effort tier.
+    # Luna's real peer is Spark; sonnet5's are the heavy implementation targets.
     "peer_groups": {
-        "heavy": ["terra", "opus5", "qwen"],
-        "light": ["luna", "sonnet5", "spark"],
+        "heavy": ["terra", "opus5", "qwen", "sonnet5"],
+        "light": ["luna", "spark"],
     },
     "shadow": {
         "enabled": False,
@@ -553,10 +566,21 @@ _ACKNOWLEDGEMENT_ONLY = re.compile(
     r"koszonom|koszi|thanks|thank\s+you|rendben\s+van|oke|ok|"
     r"jovahagyom|elfogadom|approved|accepted))*[!. ]*$"
 )
+# The write side of the read-only test. Gaps here are silent: a leaf whose only
+# write verb is missing reads as read-only, which is how "[luna] Stabilize,
+# correct, test, and commit the dirty foundation" passed a guard designed to
+# stop exactly that. "commit" in particular cannot be anything but a write, and
+# the Hungarian imperatives were absent altogether even though the goals that
+# reach this router are routinely written in Hungarian.
 _SPARK_MUTATING_WORK = re.compile(
     r"\b(add|create|implement|modify|change|edit|write|patch|delete|remove|"
     r"deploy|publish|send|restart|configure|install|fix|refactor|javitsd|"
-    r"modositsd|hozd\s+letre|torold|telepitsd|allitsd\s+be)\b"
+    r"modositsd|hozd\s+letre|torold|telepitsd|allitsd\s+be|"
+    r"commit|stabili[sz]e|rewrite|rename|update|upgrade|merge|push|revert|"
+    r"apply|eliminate|replace|scaffold|migrate|"
+    r"implementald|valositsd\s+meg|keszitsd\s+el|epitsd\s+meg|frissitsd|"
+    r"commitold|stabilizald|tavolitsd\s+el|nevezd\s+at|alakitsd\s+at|"
+    r"refaktorald|csereld|irasd\s+at)\b"
 )
 _SPARK_READ_ONLY_WORK = re.compile(
     r"\b(inspect|read|review|audit|report|analy[sz]e|compare|search|find|"
@@ -882,10 +906,30 @@ def _decision(
     mandatory: bool = False,
     kind: str = "",
 ) -> RouteDecision:
+    efforts = cfg.get("effort") or {}
     if effort_key is None:
-        effort_key = "explicit_sol" if explicit and tier == "sol" else tier
-    fallback = _DEFAULT_EFFORT.get(tier, "medium")
-    effort = str((cfg.get("effort") or {}).get(effort_key) or fallback).casefold()
+        # The explicit-label bump used to be Sol's alone, so ``explicit_<tier>``
+        # was unreadable config for every other tier. It is consulted for all of
+        # them now, but only where the operator actually wrote the key: an absent
+        # one must leave that tier exactly as it routed before.
+        #
+        # Sol keeps its unconditional form. There the missing key deliberately
+        # falls through to the built-in tier default rather than the configured
+        # ``sol`` value -- an explicit Sol label is an escalation, and the tests
+        # pin that behaviour.
+        explicit_key = f"explicit_{tier}"
+        use_explicit = explicit and (tier == "sol" or explicit_key in efforts)
+        effort_key = explicit_key if use_explicit else tier
+    # An escalation degrades to the tier's explicit key, never to its floor: a
+    # missing ``explicit_<tier>_xhigh`` means "no escalation configured", and
+    # answering that with the plain tier value would silently cap [sol:xhigh].
+    candidates = [effort_key]
+    if effort_key.endswith("_xhigh"):
+        candidates.append(effort_key[: -len("_xhigh")])
+    effort = next(
+        (str(efforts[key]).casefold() for key in candidates if efforts.get(key)),
+        _DEFAULT_EFFORT.get(tier, "medium"),
+    )
     return RouteDecision(
         tier=tier, model=cfg["models"][tier], reason=reason, effort=effort,
         mandatory=mandatory, kind=kind,
@@ -1016,19 +1060,27 @@ def _classify_request(
         # A delegated leaf carries a conductor's declaration, so the router
         # looks only for contradiction. A root [spark] is a label someone typed
         # with nothing behind it, and still has to show its read-only intent.
-        spark_read_only = (
+        label_read_only = (
             _is_spark_read_only_work(user_text)
             if allow_plan_label_over_design
             else _is_spark_read_only_request(user_text)
         )
-        if tier == "spark" and not spark_read_only:
+        # Luna faces the same test as Spark, and for the same reason: it is a
+        # bounded, low-effort tier whose label carried no capability check at
+        # all, so a conductor could hand it "stabilize, correct, test and commit"
+        # and the router obeyed. The two escape hatches stay tier-specific in
+        # wording because downstream branches match these reasons verbatim.
+        if tier in ("spark", "luna") and not label_read_only:
             if _is_consequential_spark_request(user_text):
-                return _decision("sol", "consequential Spark task requires Sol", cfg, mandatory=True)
+                return _decision("sol", f"consequential {tier.capitalize()} task requires Sol", cfg, mandatory=True)
             if _is_design_request(user_text):
                 return _decision("sol", "design analysis or implementation is Sol-only", cfg, mandatory=True, kind="design")
-            return _decision("terra", "Spark is restricted to non-design read-only subtasks", cfg)
+            return _decision("terra", f"{tier.capitalize()} is restricted to non-design read-only subtasks", cfg)
         requested_effort = override.group(2)
-        effort_key = "explicit_sol_xhigh" if tier == "sol" and requested_effort == "xhigh" else None
+        # Escalation is not Sol's alone. The ``:xhigh`` suffix parsed for every
+        # tier and was then discarded for all but Sol, so [luna:xhigh] silently
+        # ran at Luna's floor effort with no way to say otherwise.
+        effort_key = f"explicit_{tier}_xhigh" if requested_effort == "xhigh" else None
         label = f"{tier}:{requested_effort}" if requested_effort else tier
         return _decision(tier, f"explicit [{label}] override", cfg, explicit=True, effort_key=effort_key)
 
@@ -1621,6 +1673,15 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         name for name in _delegation_target_names()
         if name != orchestrator_tier and _target_is_offered(name, cfg)
     ]
+    # The operator's order is the one place the orchestrator's own tier belongs:
+    # excluding it from ``names`` is right for "other targets to spread across",
+    # but a chain like code: opus5 > terra > qwen then rendered as "code: opus5"
+    # and lost its next step -- exactly the entry that has to take over when the
+    # first one runs out. A leaf on the conductor's own account is allowed; it is
+    # merely not a way to spread load.
+    preference_names = [
+        name for name in _delegation_target_names() if _target_is_offered(name, cfg)
+    ]
     notes = _target_availability(names, cfg)
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
@@ -1632,32 +1693,52 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         "spreading genuinely independent leaves across different targets so separate accounts and "
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
-        f"{_claude_target_sentence(names)}"
-        f"{_preference_sentence(names, cfg)}"
+        f"{_claude_target_sentence(names, cfg)}"
+        f"{_preference_sentence(preference_names, cfg)}"
         f"{_account_load_sentence(cfg)}"
     )
 
 
 def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
-    """State the user's per-work-kind target preferences to the conductor.
+    """State the operator's per-work-kind target order to the conductor.
 
     The router cannot route across providers, so a preference naming an external
     account is only ever realisable here: the conductor is the one that picks a
     delegate_task target. Only offered targets are mentioned — advising a leaf onto
     a switched-off account would produce a child that never runs.
+
+    Two things were wrong with stating only the winner, as advice.
+
+    The chain vanished exactly when it mattered. Only the single first available
+    target was named, and availability folds in the cooldown, so a cooling opus5
+    erased ``code`` from the contract altogether -- indistinguishable from a kind
+    the operator never configured. The conductor could not advance to the next
+    entry because it was never told there was one. The whole order is stated now,
+    with the cooling entries annotated rather than dropped, for the same reason
+    ``_target_availability`` annotates them.
+
+    And it was phrased as a request while the ``[spark]``/``[sol]`` rules in the
+    same paragraph are imperatives, so the two contradicted each other and the
+    imperative won every time. The operator's configuration is not weaker than a
+    built-in rule; it is the one thing here that was chosen deliberately.
     """
     offered = set(names)
-    pairs = []
+    notes = _target_availability(names, cfg)
+    chains = []
     for kind in WORK_KINDS:
-        target = _preferred_target(kind, cfg)
-        if target and target in offered:
-            pairs.append(f"{kind} -> model:{target}")
-    if not pairs:
+        chain = [name for name in _preference_list(kind, cfg) if name in offered]
+        if not chain:
+            continue
+        chains.append(f"{kind}: " + " > ".join(name + notes.get(name, "") for name in chain))
+    if not chains:
         return ""
     return (
-        "The operator has set preferred targets per kind of work: "
-        + "; ".join(pairs)
-        + ". Honour these when a leaf matches the kind and the target is free. "
+        "The operator's target order per kind of work, highest priority first -- "
+        + "; ".join(chains)
+        + ". A leaf of one of these kinds must take the first target in that kind's order, "
+        "and when an entry is marked unavailable must move to the next entry in the same "
+        "order rather than choosing freely. This is the operator's configuration, not a "
+        "suggestion, and it decides the leaf's model: parameter. "
     )
 
 
@@ -1686,24 +1767,38 @@ def _peer_group_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
     )
 
 
-def _claude_target_sentence(names: Iterable[str]) -> str:
+def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] = None) -> str:
     """What the Claude targets are for, once they are offered at all.
 
     A bare name in a list tells the conductor nothing about when to reach for it,
     and these are the two that draw on a different subscription entirely -- the
     reason the target list exists.
+
+    The built-in "sonnet5 by default" tie-breaker only speaks where the operator
+    has not. A per-kind preference naming a Claude target answers the same
+    question, and emitting both put two contradictory instructions in one
+    paragraph: the unconditional default beat the hedged preference sentence
+    every time, so ``code -> model:opus5`` never once decided a leaf.
     """
     claude = [name for name in names if name in {"opus5", "sonnet5"}]
     if not claude:
         return ""
     both = len(claude) == 2
+    # Read the configured lists, not the currently-available winner: a cooling
+    # opus5 would otherwise revive the built-in default mid-session, which is the
+    # one moment the operator's own order needs to be the thing that speaks.
+    operator_chose = bool(cfg) and any(
+        name in claude
+        for kind in WORK_KINDS
+        for name in _preference_list(kind, cfg)
+    )
     return (
         f"{' and '.join(claude)} run on Claude, a different subscription from every other "
         f"target, so they are the strongest way to keep independent work off a single quota. "
         f"They are ordinary workers with the usual tools: give them implementation or deep "
         f"review, not just reading. "
         + ("Use sonnet5 by default and reserve opus5 for consequential or hard work. "
-           if both else "")
+           if both and not operator_chose else "")
     )
 
 

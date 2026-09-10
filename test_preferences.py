@@ -168,8 +168,39 @@ class GuidanceSentenceTests(unittest.TestCase):
         cfg = _cfg(preferences={"design": ["opus5", "sol"], "review": ["sonnet5", "terra"]})
         sentence = _preference_sentence(["opus5", "sonnet5", "luna"], cfg)
 
-        self.assertIn("design -> model:opus5", sentence)
-        self.assertIn("review -> model:sonnet5", sentence)
+        self.assertIn("design: opus5", sentence)
+        self.assertIn("review: sonnet5", sentence)
+
+    def test_the_whole_order_is_stated_not_only_the_winner(self):
+        """The next entry is what a conductor needs when the first one cools."""
+        from model_router import _preference_sentence
+
+        cfg = _cfg(preferences={"code": ["opus5", "sonnet5", "luna"]})
+        sentence = _preference_sentence(["opus5", "sonnet5", "luna"], cfg)
+
+        self.assertIn("code: opus5 > sonnet5 > luna", sentence)
+
+    def test_a_cooling_entry_is_annotated_and_the_order_survives(self):
+        """Dropping it would be indistinguishable from an unconfigured kind."""
+        from model_router import _preference_sentence
+
+        cfg = _cfg(preferences={"code": ["opus5", "sonnet5"]})
+        with patch("model_router._tier_cooldown_remaining",
+                   side_effect=lambda name, _cfg: 600.0 if name == "opus5" else 0.0):
+            sentence = _preference_sentence(["opus5", "sonnet5"], cfg)
+
+        self.assertIn("code: opus5 [unavailable for another", sentence)
+        self.assertIn("> sonnet5", sentence)
+
+    def test_the_order_is_an_instruction_not_advice(self):
+        """It sits beside imperative [spark]/[sol] rules and used to lose to them."""
+        from model_router import _preference_sentence
+
+        cfg = _cfg(preferences={"code": ["opus5"]})
+        sentence = _preference_sentence(["opus5"], cfg)
+
+        self.assertIn("must take the first target", sentence)
+        self.assertNotIn("Honour these", sentence)
 
     def test_a_target_that_is_not_offered_is_not_advised(self):
         """Advising a switched-off account produces a leaf that never runs."""
@@ -178,9 +209,36 @@ class GuidanceSentenceTests(unittest.TestCase):
         cfg = _cfg(preferences={"design": ["opus5", "sol"]})
         self.assertEqual(_preference_sentence(["luna", "terra"], cfg), "")
 
-    def test_routable_only_preferences_say_nothing_here(self):
-        """Those are routes, not delegation advice — the router applies them itself."""
+    def test_a_kind_with_no_offered_entry_says_nothing(self):
         from model_router import _preference_sentence
 
         cfg = _cfg(preferences={"code": ["sol", "terra"]})
         self.assertEqual(_preference_sentence(["opus5", "luna"], cfg), "")
+
+    def test_an_offered_routable_tier_is_part_of_the_order(self):
+        """One list, one meaning: the conductor delegates to these names too, and
+        without them it cannot see what follows a cooling external entry."""
+        from model_router import _preference_sentence
+
+        cfg = _cfg(preferences={"code": ["opus5", "sol"]})
+        self.assertIn("code: opus5 > sol", _preference_sentence(["opus5", "sol"], cfg))
+
+    def test_a_configured_claude_target_silences_the_built_in_default(self):
+        """The two answered the same question and the unconditional one won."""
+        from model_router import _claude_target_sentence
+
+        cfg = _cfg(preferences={"code": ["opus5", "terra"]})
+        self.assertNotIn("Use sonnet5 by default", _claude_target_sentence(["opus5", "sonnet5"], cfg))
+        self.assertIn("Use sonnet5 by default", _claude_target_sentence(["opus5", "sonnet5"], _cfg()))
+
+    def test_the_built_in_default_stays_silent_while_the_preference_cools(self):
+        """Reviving it mid-cooldown would overrule the operator exactly when the
+        order it configured is the thing that has to speak."""
+        from model_router import _claude_target_sentence
+
+        cfg = _cfg(preferences={"code": ["opus5", "terra"]})
+        with patch("model_router._tier_cooldown_remaining",
+                   side_effect=lambda name, _cfg: 600.0 if name == "opus5" else 0.0):
+            sentence = _claude_target_sentence(["opus5", "sonnet5"], cfg)
+
+        self.assertNotIn("Use sonnet5 by default", sentence)
