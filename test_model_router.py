@@ -2062,3 +2062,76 @@ class ModelRouterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoalContractOnTheSchemaTests(unittest.TestCase):
+    """The goal rules used to travel only inside the forced preflight.
+
+    A root prompt under `orchestration.min_chars` creates no conductor, so the
+    parent dispatched straight from its own toolset with nobody having been told
+    what a goal must carry — one twelve-character prompt produced a whole-feature
+    goal with no worktree, branch or base commit, and the leaf spent all sixteen
+    iterations rediscovering them.
+    """
+
+    DELEGATE = {
+        "name": "delegate_task",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tasks": {"type": "array", "items": {"type": "object", "properties": {
+                    "goal": {"type": "string", "description": "What this subagent should accomplish."},
+                }}},
+            },
+        },
+    }
+
+    def _request(self):
+        return {
+            "model": MODELS["terra"],
+            "messages": [{"role": "user", "content": "inplementald"}],
+            "tools": [{"name": "terminal"}, json.loads(json.dumps(self.DELEGATE))],
+        }
+
+    def _route(self, request):
+        with patch("model_router._load_config", side_effect=default_test_config), \
+             patch("model_router._log_decision"), \
+             patch("model_router._force_terra_supervisor_preflight", return_value=None), \
+             patch("model_router._force_shadow_delegation_if_eligible", return_value=None):
+            return route_llm_request(
+                request=request, provider="openai-codex", model=MODELS["terra"],
+                api_call_count=1, turn_id="turn-goal-contract",
+            )
+
+    def _goal_description(self, request):
+        tool = next(t for t in request["tools"] if t.get("name") == "delegate_task")
+        properties = tool["parameters"]["properties"]["tasks"]["items"]["properties"]
+        return properties["goal"]["description"]
+
+    def test_the_requirements_reach_a_parent_that_got_no_preflight(self):
+        description = self._goal_description(self._route(self._request())["request"])
+        self.assertIn("absolute worktree path", description)
+        self.assertIn("one finishable artefact", description)
+
+    def test_it_is_carried_on_the_schema_not_the_message(self):
+        """A middleware edit does not persist into the conversation, and the
+        parent may delegate on any call of the turn — an appended sentence would
+        have to be repeated on every one of them."""
+        routed = self._route(self._request())["request"]
+        self.assertNotIn("absolute worktree path", routed["messages"][-1]["content"])
+
+    def test_applying_it_twice_changes_nothing(self):
+        from model_router import _with_goal_contract
+
+        once = self._route(self._request())["request"]
+        self.assertIsNone(_with_goal_contract(once))
+
+    def test_the_callers_own_schema_is_not_mutated(self):
+        request = self._request()
+        self._route(request)
+        self.assertNotIn("absolute worktree path", self._goal_description(request))
+
+    def test_a_request_without_the_tool_is_untouched(self):
+        from model_router import _with_goal_contract
+
+        self.assertIsNone(_with_goal_contract({"tools": [{"name": "terminal"}]}))

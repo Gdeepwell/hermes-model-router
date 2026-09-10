@@ -793,6 +793,20 @@ product requirement has no boundary, and it is spent before the first edit.
 Raising `delegation.max_iterations` is the blunt instrument here, not the first
 move: it is global, so it also widens every Codex leaf on the shared quota.
 
+**These requirements ride on the `delegate_task` schema, not on the message.**
+They used to travel only inside the forced preflight, so a turn that skipped it
+delegated with nobody having been told what a goal must carry — and a root prompt
+shorter than `orchestration.min_chars` (60) skips it, creating no conductor at
+all. A twelve-character `inplementald` produced exactly that: a whole-feature
+goal with no worktree, branch or base commit in it.
+
+The schema is the right carrier because a middleware edit does not persist into
+the conversation — that is why the preflight needs a rescue pass at all. The
+parent may delegate on any call of the turn, so an appended sentence would have
+to be repeated on every one of them; a tool description is read once, exactly
+where the goal is written. When a preflight *does* fire, the conductor's contract
+already carries the same rules and the schema is left alone.
+
 ## Diagnosing a parent that will not delegate
 
 `~/.hermes/logs/terra-spark-orchestration.jsonl` records why a preflight did not
@@ -842,6 +856,8 @@ pytest
 ```
 
 ## Version
+
+**1.10.3** — The goal requirements ride on the `delegate_task` schema too, so a parent that never got a preflight — a root prompt under `orchestration.min_chars` creates no conductor — still writes goals that carry a worktree, a branch and a boundary
 
 **1.10.2** — The contract requires a goal to carry what the worker cannot see — worktree, branch, base commit, scope, verification — after an Opus leaf spent all sixteen iterations rediscovering a repository its goal never described, and made no edit
 

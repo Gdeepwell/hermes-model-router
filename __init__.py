@@ -2001,6 +2001,65 @@ def _goal_orientation_sentence() -> str:
     )
 
 
+_GOAL_CONTRACT_MARKER = "absolute worktree path"
+_GOAL_CONTRACT_CLAUSE = (
+    " Every fact it needs must be here: the absolute worktree path, the branch and the "
+    "commit it builds on, what already exists there, which files or modules are in scope, "
+    "and how the result is verified. Give it one finishable artefact, not a feature to "
+    "implement -- its iteration budget is fixed and cannot be raised per task, so a goal "
+    "with no boundary is spent on orientation before the first edit."
+)
+
+
+def _with_goal_contract(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Carry the goal requirements on the delegate_task schema itself.
+
+    These rules only ever travelled inside the forced preflight, so a turn that
+    skipped it delegated with nobody having been told what a goal has to carry.
+    A twelve-character root prompt falls under ``orchestration.min_chars``, no
+    conductor is created, and the parent dispatches straight from its own toolset
+    -- which is how a whole-feature goal went out with no worktree, branch or base
+    commit in it, and the leaf spent all sixteen iterations rediscovering them.
+
+    On the schema rather than appended to the message because a middleware edit
+    does not persist into the conversation -- that is why the preflight needs a
+    rescue pass at all. The parent may delegate on any call of the turn, so an
+    appended sentence would have to be repeated on every one of them; a tool
+    description is read once, exactly where the goal is written.
+
+    Returns None when there is nothing to change, so the caller can tell a
+    no-op from a rewrite.
+    """
+    tool = _find_delegate_tool(request)
+    if tool is None:
+        return None
+    routed = deepcopy(request)
+    tool = _find_delegate_tool(routed)
+    schema_owner, schema_key = _tool_schema_slot(tool)
+    schema = schema_owner.get(schema_key)
+    if not isinstance(schema, dict):
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    # The advertised batch shape, plus the legacy single-goal one the handler
+    # still accepts: a request carrying either must not slip through unannotated.
+    slots = [((properties.get("tasks") or {}).get("items") or {}).get("properties"), properties]
+    changed = False
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        goal = slot.get("goal")
+        if not isinstance(goal, dict):
+            continue
+        description = str(goal.get("description") or "")
+        if _GOAL_CONTRACT_MARKER in description:
+            continue
+        goal["description"] = description + _GOAL_CONTRACT_CLAUSE
+        changed = True
+    return routed if changed else None
+
+
 def _peer_group_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
     """Name the substitutions, so a loaded target is a choice rather than a wait.
 
@@ -2816,6 +2875,12 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
                 f"leaf stopped for re-dispatch"
             ),
         )
+    elif forced_preflight_request is None:
+        # The preflight carries these rules already, inside the conductor's
+        # contract; this is the path where no conductor was created at all.
+        with_goal_contract = _with_goal_contract(routed)
+        if with_goal_contract is not None:
+            routed = with_goal_contract
     # TokenPlan's Anthropic-compatible Qwen endpoint rejects OpenAI/Codex
     # control fields. Sanitize the final request after every orchestration,
     # shadow, fallback, and cross-provider rewrite has run.
