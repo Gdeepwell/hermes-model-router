@@ -630,6 +630,32 @@ of starting over. Do not re-plan or narrow the goal: only the account changed.
 When the whole chain is cooling it says what to wait for and for how long, so
 waiting stays a legible option instead of a guess.
 
+### A delegation that failed before any worker existed
+
+The notice above reads a delegation *outcome*. Sometimes there is none: the tool
+returns an error inline, no child ever runs, and nothing will be delivered later
+to explain it.
+
+The error is actively misleading when it happens. An absent or unrecognised
+`model:` value does not fail — it degrades to the configured default — so a call
+that meant to reach Claude comes back as:
+
+```
+Cannot resolve delegation provider 'openai-codex':
+Codex provider quota exhausted (429); retry after 3731s.
+```
+
+That is the *default's* account, not the one the parent had in mind. Observed
+with Codex exhausted: the parent concluded "the Codex quota is out, so the opus5
+delegation failed" — true as stated, and wrong, because opus5 runs on Anthropic
+and was never contacted. It then spent its reasoning working out which tier sits
+on which account, from a premise about its own call that was false.
+
+So a `delegate_task` provider failure now comes back with the diagnosis and the
+targets that are actually free right now, or what to wait for when none are —
+and a reminder that only the `model` parameter selects a route, since the same
+parent had already tried putting the target in the goal text.
+
 **It names the target and stops there.** Re-dispatching by itself would be the
 hardcoded selection this design exists to avoid: what to do with a stopped leaf —
 retry, narrow, wait, drop — is the conductor's call.
@@ -879,6 +905,8 @@ pytest
 ```
 
 ## Version
+
+**1.10.7** — A `delegate_task` that fails to resolve its provider comes back naming the free targets: an absent `model:` degrades to the default, so the error reports an account the parent never meant to use
 
 **1.10.6** — A goal that names the base commit it builds on, as the contract requires, no longer reads as an instruction to commit: a read-only `[spark]` leaf was being escalated off Spark for complying
 

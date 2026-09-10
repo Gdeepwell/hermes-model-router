@@ -1037,6 +1037,83 @@ def _earliest_free_entry(kind: str, cfg: Dict[str, Any]) -> Optional[Tuple[str, 
     return name, int(remaining // 60) + 1
 
 
+# Hermes's own wording when ``delegate_task`` cannot resolve the route it was
+# given. It names the *configured default* provider, because an unknown or absent
+# target degrades to the default rather than failing -- so a call that meant to
+# reach Claude reports a Codex problem, and the parent reads it as "Claude is
+# unavailable" when Claude was never asked.
+_DISPATCH_PROVIDER_FAILURE = re.compile(r"cannot resolve delegation provider", re.I)
+_DISPATCH_NOTICE_LIMIT = 4000
+
+
+def _item_text(item: Any) -> str:
+    """Flatten one request item to searchable text, whatever its wire shape."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        try:
+            return json.dumps(item, ensure_ascii=False, default=str)
+        except Exception:
+            return str(item)
+    return str(item)
+
+
+def _available_delegation_targets(cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    return tuple(
+        name for name in _delegation_target_names()
+        if _target_is_offered(name, cfg) and _tier_cooldown_remaining(name, cfg) <= 0
+    )
+
+
+def _dispatch_failure_instruction(request: Any, cfg: Dict[str, Any]) -> str:
+    """Answer a delegate_task that failed before any worker started.
+
+    The quota notice next to this one reads a delegation *outcome*: a worker that
+    ran and died. This case never gets that far -- the tool returns an error
+    inline, no child exists, and no envelope is ever delivered. Observed with the
+    Codex account exhausted: the parent believed it was delegating to opus5, the
+    call named no target, so it resolved the configured default and came back
+    saying Codex was out of quota. The parent then reasoned, correctly from what
+    it was shown and wrongly in fact, that its Claude delegation had failed.
+    """
+    items = _request_items(request)
+    if not any(
+        _is_tool_item(item) and _DISPATCH_PROVIDER_FAILURE.search(_item_text(item)[:_DISPATCH_NOTICE_LIMIT])
+        for item in items[-12:]
+    ):
+        return ""
+    available = _available_delegation_targets(cfg)
+    default_model = str((cfg.get("models") or {}).get(str(cfg.get("default_model", "terra"))) or "")
+    head = (
+        "\n\n[ROUTER — THAT DELEGATION NAMED NO TARGET]\n"
+        "delegate_task resolved the configured default route"
+        + (f" ({default_model})" if default_model else "")
+        + ", which is what an absent or unrecognised model: value falls back to. The account it "
+        "names in the error is that default's, not the one you meant: a target you did not name "
+        "was never contacted, so its own quota is untouched.\n"
+    )
+    if available:
+        return head + (
+            "Available targets right now: " + ", ".join(available) + ". Re-issue the call with "
+            "model: set to one of them, spelled exactly as listed. Do not put the target in the "
+            "goal text; only the model parameter selects a route.\n"
+        )
+    waiting = sorted(
+        (
+            (name, _tier_cooldown_remaining(name, cfg))
+            for name in _delegation_target_names() if _target_is_offered(name, cfg)
+        ),
+        key=lambda item: item[1],
+    )
+    if not waiting:
+        return head + "No delegation target is switched on; the work has to be done in this turn.\n"
+    name, remaining = waiting[0]
+    return head + (
+        f"Every target is cooling; {name} frees up first, in about {int(remaining // 60) + 1} min. "
+        f"Wait for it or narrow the objective to what this turn can do itself.\n"
+    )
+
+
 def _misdispatch_instruction(target: str, running_on: str) -> str:
     """Tell a misdispatched leaf to report the correction instead of working.
 
@@ -2892,6 +2969,13 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         if redispatch:
             routed = deepcopy(routed)
             _append_user_instruction(routed, redispatch)
+    # A dispatch that failed before any worker existed. The notice above reads a
+    # delegation outcome and there is none here: no child ran, so nothing will
+    # ever be delivered to explain it.
+    dispatch_failure = _dispatch_failure_instruction(request, cfg)
+    if dispatch_failure:
+        routed = deepcopy(routed)
+        _append_user_instruction(routed, dispatch_failure)
     # A goal that names an external target in its text is a dispatch error, and
     # the expensive thing about it was that nothing said so: the label is inert,
     # the classifier reads the rest of the goal, and the leaf works to completion

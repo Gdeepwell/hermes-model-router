@@ -247,3 +247,84 @@ class EarlyFailureNoticeTests(unittest.TestCase):
             "TypeError: cannot read property 'id' of undefined",
         )
         self.assertEqual(self._instruction(text), "")
+
+
+DISPATCH_ERROR = (
+    '{"error": "Cannot resolve delegation provider \'openai-codex\': Codex provider quota '
+    'exhausted (429); retry after 3731s. Credentials are still valid."}'
+)
+
+
+def request_with_tool_error(content):
+    return {
+        "model": "gpt-terra",
+        "messages": [
+            {"role": "user", "content": "folytasd"},
+            {"role": "assistant", "content": "delegating"},
+            {"role": "tool", "name": "delegate_task", "content": content},
+        ],
+    }
+
+
+class DispatchFailureTests(unittest.TestCase):
+    """A delegation that failed before any worker existed.
+
+    The quota notice reads a delegation outcome, and there is none here: the tool
+    returns an error inline, no child runs, and nothing is ever delivered to
+    explain it. With the Codex account exhausted a parent believed its opus5
+    delegation had failed — the call had named no target, so it resolved the
+    configured default and reported that default's account.
+    """
+
+    def _instruction(self, request, cooling=()):
+        def remaining(name, cfg):
+            return 900.0 if name in cooling else 0.0
+        with patch("model_router._tier_cooldown_remaining", side_effect=remaining), \
+             patch("model_router._delegation_target_names", return_value=TARGETS):
+            from model_router import _dispatch_failure_instruction
+            return _dispatch_failure_instruction(request, CFG)
+
+    def test_it_says_the_named_account_is_not_the_one_you_meant(self):
+        instruction = self._instruction(request_with_tool_error(DISPATCH_ERROR))
+        self.assertIn("NAMED NO TARGET", instruction)
+        self.assertIn("its own quota is untouched", instruction)
+
+    def test_it_lists_the_targets_that_are_actually_available(self):
+        instruction = self._instruction(request_with_tool_error(DISPATCH_ERROR), cooling={"sol", "terra"})
+        self.assertIn("opus5", instruction)
+        self.assertNotIn("Every target is cooling", instruction)
+
+    def test_it_says_what_to_wait_for_when_none_are_free(self):
+        instruction = self._instruction(
+            request_with_tool_error(DISPATCH_ERROR),
+            cooling=set(TARGETS),
+        )
+        self.assertIn("Every target is cooling", instruction)
+        self.assertIn("min", instruction)
+
+    def test_it_repeats_that_the_goal_text_selects_nothing(self):
+        """The same parent had already tried putting the target in the goal."""
+        self.assertIn(
+            "only the model parameter selects a route",
+            self._instruction(request_with_tool_error(DISPATCH_ERROR)),
+        )
+
+    def test_another_tools_error_is_left_alone(self):
+        request = request_with_tool_error('{"error": "npm ERR! missing script test"}')
+        self.assertEqual(self._instruction(request), "")
+
+    def test_an_ordinary_turn_is_left_alone(self):
+        self.assertEqual(self._instruction(request_for("folytasd")), "")
+
+    def test_the_notice_reaches_the_routed_request(self):
+        with patch("model_router._load_config", return_value=CFG), \
+             patch("model_router._log_decision"), \
+             patch("model_router._tier_cooldown_remaining", side_effect=_no_cooldown), \
+             patch("model_router._delegation_target_names", return_value=TARGETS), \
+             patch("model_router._force_terra_supervisor_preflight", return_value=None), \
+             patch("model_router._force_shadow_delegation_if_eligible", return_value=None):
+            result = route_llm_request(
+                request=request_with_tool_error(DISPATCH_ERROR), provider="openai-codex",
+                model="gpt-terra", api_call_count=2, turn_id="turn-dispatch-failure",
+            )
+        self.assertIn("NAMED NO TARGET", result["request"]["messages"][0]["content"])
