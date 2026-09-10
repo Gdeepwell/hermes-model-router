@@ -870,6 +870,183 @@ def _completion_delegation_id(request: Any) -> str:
     return match.group(1) if match else ""
 
 
+# One task's header line in a delegation completion envelope. The icon carries
+# the outcome (✓ done, ✗ failed, ⚠ truncated) and the goal is repeated in full,
+# which is what makes a re-dispatch expressible without any state of our own.
+_TASK_HEADER = re.compile(
+    r"^---\s*(?P<icon>\S)\s*TASK\s+\d+/\d+(?::\s*(?P<goal>.*?))?\s*\(status=(?P<status>[^,)]*)",
+    re.M,
+)
+# What an account limit looks like in the error the envelope quotes.
+_QUOTA_STOP_WORDING = re.compile(
+    r"(429|quota|usage limit|limit has been reached|rate[ _-]?limit|throttl)", re.I
+)
+_QUOTA_STOP_HEAD_CHARS = 400
+
+
+def _delegation_failure_reason(block: str) -> str:
+    """The generated status/error lines of a failed task, without its summary.
+
+    Scoped this tightly because the obvious version -- search the block -- reads
+    the worker's own partial output too, and a leaf whose subject *is* quota
+    handling then reports itself as quota-stopped. The envelope emits the reason
+    as parenthesised or ``Error:``-prefixed lines ahead of "Partial output:", so
+    that prefix is the whole boundary.
+    """
+    head = block.split("Partial output:")[0]
+    return "\n".join(
+        line for line in head.splitlines()
+        if line.startswith("(") or line.startswith("Error:")
+    )[:_QUOTA_STOP_HEAD_CHARS]
+
+
+# The immediate notice for one child of a still-running fan-out, which arrives
+# while the siblings are still working and says in as many words that it exists
+# so the conductor can re-dispatch now rather than at batch end. That is the
+# moment this whole notice is for, so it is matched alongside the batch envelope.
+_SINGLE_FAILURE_TITLE = "[async delegation task failed"
+_SINGLE_FAILURE_GOAL = re.compile(r"^Task:\s*(?P<goal>.+)$", re.M)
+_SINGLE_FAILURE_ERROR = re.compile(r"^Error:\s*.+$", re.M)
+
+
+def _is_delegation_outcome_text(text: str) -> bool:
+    lowered = (text or "").lstrip().casefold()
+    return (
+        lowered.startswith("[async delegation batch complete")
+        or lowered.startswith("[async delegation complete")
+        or lowered.startswith(_SINGLE_FAILURE_TITLE)
+    )
+
+
+def _single_failure_block(text: str) -> Tuple[Tuple[str, str], ...]:
+    """``(goal, reason)`` for the early single-child failure notice, if that is it."""
+    if not (text or "").lstrip().casefold().startswith(_SINGLE_FAILURE_TITLE):
+        return ()
+    goal = _SINGLE_FAILURE_GOAL.search(text)
+    error = _SINGLE_FAILURE_ERROR.search(text)
+    if error is None:
+        return ()
+    return ((str(goal.group("goal")).strip() if goal else "", error.group(0)),)
+
+
+def _failed_delegation_blocks(text: str) -> Tuple[Tuple[str, str], ...]:
+    """``(goal, block)`` for every task the envelope reports as not done."""
+    headers = list(_TASK_HEADER.finditer(text))
+    blocks = []
+    for position, match in enumerate(headers):
+        if match.group("icon") not in {"✗", "⚠"}:
+            continue
+        end = headers[position + 1].start() if position + 1 < len(headers) else len(text)
+        blocks.append((str(match.group("goal") or "").strip(), text[match.end():end]))
+    return tuple(blocks)
+
+
+def _kind_for_goal(goal: str, cfg: Dict[str, Any]) -> str:
+    """The work kind of a leaf goal, from the same classifier every route uses.
+
+    Reusing the classifier rather than adding a lookup is the point: a second,
+    private notion of what kind of work a goal is would drift from the one that
+    decided the route, and then the retry advice would name a chain the operator
+    never associated with it.
+    """
+    if not goal.strip():
+        return "default"
+    try:
+        decision = classify_request(
+            {"messages": [{"role": "user", "content": goal}]},
+            api_call_count=1,
+            config=cfg,
+            allow_plan_label_over_design=True,
+        )
+    except Exception:
+        return "default"
+    return decision.kind or "default"
+
+
+def _chain_entries(kind: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    """The kind's configured order, restricted to real, switched-on targets."""
+    targets = set(_delegation_target_names())
+    switches = cfg.get("callable") or {}
+    return tuple(
+        name for name in _preference_list(kind, cfg)
+        if name in targets and switches.get(name) is True
+    )
+
+
+def _next_available_entry(kind: str, cfg: Dict[str, Any]) -> Optional[str]:
+    return next(
+        (name for name in _chain_entries(kind, cfg) if _tier_cooldown_remaining(name, cfg) <= 0),
+        None,
+    )
+
+
+def _earliest_free_entry(kind: str, cfg: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+    """The chain entry that frees up soonest, when every one of them is cooling."""
+    waiting = [
+        (name, _tier_cooldown_remaining(name, cfg)) for name in _chain_entries(kind, cfg)
+    ]
+    if not waiting:
+        return None
+    name, remaining = min(waiting, key=lambda item: item[1])
+    return name, int(remaining // 60) + 1
+
+
+def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
+    """Turn a leaf that died on an account limit into an actionable re-dispatch.
+
+    The envelope already carries the goal and the provider's own error, so the
+    conductor can see that something failed -- but not that the account, rather
+    than the task, is what stopped; not which target its configured order says
+    to use next; and not that the work already committed is worth continuing
+    from. Those three are the difference between a re-dispatch and a re-plan.
+
+    Deliberately advice-shaped in one respect only: the router names the target
+    and does not re-dispatch. Choosing what to do with a stopped leaf -- retry,
+    narrow, wait, drop -- is the conductor's, and a router that silently respawned
+    work would be the hardcoded selection this design exists to avoid.
+    """
+    text, _index = _last_user_text_and_index(_request_items(request))
+    if not text:
+        return ""
+    candidates = _failed_delegation_blocks(text) or _single_failure_block(text)
+    stopped = [
+        (goal, block) for goal, block in candidates
+        if _QUOTA_STOP_WORDING.search(_delegation_failure_reason(block))
+    ]
+    if not stopped:
+        return ""
+    lines = []
+    for goal, _block in stopped:
+        kind = _kind_for_goal(goal, cfg)
+        label = (goal[:120] + "…") if len(goal) > 120 else (goal or "the stopped leaf")
+        target = _next_available_entry(kind, cfg)
+        if target:
+            lines.append(f"- {label}\n  {kind} work -> re-dispatch with model:{target}")
+            continue
+        waiting = _earliest_free_entry(kind, cfg)
+        if waiting:
+            name, minutes = waiting
+            lines.append(
+                f"- {label}\n  {kind} work -> every configured target is cooling; "
+                f"{name} frees up first, in about {minutes} min"
+            )
+        else:
+            lines.append(
+                f"- {label}\n  {kind} work -> no target is configured for this kind; "
+                f"pick from the offered targets yourself"
+            )
+    return (
+        "\n\n[ROUTER — A WORKER STOPPED ON AN ACCOUNT LIMIT]\n"
+        "The account refused the call; the task itself did not fail and its plan is still "
+        "valid. Sending the same goal to the same target again will fail the same way while "
+        "it is cooling.\n"
+        + "\n".join(lines)
+        + "\nRe-dispatch each one with the model: parameter named above and tell the retry to "
+        "continue from what the stopped worker already committed in its worktree instead of "
+        "starting over. Do not re-plan or narrow the goal: only the account changed.\n"
+    )
+
+
 def _is_tool_item(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
@@ -2316,8 +2493,23 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
             external_parent, active_model, "external delegation target", "external",
         )
         forced = _force_terra_supervisor_preflight(kwargs, cfg, decision)
-        if forced is None:
+        # A conductor on Claude reaches this branch and returns early, so the
+        # stopped-worker notice would never have been attached for exactly the
+        # setup that needs it most: the `code` chain puts the conductor on an
+        # external account precisely so the leaves can go elsewhere.
+        redispatch = (
+            _quota_redispatch_instruction(request, cfg)
+            if isinstance(request, dict)
+            and _is_delegation_outcome_text(
+                _last_user_text_and_index(_request_items(request))[0]
+            )
+            else ""
+        )
+        if forced is None and not redispatch:
             return None
+        forced = deepcopy(forced if forced is not None else request)
+        if redispatch:
+            _append_user_instruction(forced, redispatch)
         # Same envelope as the normal path, minus any model/provider change: the
         # request carries the added contract, the route stays exactly as it arrived.
         return {
@@ -2506,6 +2698,16 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         )
 
     routed = forced_preflight_request or forced_shadow_request or dict(request)
+    # A worker that died on an account limit is the one failure the conductor
+    # cannot act on from the envelope alone. Attached here, after the forced
+    # requests, so it survives whichever of them produced ``routed``; deep-copied
+    # first because the plain path is a shallow copy whose message dicts are the
+    # caller's, and appending to those would mutate the conversation itself.
+    if _is_delegation_outcome_text(latest_user_text):
+        redispatch = _quota_redispatch_instruction(request, cfg)
+        if redispatch:
+            routed = deepcopy(routed)
+            _append_user_instruction(routed, redispatch)
     # TokenPlan's Anthropic-compatible Qwen endpoint rejects OpenAI/Codex
     # control fields. Sanitize the final request after every orchestration,
     # shadow, fallback, and cross-provider rewrite has run.
