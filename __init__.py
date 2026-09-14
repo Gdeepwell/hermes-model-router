@@ -1313,6 +1313,30 @@ def classify_request(
     return _apply_preferences(decision, config or _load_config())
 
 
+# Text this plugin injects itself. A delegated leaf carries the routing contract in
+# its own first message, and the contract necessarily talks about applying, implementing
+# and committing — so classifying the leaf from that text made every [spark] leaf look
+# like mutating work. Measured: goal alone reads read-only, goal + contract does not,
+# on the word "apply" from the contract. Stripped before classification only; the
+# preview and the log still show what was actually sent.
+_ROUTER_CONTRACT_MARKERS = (
+    "Set the delegate_task 'model' parameter",
+    "planning conductor.",
+    "[INTERNAL ORCHESTRATOR PREFLIGHT]",
+)
+
+
+def _without_router_contract(text: str) -> str:
+    """Drop the router's own injected contract from the end of a message."""
+    if not text:
+        return text
+    cut = min(
+        (pos for pos in (text.find(marker) for marker in _ROUTER_CONTRACT_MARKERS) if pos != -1),
+        default=-1,
+    )
+    return text[:cut].rstrip() if cut > 0 else text
+
+
 def _classify_request(
     request: Dict[str, Any],
     api_call_count: int = 1,
@@ -1325,6 +1349,8 @@ def _classify_request(
     has_image_attachment = _request_has_image_attachment(request)
     items = _request_items(request)
     user_text, user_index = _last_user_text_and_index(items)
+    # Classify what the operator asked for, not the rulebook this plugin attached to it.
+    user_text = _without_router_contract(user_text)
     text = _normalise(user_text)
 
     # A closed praise/approval follow-up has no implementation objective.  Check

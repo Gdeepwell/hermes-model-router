@@ -376,6 +376,27 @@ unavailable model is no reason to break a routing policy.
 
 An ordinary malformed-request 400 is untouched and still raises.
 
+### A leaf is classified from its goal, not from its contract
+
+A delegated leaf carries the routing contract in its own first message, and that
+contract necessarily talks about applying, implementing and committing. Classifying
+the leaf from that combined text made every `[spark]` leaf look like mutating work:
+
+```
+goal alone        -> read-only work
+goal + contract   -> not read-only, on the word "apply" from the contract
+```
+
+A failed read-only test is the only thing that consults the consequential check, so
+a bounded discovery task whose goal merely says "API route or server-side code" was
+not just rejected as a Spark leaf but promoted to Sol — the most expensive tier —
+and stayed there for every call of that child.
+
+Text the router injects is therefore removed before classification and only before
+classification: the prompt preview and the route log still show what was actually
+sent. The contract warns a conductor never to restate routing policy in a leaf goal
+for exactly this reason; this is the same rule applied to the router itself.
+
 ### Preempted tiers in the log
 
 A route entry records not only the tier that won but the ones that independently
@@ -914,6 +935,8 @@ pytest
 ```
 
 ## Version
+
+**1.10.9** — A leaf is classified from its goal; the routing contract the router attaches no longer decides its route
 
 **1.10.8** — A cooling `sonnet5` shows its cooldown in the dashboard: the status panel walked a hardcoded tier list that omitted it, so that account read as merely idle
 
