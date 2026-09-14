@@ -572,16 +572,17 @@ _ACKNOWLEDGEMENT_ONLY = re.compile(
 # stop exactly that. "commit" in particular cannot be anything but a write, and
 # the Hungarian imperatives were absent altogether even though the goals that
 # reach this router are routinely written in Hungarian.
-_SPARK_MUTATING_WORK = re.compile(
-    r"\b(add|create|implement|modify|change|edit|write|patch|delete|remove|"
+_SPARK_MUTATING_VERBS = (
+    r"add|create|implement|modify|change|edit|write|patch|delete|remove|"
     r"deploy|publish|send|restart|configure|install|fix|refactor|javitsd|"
     r"modositsd|hozd\s+letre|torold|telepitsd|allitsd\s+be|"
     r"commit|stabili[sz]e|rewrite|rename|update|upgrade|merge|push|revert|"
     r"apply|eliminate|replace|scaffold|migrate|"
     r"implementald|valositsd\s+meg|keszitsd\s+el|epitsd\s+meg|frissitsd|"
     r"commitold|stabilizald|tavolitsd\s+el|nevezd\s+at|alakitsd\s+at|"
-    r"refaktorald|csereld|irasd\s+at)\b"
+    r"refaktorald|csereld|irasd\s+at"
 )
+_SPARK_MUTATING_WORK = re.compile(rf"\b({_SPARK_MUTATING_VERBS})\b")
 _SPARK_READ_ONLY_WORK = re.compile(
     r"\b(inspect|read|review|audit|report|analy[sz]e|compare|search|find|"
     r"identify|list|check|investigate|research|explore|trace|map|survey|"
@@ -694,6 +695,32 @@ def _without_commit_references(text: str) -> str:
     return _COMMIT_REFERENCE.sub(" ", text or "")
 
 
+# "admin save/update API", "the create/delete endpoints": a write verb used to
+# *name* the thing to inspect, not to ask for it. The same shape as the commit
+# reference above -- a well-formed read-only goal has to say what it looks at,
+# and the things worth looking at are called things like "save/update API", so
+# the better the goal, the more certainly it read as mutating.
+#
+# The artifact noun is what makes it a name, so it is required. The phrase has
+# to end there too: "update API and the public DTO" names an endpoint, while
+# "update API to v2" is still an instruction and stays a write.
+_ARTIFACT_NOUN = (
+    r"api|apis|endpoint|endpoints|route|routes|handler|handlers|"
+    r"resolver|resolvers|controller|controllers|mutation|mutations|dto|dtos"
+)
+_VERB_AS_ARTIFACT_NAME = re.compile(
+    rf"\b(?:\w+\s*/\s*)*(?:{_SPARK_MUTATING_VERBS})(?:\s*/\s*\w+)*"
+    rf"\s+(?:{_ARTIFACT_NOUN})\b"
+    rf"(?=\s*(?:[,.;:)\]]|and\b|or\b|es\b|vagy\b|$))",
+    re.I,
+)
+
+
+def _without_artifact_names(text: str) -> str:
+    """Remove write verbs that *name* an artifact instead of asking for one."""
+    return _VERB_AS_ARTIFACT_NAME.sub(" ", text or "")
+
+
 def _is_spark_read_only_work(text: str) -> bool:
     """A plan-labelled leaf is read-only unless it says otherwise.
 
@@ -713,7 +740,9 @@ def _is_spark_read_only_work(text: str) -> bool:
     affirmative = _normalise(_without_negated_safety_constraints(text))
     return bool(
         affirmative
-        and not _SPARK_MUTATING_WORK.search(_without_commit_references(affirmative))
+        and not _SPARK_MUTATING_WORK.search(
+            _without_artifact_names(_without_commit_references(affirmative))
+        )
     )
 
 

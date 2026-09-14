@@ -936,6 +936,8 @@ pytest
 
 ## Version
 
+**1.10.10** — A write verb that *names* what to inspect ("admin save/update API") no longer contradicts a `[spark]` label: the endpoint was read as an instruction to update it
+
 **1.10.9** — A leaf is classified from its goal; the routing contract the router attaches no longer decides its route
 
 **1.10.8** — A cooling `sonnet5` shows its cooldown in the dashboard: the status panel walked a hardcoded tier list that omitted it, so that account read as merely idle
