@@ -936,6 +936,8 @@ pytest
 
 ## Version
 
+**1.10.11** — The conductor's tier is pinned as a `model` on the planner call, not only as a goal prefix: a `[qwen]` conductor was being created on the delegation default and ran 24 calls on the account it was meant to spare
+
 **1.10.10** — A write verb that *names* what to inspect ("admin save/update API") no longer contradicts a `[spark]` label: the endpoint was read as an instruction to update it
 
 **1.10.9** — A leaf is classified from its goal; the routing contract the router attaches no longer decides its route

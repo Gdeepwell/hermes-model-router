@@ -605,7 +605,7 @@ _CLAUDE_REVIEW_LABEL = re.compile(r"^\s*\[(opus|sonnet)5?-review\](?:\s|$)")
 # the four tiers of the default provider -- so the leaf runs on whatever the
 # classifier makes of the rest of the text. The bracket closes on the name, so
 # the legitimate [opus5-review] / [sonnet-review] labels do not match.
-_EXTERNAL_TARGET_LABEL = re.compile(r"^\s*\[(opus5?|sonnet5?)\](?:\s|$)", re.I)
+_EXTERNAL_TARGET_LABEL = re.compile(r"^\s*\[(opus5?|sonnet5?|qwen)\](?:\s|$)", re.I)
 
 
 def _misdispatched_external_label(text: str, active_model: str, cfg: Dict[str, Any]) -> str:
@@ -622,10 +622,18 @@ def _misdispatched_external_label(text: str, active_model: str, cfg: Dict[str, A
     match = _EXTERNAL_TARGET_LABEL.match(text or "")
     if not match:
         return ""
-    if active_model not in set((cfg.get("models") or {}).values()):
-        return ""
     name = match.group(1).casefold()
-    return name if name.endswith("5") else f"{name}5"
+    if name.startswith(("opus", "sonnet")) and not name.endswith("5"):
+        name = f"{name}5"
+    models = (cfg.get("models") or {})
+    # Qwen is the case that made "not one of ours" the wrong test: it is a tier
+    # in ``models`` on a separate provider, unlike the Claude targets, so a
+    # correctly dispatched [qwen] leaf would otherwise read as misdispatched.
+    if active_model == str(models.get(name, "")):
+        return ""
+    if active_model not in set(models.values()):
+        return ""
+    return name
 
 
 def _is_plan_labelled_worker(text: str) -> bool:
@@ -2422,8 +2430,26 @@ def _prepare_orchestration_delegation(
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
+        # The conductor's tier is a *route*, not a prefix. A goal beginning
+        # "[qwen]" only renames a model inside the default provider, so with no
+        # `model` parameter the planner was created on the delegation default --
+        # 24 calls of a Qwen conductor on Terra, the account the delegation
+        # exists to spare. The prose contract cannot cover this on its own: it
+        # deliberately lists the *other* targets to spread across, so the
+        # conductor's own tier is the one name it never offers. Pin it the same
+        # deterministic way `role` and `context` are pinned.
+        contract_cfg = cfg if isinstance(cfg, dict) else _load_config()
+        if "model" in properties and _target_is_offered(orchestrator_tier, contract_cfg):
+            properties["model"] = {
+                **(properties.get("model") or {}),
+                "enum": [orchestrator_tier],
+                "description": f"Required route for the {orchestrator_tier} planning conductor.",
+            }
+            pinned_model = True
+        else:
+            pinned_model = False
         required = list(schema.get("required") or [])
-        for name in ("goal", "role", "context"):
+        for name in ("goal", "role", "context") + (("model",) if pinned_model else ()):
             if name not in required:
                 required.append(name)
         schema["required"] = required
