@@ -216,7 +216,12 @@ preference chain overrides exactly one of them:
 
 The last row is the one that matters: a chain re-routes a turn, it does not change
 which model the process launches with. Setting `default_model` in the dashboard
-writes Hermes's own config as well as the router's.
+writes Hermes's own config as well as the router's. It does so **only when you
+actually change it**: the Settings page posts `default_model` on every save, so
+writing it through unconditionally meant a callable toggle moved a Claude parent
+back onto this provider's tier. A tier with no entry in `models` — a delegation
+target such as `opus5` — is refused rather than written, because Hermes cannot
+launch on it and `_decision` raises for it.
 
 ### Preferred models per kind of work
 

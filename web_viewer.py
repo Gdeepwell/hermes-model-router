@@ -110,6 +110,95 @@ def _save_hermes_fallback(payload, router_cfg: dict):
     return None
 
 
+def _sync_hermes_default_model(tier: str, config: dict) -> None:
+    """Point Hermes's own ``model`` block at this router tier.
+
+    Best effort on purpose: a dashboard save must not fail because the Hermes
+    config is missing or unreadable, and ``_write_hermes_config`` leaves a
+    restore point before touching a file that also carries providers, approvals
+    and the command allowlist.
+    """
+    if yaml is None:
+        return
+    hermes = _read_hermes_config()
+    if not hermes:
+        return
+    model_name = str((config.get("models") or {}).get(tier) or "")
+    provider = str((config.get("tier_providers") or {}).get(tier) or "openai-codex")
+    if not model_name:
+        return
+    model = hermes.get("model")
+    if not isinstance(model, dict):
+        model = {}
+        hermes["model"] = model
+    model["default"] = model_name
+    model["provider"] = provider
+
+    provider_config = (hermes.get("providers") or {}).get(provider) or {}
+    transport = provider_config.get("transport", "")
+    if transport == "anthropic_messages" or provider != "openai-codex":
+        model["api_mode"] = "anthropic_messages" if transport == "anthropic_messages" else "chat_completions"
+        base_url = provider_config.get("base_url") or provider_config.get("api")
+        if base_url:
+            model["base_url"] = base_url
+        if provider_config.get("api_key"):
+            model["api_key"] = provider_config["api_key"]
+    else:
+        model["api_mode"] = "codex_responses"
+        model.pop("base_url", None)
+        model.pop("api_key", None)
+
+    # The delegation block is a separate child runtime and is left alone beyond
+    # registering this tier as a reachable target.
+    delegation = hermes.get("delegation")
+    if not isinstance(delegation, dict):
+        delegation = {}
+        hermes["delegation"] = delegation
+    targets = delegation.get("targets")
+    if not isinstance(targets, dict):
+        targets = {}
+        delegation["targets"] = targets
+    targets[tier] = {"provider": provider, "model": model_name}
+    try:
+        _write_hermes_config(hermes)
+    except Exception:
+        pass
+
+
+def _save_default_model(requested: str, config: dict) -> str | None:
+    """Store the default model, syncing Hermes only when it actually changed.
+
+    ``default_model`` is the one router setting that also decides the model
+    Hermes itself launches with, and the Settings page posts it on *every* save
+    -- a callable toggle, a preference chain, a fallback edit. Writing it through
+    unconditionally is what let an unrelated save move a Claude parent back onto
+    this provider's tier, silently. So the Hermes write is gated on a real
+    change; an error string means nothing was stored.
+    """
+    previous = str(config.get("default_model") or "")
+    callable_tiers = config.get("callable") or {}
+    fallbacks = config.get("fallbacks") or {}
+    candidate = str(requested)
+    visited = {candidate}
+    while not callable_tiers.get(candidate, True):
+        candidate = str(fallbacks.get(candidate) or "")
+        if not candidate or candidate in visited:
+            return f"No enabled fallback for default model '{requested}'"
+        visited.add(candidate)
+    # A delegation target is not a startable model. It has no entry in `models`,
+    # so writing it through blanked Hermes's model.default -- and the router's own
+    # _decision raises KeyError for a tier it cannot route.
+    if not str((config.get("models") or {}).get(candidate) or ""):
+        return (
+            f"'{candidate}' is a delegation target, not a tier this router can start "
+            f"Hermes on; reach it with a delegated worker instead"
+        )
+    config["default_model"] = candidate
+    if candidate != previous:
+        _sync_hermes_default_model(candidate, config)
+    return None
+
+
 def _fallback_chain_options(router_cfg: dict) -> list:
     """Accounts a fallback entry may name, taken from the delegation targets.
 
@@ -1158,78 +1247,15 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     config["preferences"] = cleaned
                 if "default_model" in data:
-                    requested_default = str(data["default_model"])
-                    callable_tiers = config.get("callable") or {}
-                    fallbacks = config.get("fallbacks") or {}
-                    candidate = requested_default
-                    visited = {candidate}
-                    while not callable_tiers.get(candidate, True):
-                        candidate = str(fallbacks.get(candidate) or "")
-                        if not candidate or candidate in visited:
-                            self._send(
-                                400,
-                                json.dumps({
-                                    "error": f"No enabled fallback for default model '{requested_default}'",
-                                    "success": False,
-                                }).encode("utf-8"),
-                                "application/json",
-                            )
-                            return
-                        visited.add(candidate)
-                    config["default_model"] = candidate
-                    data["default_model"] = candidate
-                    # Szinkronizáljuk a Hermes config orchestrator részét is
-                    hermes_config_path = Path.home() / ".hermes" / "config.yaml"
-                    if hermes_config_path.exists() and yaml:
-                        try:
-                            with open(hermes_config_path, "r", encoding="utf-8") as f:
-                                hermes_config = yaml.safe_load(f) or {}
-                            default_model = data["default_model"]
-                            model_name = config.get("models", {}).get(default_model, "")
-                            tier_providers = config.get("tier_providers", {})
-                            provider = tier_providers.get(default_model, "openai-codex")
-
-                            # Frissítjük a globális model konfigurációt (orchestrator).
-                            # A delegation külön child-runtime; orchestratorváltáskor nem
-                            # írjuk felül, így Qwen parent mellett Terra maradhat a child.
-                            if "model" not in hermes_config:
-                                hermes_config["model"] = {}
-                            hermes_config["model"]["default"] = model_name
-                            hermes_config["model"]["provider"] = provider
-
-                            provider_config = hermes_config.get("providers", {}).get(provider, {})
-                            transport = provider_config.get("transport", "")
-                            if transport == "anthropic_messages":
-                                hermes_config["model"]["api_mode"] = "anthropic_messages"
-                                base_url = provider_config.get("base_url") or provider_config.get("api")
-                                if base_url:
-                                    hermes_config["model"]["base_url"] = base_url
-                                if provider_config.get("api_key"):
-                                    hermes_config["model"]["api_key"] = provider_config["api_key"]
-                            elif provider == "openai-codex":
-                                hermes_config["model"]["api_mode"] = "codex_responses"
-                                hermes_config["model"].pop("base_url", None)
-                                hermes_config["model"].pop("api_key", None)
-                            else:
-                                hermes_config["model"]["api_mode"] = "chat_completions"
-                                base_url = provider_config.get("base_url") or provider_config.get("api")
-                                if base_url:
-                                    hermes_config["model"]["base_url"] = base_url
-                                if provider_config.get("api_key"):
-                                    hermes_config["model"]["api_key"] = provider_config["api_key"]
-
-                            delegation_config = hermes_config.setdefault("delegation", {})
-                            if "targets" not in delegation_config:
-                                delegation_config["targets"] = {}
-                            delegation_config["targets"][default_model] = {
-                                "provider": provider,
-                                "model": model_name
-                            }
-
-                            with open(hermes_config_path, "w", encoding="utf-8") as f:
-                                yaml.dump(hermes_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                        except Exception as e:
-                            pass  # Nem kritikus hiba, folytatjuk
+                    error = _save_default_model(str(data["default_model"]), config)
+                    if error:
+                        self._send(
+                            400,
+                            json.dumps({"error": error, "success": False}).encode("utf-8"),
+                            "application/json",
+                        )
+                        return
+                    data["default_model"] = config["default_model"]
                 with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                     yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 self._send(200, json.dumps({"success": True}).encode("utf-8"), "application/json")

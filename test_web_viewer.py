@@ -816,3 +816,97 @@ class SettingsLabelTests(DashboardProbeMixin, unittest.TestCase):
         english, hungarian = self.i18n("settings.prefs.sub")
         self.assertIn("does not change the model Hermes starts on", english)
         self.assertIn("indulási modelljét nem", hungarian)
+
+
+class DefaultModelSaveTests(unittest.TestCase):
+    """Saving the Settings tab must not move the model Hermes starts on.
+
+    The page posts ``default_model`` on every save -- a callable toggle, a
+    preference chain, a fallback edit -- so an unrelated save used to rewrite
+    Hermes's own ``model.default`` back onto this provider's tier. One click
+    undid a Claude-parent setup, and the write left no restore point.
+    """
+
+    CONFIG = {
+        "models": {"luna": "gpt-5.6-luna", "terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+        "callable": {"luna": True, "terra": True, "sol": False, "opus5": True},
+        "fallbacks": {"sol": "terra"},
+        "tier_providers": {
+            "luna": "openai-codex", "terra": "openai-codex",
+            "sol": "openai-codex", "opus5": "anthropic",
+        },
+        "default_model": "terra",
+    }
+    HERMES = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+
+    def _config(self):
+        import copy
+
+        return copy.deepcopy(self.CONFIG)
+
+    def _hermes_file(self, directory):
+        target = Path(directory) / "config.yaml"
+        target.write_text(self.HERMES, encoding="utf-8")
+        return target
+
+    def test_saving_without_changing_the_default_model_leaves_hermes_alone(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("terra", config)
+            self.assertIsNone(error)
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
+
+    def test_changing_the_default_model_writes_it_through_with_a_restore_point(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("luna", config)
+            self.assertIsNone(error)
+            self.assertEqual(config["default_model"], "luna")
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["model"]["default"], "gpt-5.6-luna")
+            self.assertEqual(written["model"]["provider"], "openai-codex")
+            self.assertEqual(written["model"]["api_mode"], "codex_responses")
+            backups = list(Path(directory).glob("config.yaml.bak-router-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("claude-opus-5", backups[0].read_text(encoding="utf-8"))
+
+    def test_a_disabled_tier_still_resolves_through_the_fallback_chain(self):
+        config = self._config()
+        config["default_model"] = "luna"
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("sol", config)
+            self.assertIsNone(error)
+            self.assertEqual(config["default_model"], "terra")
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["model"]["default"], "gpt-5.6-terra")
+
+    def test_a_chain_with_no_enabled_tier_is_refused(self):
+        config = self._config()
+        config["callable"]["terra"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("sol", config)
+            self.assertIn("No enabled fallback", error)
+            self.assertEqual(config["default_model"], "terra")
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+
+    def test_a_delegation_target_is_refused_rather_than_blanking_the_model(self):
+        """opus5 has no entry in `models`, so the old code wrote model.default: ''
+        and the router's own _decision would raise KeyError on the tier."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("opus5", config)
+            self.assertIsNotNone(error)
+            self.assertIn("opus5", error)
+            self.assertEqual(config["default_model"], "terra")
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
