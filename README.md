@@ -436,7 +436,7 @@ enough to pass `retry_call` to execution middleware.
 ### Live Dashboard
 
 ```bash
-python3 ~/.hermes/plugins/model_router/web_viewer.py
+python3 ~/.hermes/plugins/model-router/web_viewer.py
 # http://localhost:8765
 ```
 
@@ -935,7 +935,7 @@ the call rather than routing it, which is normal for Claude and Qwen.
 ## Tests
 
 ```bash
-cd ~/.hermes/plugins/model_router
+cd ~/.hermes/plugins/model-router
 pytest
 ```
 

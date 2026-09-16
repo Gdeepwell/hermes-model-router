@@ -910,3 +910,23 @@ class DefaultModelSaveTests(unittest.TestCase):
             self.assertIn("opus5", error)
             self.assertEqual(config["default_model"], "terra")
             self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+
+
+class ConfigPathTests(unittest.TestCase):
+    """The dashboard must read the config file the router actually loads.
+
+    The path was hardcoded to ~/.hermes/plugins/model_router/, but `hermes
+    plugins install` creates model-router (the manifest name), so on a normal
+    install the dashboard read nothing and every save raised.
+    """
+
+    def test_the_dashboard_reads_the_file_beside_it(self):
+        self.assertEqual(
+            web_viewer.CONFIG_PATH,
+            Path(web_viewer.__file__).resolve().parent / "router_config.yaml",
+        )
+
+    def test_the_dashboard_and_the_router_agree_on_one_file(self):
+        import model_router
+
+        self.assertEqual(web_viewer.CONFIG_PATH, model_router._CONFIG_PATH)

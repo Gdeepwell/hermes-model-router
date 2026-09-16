@@ -22,7 +22,11 @@ DEFAULT_AGENT_LOG = Path("~/.hermes/logs/agent.log").expanduser()
 DEFAULT_BRIDGE_LIFECYCLE = Path("~/.hermes/logs/claude-code-bridge.jsonl").expanduser()
 DEFAULT_ROOT_LIMIT = 10
 RAW_HISTORY_LIMIT = 10000
-CONFIG_PATH = Path("~/.hermes/plugins/model_router/router_config.yaml").expanduser()
+# Beside this file, exactly like the router's own _CONFIG_PATH: `hermes plugins
+# install` names the directory after the manifest (model-router), so a hardcoded
+# ~/.hermes/plugins/model_router path read nothing on a normal install and every
+# save raised.
+CONFIG_PATH = Path(__file__).resolve().parent / "router_config.yaml"
 
 
 HERMES_CONFIG_PATH = Path.home() / ".hermes" / "config.yaml"
