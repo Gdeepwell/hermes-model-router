@@ -14,6 +14,7 @@ one name it never offers.
 import unittest
 
 from model_router import (
+    _conductor_tier,
     _load_config,
     _misdispatched_external_label,
     _model_param_contract,
@@ -50,17 +51,21 @@ class ConductorRouteTests(unittest.TestCase):
         self.models = self.cfg.get("models") or {}
 
     def test_the_planner_schema_pins_the_conductor_route(self):
+        # Taken from the config rather than hardcoded: the shipped default_model
+        # is an operator setting, and pinning the tier here would make editing it
+        # look like a behaviour regression.
         routed = _prepare_orchestration_delegation(
             _request_with_delegate_tool(), "plan-test", 3, cfg=self.cfg
         )
         schema = routed["tools"][0]["parameters"]
-        self.assertEqual(schema["properties"]["model"]["enum"], ["qwen"])
+        self.assertEqual(schema["properties"]["model"]["enum"], [_conductor_tier(self.cfg)])
         self.assertIn("model", schema["required"])
 
     def test_the_prose_contract_still_omits_the_conductors_own_tier(self):
         # Not a bug to fix here: that list is "other targets to spread across".
         # It is the reason the schema has to carry the conductor's own route.
-        self.assertNotIn("targets: qwen", _model_param_contract("qwen", self.cfg))
+        tier = _conductor_tier(self.cfg)
+        self.assertNotIn(f"targets: {tier}", _model_param_contract(tier, self.cfg))
 
 
 class QwenMisdispatchTests(unittest.TestCase):
