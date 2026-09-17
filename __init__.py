@@ -691,9 +691,16 @@ def _is_acknowledgement_only(text: str) -> bool:
 # the goal contract *requires* a base commit, so every well-formed read-only goal
 # now names one -- and `commit` was added to the write verbs in the same series
 # of changes. The better the goal, the more certainly it read as mutating.
+#
+# The leading-preposition arm only fires when the determiner sits directly on the
+# word, so "the *relevant* commit is 54e23a4" fell through both arms and read as
+# an instruction. A copula before the hash carries the reference just as plainly
+# as juxtaposition does, and the hash is what makes either one a reference -- so
+# the second arm accepts the linking verb rather than the first accepting
+# arbitrary filler, which would swallow "fix the parser and commit the change".
 _COMMIT_REFERENCE = re.compile(
     r"\b(?:at|base|the|from|on|since|after|before|parent|head|onto|against)\s+commit\b"
-    r"|\bcommit\s+(?:hash|sha|id|[0-9a-f]{6,40})\b",
+    r"|\bcommit\b(?:\s+is|\s+was|\s*[:=])?\s+(?:hash|sha|id|[0-9a-f]{6,40})\b",
     re.I,
 )
 
@@ -729,6 +736,66 @@ def _without_artifact_names(text: str) -> str:
     return _VERB_AS_ARTIFACT_NAME.sub(" ", text or "")
 
 
+# "write [REDACTED]", "replace it with [MASKED]": the write verb governs the
+# *report*, and specifically the part of the report that refuses to carry a
+# secret. It is the strictest sentence in a careful evidence goal, and it read as
+# mutation -- the safety half ("Never print a secret value;") is dropped as a
+# prohibition, which leaves the redaction half standing alone as an instruction.
+#
+# The bracketed token is what makes it a placeholder, so it is required, exactly
+# as the artifact noun is required above. "Write the masked config to disk" has
+# no brackets and stays a write.
+_REDACTION_PLACEHOLDER = r"redacted|masked|elided|omitted|secret|placeholder"
+_VERB_AS_REDACTION = re.compile(
+    rf"\b(?:{_SPARK_MUTATING_VERBS})\s+(?:it|them|that|those)?\s*(?:as|with|to)?\s*"
+    rf"[`'\"]*\[\s*(?:{_REDACTION_PLACEHOLDER})\s*\][`'\"]*",
+    re.I,
+)
+
+
+def _without_redaction_placeholders(text: str) -> str:
+    """Remove write verbs whose object is a redaction placeholder."""
+    return _VERB_AS_REDACTION.sub(" ", text or "")
+
+
+# "What does szamlazz-agent.ts actually implement today?": the write verb belongs
+# to the subject under inspection, not to the leaf. A question about what code
+# already does is the purest form of read-only work, and naming the behaviour
+# accurately requires the same verbs that describe doing it -- so, once more, the
+# more precise the question, the more certainly it read as mutating.
+#
+# The interrogative opener and the auxiliary together are what make it a
+# description; either alone is not enough ("Update the DTO, which does matter"
+# has both words and no question). The spans between them are bounded so the
+# rule cannot reach across a sentence into an unrelated instruction.
+_DESCRIPTIVE_QUESTION = re.compile(
+    rf"\b(?:what|how|which|whether|where)\b(?:\s+\w+){{0,2}}\s+"
+    rf"\b(?:does|do|did)\b(?:\s+\S+){{0,4}}\s+"
+    rf"(?:{_SPARK_MUTATING_VERBS})\b",
+    re.I,
+)
+
+
+def _without_descriptive_questions(text: str) -> str:
+    """Remove write verbs that describe the subject's behaviour in a question."""
+    return _DESCRIPTIVE_QUESTION.sub(" ", text or "")
+
+
+def _without_non_instructing_verbs(text: str) -> str:
+    """Strip write verbs that name, quote, or describe instead of instructing.
+
+    Four shapes, one failure: a read-only goal cannot say what it looks at
+    without using the vocabulary of changing it. Each stripper requires its own
+    corroborating token -- a hash, an artifact noun, a bracketed placeholder, an
+    interrogative -- so an unadorned instruction still reads as a write.
+    """
+    return _without_descriptive_questions(
+        _without_redaction_placeholders(
+            _without_artifact_names(_without_commit_references(text))
+        )
+    )
+
+
 def _is_spark_read_only_work(text: str) -> bool:
     """A plan-labelled leaf is read-only unless it says otherwise.
 
@@ -748,9 +815,7 @@ def _is_spark_read_only_work(text: str) -> bool:
     affirmative = _normalise(_without_negated_safety_constraints(text))
     return bool(
         affirmative
-        and not _SPARK_MUTATING_WORK.search(
-            _without_artifact_names(_without_commit_references(affirmative))
-        )
+        and not _SPARK_MUTATING_WORK.search(_without_non_instructing_verbs(affirmative))
     )
 
 

@@ -936,6 +936,8 @@ pytest
 
 ## Version
 
+**1.10.12** — Three write verbs a read-only evidence goal cannot avoid using — a base commit linked to its hash by "is", a promise to write `[REDACTED]` instead of a secret, and a question about what a module implements — no longer contradict a `[luna]`/`[spark]` label: a receipt-integration evidence report was escalated to Sol for being precise about all three
+
 **1.10.11** — The conductor's tier is pinned as a `model` on the planner call, not only as a goal prefix: a `[qwen]` conductor was being created on the delegation default and ran 24 calls on the account it was meant to spare
 
 **1.10.10** — A write verb that *names* what to inspect ("admin save/update API") no longer contradicts a `[spark]` label: the endpoint was read as an instruction to update it
