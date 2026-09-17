@@ -121,6 +121,10 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "min_chars": 180,
         "max_tasks": 1,
+        # Where the forced conductor runs. Unset means default_model: coordination
+        # follows the account the session is already on rather than borrowing the
+        # answer from a question about leaf routing.
+        "conductor": None,
         # Recovery gate for an active Terra tool loop whose initial preflight
         # was missed (for example, a process that loaded an older plugin).
         "rescue_min_calls": 6,
@@ -2459,20 +2463,26 @@ def _account_load_sentence(cfg: Dict[str, Any]) -> str:
 def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
     """The tier the forced conductor child should run on.
 
-    ``default_model`` when it can actually be called, otherwise the first callable
-    tier its ``fallbacks`` chain reaches. Pinning the conductor to a configured
-    default is what made an exhausted account fail the whole preflight: the parent
-    had already moved to a working account, and its planner was still being sent
-    to the one that had run out.
+    ``orchestration.conductor`` when the operator has pinned one, else
+    ``default_model``, else the first callable tier its ``fallbacks`` chain
+    reaches. Every step is skipped when its tier cannot be called: pinning the
+    conductor to a configured default is what made an exhausted account fail the
+    whole preflight -- the parent had already moved to a working account, and its
+    planner was still being sent to the one that had run out.
+
+    This used to read ``preferences.code`` on the reasoning that planning and
+    coordination are code work. They are not the same question. ``code`` says
+    where an implementation *leaf* belongs, and the moment an operator answered
+    that with ``[opus5, terra, qwen]`` -- a deliberate choice about who writes the
+    code -- it silently also moved every conductor onto the Claude subscription,
+    where coordination then paid external-account prices for planning. One key
+    answering two unrelated questions cannot be set correctly for both, so the
+    conductor now has its own.
     """
     cfg = cfg or {}
-    # The operator's own order comes first. Planning and coordination are code work,
-    # so the conductor follows the `code` chain when one is set — measured need: six
-    # consecutive conductors ran to their 16-iteration cap on the Codex account and
-    # spent 36% of a five-hour limit before any leaf did real work.
-    for tier in _preference_list("code", cfg):
-        if _is_callable_tier(tier, cfg):
-            return tier
+    pinned = str((cfg.get("orchestration") or {}).get("conductor") or "").strip().casefold()
+    if pinned and _is_callable_tier(pinned, cfg):
+        return pinned
     default = str(cfg.get("default_model", "terra"))
     if _is_callable_tier(default, cfg):
         return default
