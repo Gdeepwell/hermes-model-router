@@ -1111,6 +1111,76 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIn("absolute worktree path", contract)
         self.assertIn("one finishable artefact", contract)
 
+    def test_the_reading_is_moved_off_the_expensive_account(self):
+        """The Opus leaf of 2026-09-17 had delegate_task and the depth to use it,
+        and still spent all sixteen iterations reading: twenty tool calls, no edit,
+        exit_reason=max_iterations. It cannot fix that from inside -- by the time it
+        knows enough to delegate the reading it has already paid for it -- so the
+        order goes to the conductor, before the leaf exists."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            cfg["preferences"] = {"explore": ["luna", "spark", "sonnet5"]}
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("read-only recon leaf on luna", contract)
+        self.assertIn("must not spend a budget on orientation", contract)
+        # The recon leaf is dispatched to hand its findings over, not to file a report.
+        self.assertIn("`context`", contract)
+
+    def test_the_conductors_own_tier_is_still_covered_by_the_rule(self):
+        """`names` drops the conductor's own tier because it answers "other targets
+        to spread across". This rule answers a different question -- which account
+        pays for the reading -- and with the operator's code chain making opus5 the
+        conductor, taking that list dropped opus5 out of its own rule."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            cfg["preferences"] = {"explore": ["luna"], "code": ["opus5", "terra"]}
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("opus5", cfg)
+        self.assertNotIn("targets: opus5", contract)      # still not a load-spreading option
+        self.assertIn("opus5 and sonnet5 must not spend a budget", contract)
+
+    def test_the_recon_target_comes_from_the_operators_explore_order(self):
+        """"Cheap" is an account fact, not a property of a name: hardcoding a tier
+        here would keep sending recon to a target the operator had switched off."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            cfg["preferences"] = {"explore": ["qwen", "luna"]}
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("recon leaf on qwen or luna", contract)
+
+    def test_with_no_explore_order_the_light_peer_group_answers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            cfg["peer_groups"] = {"heavy": ["terra", "opus5"], "light": ["luna", "qwen"]}
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "opus5", "qwen", "sol", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertIn("recon leaf on luna or qwen", contract)
+
+    def test_no_cheap_target_means_no_recon_order(self):
+        """An instruction to move the reading somewhere that does not exist costs
+        the leaf a refused dispatch and buys nothing."""
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            cfg["peer_groups"] = {}
+            with patch("model_router._delegation_target_names",
+                       return_value=("opus5", "sonnet5")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertNotIn("recon leaf", contract)
+
+    def test_a_fleet_without_a_claude_target_is_told_nothing_about_recon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = self._peer_cfg(Path(directory) / "cooldowns.json")
+            with patch("model_router._delegation_target_names",
+                       return_value=("luna", "sol")):
+                contract = _model_param_contract("terra", cfg)
+        self.assertNotIn("recon leaf", contract)
+
     def test_a_switched_off_tier_is_not_offered_as_a_target(self):
         """The cross-provider guard raises for a disabled tier mid-session, so
         offering it produces a leaf that never runs: exactly what happened when
@@ -2118,6 +2188,16 @@ class GoalContractOnTheSchemaTests(unittest.TestCase):
         description = self._goal_description(self._route(self._request())["request"])
         self.assertIn("absolute worktree path", description)
         self.assertIn("one finishable artefact", description)
+
+    def test_the_recon_rule_survives_a_turn_with_no_conductor(self):
+        """The turn that burned the Opus leaf had no conductor at all: a 41-char
+        root prompt fell under orchestration.min_chars, so the parent dispatched
+        straight from its own toolset. The schema is the only channel that reaches
+        it, which is why the rule is on the goal description and not only in the
+        preflight text."""
+        description = self._goal_description(self._route(self._request())["request"])
+        self.assertIn("read-only recon task first", description)
+        self.assertIn("opus5 or sonnet5", description)
 
     def test_it_is_carried_on_the_schema_not_the_message(self):
         """A middleware edit does not persist into the conversation, and the

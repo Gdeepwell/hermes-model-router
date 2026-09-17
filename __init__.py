@@ -2137,6 +2137,11 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names, cfg)}"
+        # preference_names, not names: this rule is about the account a leaf runs
+        # on, not about spreading load, and `names` drops the conductor's own tier.
+        # With the operator's code chain making opus5 the conductor, that dropped
+        # opus5 -- the one leaf the rule was written from -- out of its own rule.
+        f"{_recon_before_expensive_target_sentence(preference_names, cfg)}"
         f"{_preference_sentence(preference_names, cfg)}"
         f"{_goal_orientation_sentence()}"
         f"{_account_load_sentence(cfg)}"
@@ -2227,7 +2232,10 @@ _GOAL_CONTRACT_CLAUSE = (
     "commit it builds on, what already exists there, which files or modules are in scope, "
     "and how the result is verified. Give it one finishable artefact, not a feature to "
     "implement -- its iteration budget is fixed and cannot be raised per task, so a goal "
-    "with no boundary is spent on orientation before the first edit."
+    "with no boundary is spent on orientation before the first edit. A task on an external "
+    "Claude target (model: opus5 or sonnet5) is the most expensive place in the fleet to "
+    "discover any of this: dispatch a cheap read-only recon task first and carry its findings "
+    "in this task's context, rather than letting the Claude leaf do the reading itself."
 )
 
 
@@ -2320,6 +2328,11 @@ def _peer_group_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
     )
 
 
+# The targets that draw on the Claude subscription. One owner, because two rules
+# now turn on "is this leaf on the expensive account" and they must not drift.
+_EXPENSIVE_TARGETS = frozenset({"opus5", "sonnet5"})
+
+
 def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] = None) -> str:
     """What the Claude targets are for, once they are offered at all.
 
@@ -2333,7 +2346,7 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
     paragraph: the unconditional default beat the hedged preference sentence
     every time, so ``code -> model:opus5`` never once decided a leaf.
     """
-    claude = [name for name in names if name in {"opus5", "sonnet5"}]
+    claude = [name for name in names if name in _EXPENSIVE_TARGETS]
     if not claude:
         return ""
     both = len(claude) == 2
@@ -2352,6 +2365,62 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
         f"review, not just reading. "
         + ("Use sonnet5 by default and reserve opus5 for consequential or hard work. "
            if both and not operator_chose else "")
+    )
+
+
+def _recon_target_names(names: Iterable[str], cfg: Dict[str, Any]) -> list:
+    """The offered targets a read-only recon leaf should run on, cheapest first.
+
+    The operator's ``explore`` order owns this when it is set; the light peer
+    group answers the same question when it is not. Both are read rather than
+    hardcoded because "cheap" is an account fact, not a property of a name.
+    """
+    offered = [name for name in names if name not in _EXPENSIVE_TARGETS]
+    chain = [name for name in _preference_list("explore", cfg) if name in offered]
+    if chain:
+        return chain[:2]
+    for members in (cfg.get("peer_groups") or {}).values():
+        if not isinstance(members, list) or _EXPENSIVE_TARGETS.intersection(members):
+            continue
+        light = [name for name in members if name in offered]
+        if light:
+            return light[:2]
+    return []
+
+
+def _recon_before_expensive_target_sentence(
+    names: Iterable[str], cfg: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Keep an external Claude leaf off its own orientation.
+
+    A worker on a separate subscription is the most expensive place in the fleet
+    to read a repository, and its iteration budget is the one the host refuses to
+    raise per leaf -- so orientation spent there is spent at the highest price and
+    buys no edit. Measured, on the leaf this rule is written from: sixteen
+    iterations, twenty tool calls, every one of them a read, and a final summary
+    that said "I hit the tool-call iteration limit during the codebase-
+    understanding phase, before writing any tests or implementation."
+
+    Stated as a dispatch order to the conductor rather than as advice to the leaf,
+    because the leaf cannot act on it from inside. It had ``delegate_task`` and the
+    depth to use it; by the time it knew enough to hand the reading away it had
+    already paid for the context it would have been handing away.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    claude = [name for name in names if name in _EXPENSIVE_TARGETS]
+    recon = _recon_target_names(names, cfg)
+    # No cheap target on offer means the reading has nowhere else to go; an
+    # instruction to move it would only cost the leaf a refused dispatch.
+    if not claude or not recon:
+        return ""
+    return (
+        f"{' and '.join(claude)} must not spend a budget on orientation: it is fixed, it cannot "
+        f"be raised per leaf, and reading is the one thing every other target does for less. "
+        f"Dispatch a read-only recon leaf on {' or '.join(recon)} first -- the files and symbols "
+        f"in scope, what already exists there, how the result is verified -- and carry its "
+        f"findings in the `context` of the {' / '.join(claude)} leaf. Send that leaf only once "
+        f"its goal can name what it will change. A goal that begins with discovery is one whose "
+        f"budget is gone before the first edit. "
     )
 
 
