@@ -390,5 +390,73 @@ class RealHostTests(unittest.TestCase):
         self.assertIn("depth limit", payload["error"].lower())
 
 
+import model_router  # noqa: E402
+
+try:
+    import yaml  # noqa: E402
+except ImportError:  # pragma: no cover
+    yaml = None
+
+
+class OfferedNamesTests(unittest.TestCase):
+    def _hermes_config(self, directory):
+        path = Path(directory) / "config.yaml"
+        path.write_text(
+            "delegation:\n  targets:\n"
+            "    opus5: {provider: anthropic, model: claude-opus-5}\n"
+            "    sonnet5: {provider: anthropic, model: claude-sonnet-5}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_an_inactive_wing_adds_nothing(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(model_router, "_HERMES_CONFIG_PATH", self._hermes_config(directory)), \
+             patch.object(claude_wing, "_ACTIVE", False):
+            self.assertEqual(model_router._delegation_target_names(), ("opus5", "sonnet5"))
+            self.assertIsNone(model_router._external_target_for_model("claude-haiku-4-5-20251001"))
+
+    def test_an_active_wing_offers_and_counts_haiku(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(model_router, "_HERMES_CONFIG_PATH", self._hermes_config(directory)), \
+             patch.object(claude_wing, "_ACTIVE", True), \
+             patch("model_router._load_config", return_value=_cfg()):
+            self.assertEqual(model_router._delegation_target_names(), ("haiku", "opus5", "sonnet5"))
+            self.assertEqual(model_router._external_target_for_model("claude-haiku-4-5-20251001"), "haiku")
+
+
+@unittest.skipIf(yaml is None, "PyYAML missing")
+class ShippedConfigTests(unittest.TestCase):
+    def setUp(self):
+        path = Path(model_router.__file__).resolve().parent / "router_config.yaml"
+        self.cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def test_the_wing_ships_enabled_with_its_files(self):
+        wing = self.cfg["claude_wing"]
+        self.assertTrue(wing["enabled"])
+        self.assertEqual(wing["tiers"], WING["tiers"])
+        self.assertEqual(wing["default_tier"], "sonnet")
+        self.assertEqual(wing["usage_guard"]["soft_percent"], 70)
+        self.assertEqual(wing["usage_guard"]["hard_percent"], 90)
+        self.assertEqual(wing["usage_guard"]["state_path"], "~/.hermes/state/model-router-claude-usage.json")
+        self.assertEqual(wing["log_path"], "~/.hermes/logs/claude-wing.jsonl")
+
+    def test_haiku_is_a_known_claude_target(self):
+        self.assertIs(self.cfg["callable"]["haiku"], True)
+        self.assertEqual(self.cfg["tier_providers"]["haiku"], "anthropic")
+        self.assertIn("haiku", self.cfg["peer_groups"]["light"])
+
+    def test_the_starting_preferences(self):
+        self.assertEqual(self.cfg["preferences"], {
+            "design": ["sol", "opus5"],
+            "code": ["terra", "sonnet5"],
+            "explore": ["spark", "luna", "haiku"],
+            "review": ["sonnet5", "opus5", "terra"],
+            "sensitive": ["opus5", "sol"],
+            "critical": ["opus5", "sol"],
+            "long": ["sol", "sonnet5"],
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ callable:
   # delegated credential path.
   opus5: true
   sonnet5: true
+  haiku: true
   qwen: true
 # Preferred models per kind of work, best first. The router takes the first entry
 # that is callable; if that entry is a Codex tier it becomes the route, and if it is
@@ -28,7 +29,14 @@ callable:
 # A kind left out here keeps its built-in route. A kind listed here overrides that
 # route completely, including the safety defaults (design/sensitive/critical), so
 # the order you write is the order that applies.
-preferences: {}
+preferences:
+  design:    [sol, opus5]
+  code:      [terra, sonnet5]
+  explore:   [spark, luna, haiku]
+  review:    [sonnet5, opus5, terra]
+  sensitive: [opus5, sol]
+  critical:  [opus5, sol]
+  long:      [sol, sonnet5]
 #  design:    [sol, opus5, terra]
 #  code:      [terra, sol]
 #  explore:   [spark, luna, qwen]
@@ -85,6 +93,7 @@ tier_providers:
   sol: openai-codex
   opus5: anthropic
   sonnet5: anthropic
+  haiku: anthropic
   qwen: qwen-token
 thresholds:
   luna_max_chars: 700
@@ -136,6 +145,7 @@ peer_groups:
   light:
   - luna
   - spark
+  - haiku
 usage_report:
   enabled: true
   window_seconds: 3600
@@ -150,3 +160,21 @@ shadow:
   enabled: false
   limit: 0
   path: ~/.hermes/logs/spark-shadow-benchmark.jsonl
+
+# Claude workers next to the Codex workforce: delegate_claude runs children on the
+# anthropic provider through Hermes's own delegate_task. The guard reads Anthropic's
+# weekly usage: from soft_percent opus work steps down to sonnet, and from
+# hard_percent the wing refuses and names a Codex tier instead.
+claude_wing:
+  enabled: true
+  tiers:
+    haiku: claude-haiku-4-5-20251001
+    sonnet: claude-sonnet-5
+    opus: claude-opus-5
+  default_tier: sonnet
+  usage_guard:
+    soft_percent: 70
+    hard_percent: 90
+    cache_seconds: 300
+    state_path: ~/.hermes/state/model-router-claude-usage.json
+  log_path: ~/.hermes/logs/claude-wing.jsonl

@@ -1942,7 +1942,7 @@ def _supports_forced_tool_choice(kwargs: Dict[str, Any], decision: RouteDecision
 _HERMES_CONFIG_PATH = Path(os.path.expanduser("~/.hermes/config.yaml"))
 
 
-def _delegation_target_names() -> Tuple[str, ...]:
+def _hermes_delegation_target_names() -> Tuple[str, ...]:
     """Targets the host will actually accept in ``delegate_task(model=...)``.
 
     Read from Hermes's own ``delegation.targets`` rather than this plugin's
@@ -1962,6 +1962,20 @@ def _delegation_target_names() -> Tuple[str, ...]:
         ))
     except Exception:
         return ()
+
+
+def _delegation_target_names() -> Tuple[str, ...]:
+    """Every delegation target the conductor may be offered.
+
+    Hermes's ``delegation.targets`` plus, while ``delegate_claude`` is registered,
+    the Claude wing's targets. The wing reaches them through its own tool rather
+    than ``delegate_task(model=...)``, so they need no entry in Hermes's config --
+    and without this, ``haiku`` could never appear in a recommendation.
+    """
+    names = set(_hermes_delegation_target_names())
+    if claude_wing.is_active():
+        names |= set(claude_wing.target_names(_load_config()))
+    return tuple(sorted(names))
 
 
 def _recent_account_load(cfg: Dict[str, Any], window_seconds: int) -> Dict[str, int]:
@@ -2076,6 +2090,8 @@ def _external_target_for_model(model: str) -> Optional[str]:
     for name, spec in _delegation_targets_detail().items():
         if spec.get("model") == model:
             return name
+    if claude_wing.is_active():
+        return claude_wing.target_for_model(model, _load_config())
     return None
 
 
