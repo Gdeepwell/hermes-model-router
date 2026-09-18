@@ -1582,7 +1582,7 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         names = [
             "executionOwnCalls", "executionRawCall", "executionCalls", "executionKind",
             "sessionIdFromTurn", "tierAccount", "accountLabel", "assignDelegations",
-            "chip", "delegationChips",
+            "chip", "stepDownHoverText", "delegationChips",
         ]
         return "\n".join(self.javascript_function(name) for name in names)
 
@@ -1633,7 +1633,9 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         chips = json.loads(out)
         self.assertEqual([c["text"] for c in chips],
                           ["Codex: terra", "Claude: haiku", "Claude: sonnet ↓", "Claude: sonnet ✕"])
-        self.assertIn("opus→sonnet (weekly usage 74%)", chips[2]["title"])
+        # M5: one hover format for both accounts -- "<from>→<to>, weekly N%".
+        self.assertEqual(chips[2]["title"], "opus→sonnet, weekly 74%")
+        # Refused/error chips keep their original message untouched.
         self.assertIn("Claude delegation closed", chips[3]["title"])
 
     def test_codex_step_down_chip_detects_the_appended_reason_clause(self):
@@ -1651,7 +1653,7 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         ))
         self.assertEqual(json.loads(out), [{
             "text": "Codex: terra ↓",
-            "title": "long work; usage soft limit: sol→terra (weekly 72%)",
+            "title": "sol→terra, weekly 72%",
         }])
 
     def test_codex_hard_limit_reason_also_marks_a_step_down_chip(self):
@@ -1666,8 +1668,53 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         ))
         self.assertEqual(json.loads(out), [{
             "text": "Codex: terra ↓",
-            "title": "usage hard limit: sol→terra (weekly 91%)",
+            "title": "sol→terra, weekly 91%",
         }])
+
+    def test_codex_hard_limit_session_window_reason_reformats_too(self):
+        """M10 makes the router name the session window when that is what
+        actually triggered the hard limit; the same hover formatter must
+        handle that clause too."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "terra", "reason": "usage hard limit: sol→terra (session 95%)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.title)));"
+        ))
+        self.assertEqual(json.loads(out), ["sol→terra, session 95%"])
+
+    def test_a_skipped_step_down_never_marks_the_chip(self):
+        """I3: the router also writes this clause when the target itself is
+        unavailable ('...skipped (terra unavailable)'); that must never be
+        read as a real step-down."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "sol", "reason": "usage soft limit: sol→terra skipped (terra unavailable)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.textContent)));"
+        ))
+        self.assertEqual(json.loads(out), ["Codex: sol"])
+
+    def test_claude_fallback_chip_with_no_audit_shows_the_tier_name_not_the_target(self):
+        """No audits means the entry has to be read off the routed node itself,
+        whose tier field is a router target name (sonnet5/opus5); the chip must
+        still say the short tier name (sonnet/opus) the Settings tier selector
+        and the audit log both use."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [{"tier": "sonnet5"}], "children": []},
+            {"kind": None, "routed_calls": [{"tier": "opus5"}], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.textContent)));"
+        ))
+        self.assertEqual(json.loads(out), ["Claude: sonnet", "Claude: opus"])
 
     def test_haiku_chip_with_no_audit_log(self):
         run = {"scope": {"nodes": [
