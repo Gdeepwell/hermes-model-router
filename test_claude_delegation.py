@@ -39,7 +39,9 @@ def _cfg(**overrides):
         "models": {"luna": "gpt-luna", "spark": "gpt-spark", "terra": "gpt-terra", "sol": "gpt-sol"},
         "callable": {"luna": True, "spark": True, "terra": True, "sol": True,
                      "opus5": True, "sonnet5": True, "haiku": True},
-        "tier_providers": {"opus5": "anthropic", "sonnet5": "anthropic", "haiku": "anthropic"},
+        "tier_providers": {"opus5": "anthropic", "sonnet5": "anthropic", "haiku": "anthropic",
+                          "terra": "openai-codex", "sol": "openai-codex",
+                          "spark": "openai-codex", "luna": "openai-codex"},
         "fallbacks": {"opus5": "sol"},
         "peer_groups": {"heavy": ["terra", "opus5", "sonnet5"], "light": ["luna", "spark", "haiku"]},
         "default_model": "terra",
@@ -632,15 +634,22 @@ def _parent_request(tools=("delegate_task", "delegate_claude")):
     return request
 
 
-def _note(kind="code", weekly=40.0, cfg=None, active=True, request=None, **kwargs):
+def _note(kind="code", weekly=40.0, codex=None, cfg=None, active=True, request=None, **kwargs):
     reading = None if weekly is None else _reading(weekly)
     kwargs = {"api_call_count": 1, "turn_id": "t1", "platform": "cli", **kwargs}
+    if cfg is None:
+        cfg = _cfg(preferences=PREFS)
+        cfg["usage_guard"]["accounts"]["openai-codex"] = {
+            "soft_percent": 70, "hard_percent": 90, "step_down": {"sol": "terra"},
+        }
     with patch.object(claude_delegation, "_ACTIVE", active), \
-         patch.object(usage_guard, "peek", side_effect=lambda account, cfg: reading if account == "anthropic" else None), \
+         patch.object(usage_guard, "peek", side_effect=lambda account, cfg: (
+             reading if account == "anthropic" else (
+                 _reading(codex) if codex is not None and account == "openai-codex" else None))), \
          patch("model_router.classify_request", return_value=SimpleNamespace(kind=kind)), \
          patch("model_router._delegation_target_names", return_value=("haiku", "opus5", "sonnet5")), \
          patch("model_router._tier_cooldown_remaining", return_value=0.0):
-        return _routing_note(request or _parent_request(), kwargs, cfg or _cfg(preferences=PREFS))
+        return _routing_note(request or _parent_request(), kwargs, cfg)
 
 
 class RoutingNoteTests(unittest.TestCase):
@@ -651,7 +660,8 @@ class RoutingNoteTests(unittest.TestCase):
                       'sonnet5 → delegate_claude(tier="sonnet").', note)
         self.assertIn("Other kinds:", note)
         self.assertIn("review: sonnet5 > opus5 > terra", note)
-        self.assertIn("Claude weekly usage 40% (soft limit 70%, hard 90%).", note)
+        self.assertIn("Usage: Claude weekly 40% (soft 70%, hard 90%); "
+                     "Codex weekly unknown (soft 70%, hard 90%).", note)
         self.assertIn("Advisory: if you route differently, say why in one line.", note)
 
     def test_the_note_names_the_deferred_tool_hint_before_the_advisory_line(self):
@@ -666,13 +676,18 @@ class RoutingNoteTests(unittest.TestCase):
     def test_the_soft_limit_moves_claude_behind_codex(self):
         note = _note(kind="review", weekly=75.0)
         self.assertIn("If you delegate review work: terra → delegate_task", note)
-        self.assertIn('sonnet5 → delegate_claude(tier="sonnet") (soft limit)', note)
+        self.assertIn('sonnet5 → delegate_claude(tier="sonnet") [Claude soft limit]', note)
 
     def test_the_hard_limit_marks_claude_closed(self):
-        self.assertIn("(closed)", _note(kind="review", weekly=95.0))
+        self.assertIn("[Claude closed]", _note(kind="review", weekly=95.0))
 
     def test_an_unknown_reading_says_so(self):
-        self.assertIn("Claude weekly usage: unknown", _note(weekly=None))
+        self.assertIn("Claude weekly unknown", _note(weekly=None))
+
+    def test_a_codex_soft_limit_moves_codex_behind_claude(self):
+        note = _note(kind="code", weekly=40.0, codex=72.0)
+        self.assertIn('If you delegate code work: sonnet5 → delegate_claude(tier="sonnet") > '
+                      'terra → delegate_task (goal prefix [terra]) [Codex soft limit].', note)
 
     def test_no_claude_preference_still_announces_the_wing(self):
         note = _note(cfg=_cfg(preferences={"code": ["terra"]}))

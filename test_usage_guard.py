@@ -300,5 +300,67 @@ class FetcherTests(unittest.TestCase):
             self.assertIsNone(usage_guard.FETCHERS["openai-codex"]())
 
 
+from model_router import (  # noqa: E402
+    RouteDecision,
+    _target_availability,
+    _usage_step_down,
+)
+
+ROUTER_CFG = {
+    "models": {"luna": "gpt-luna", "spark": "gpt-spark", "terra": "gpt-terra", "sol": "gpt-sol"},
+    "callable": {"luna": True, "spark": True, "terra": True, "sol": True, "opus5": True, "sonnet5": True},
+    "tier_providers": {"luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex",
+                       "sol": "openai-codex", "opus5": "anthropic", "sonnet5": "anthropic"},
+    "effort": {}, **_cfg(),
+}
+
+
+def _peek(**weekly):
+    return patch.object(usage_guard, "peek",
+                        side_effect=lambda account, cfg: _reading(weekly[account]) if account in weekly else None)
+
+
+class CodexStepDownTests(unittest.TestCase):
+    def _sol(self, **extra):
+        return RouteDecision("sol", "gpt-sol", "long work", "medium", **extra)
+
+    def test_the_soft_limit_steps_sol_down_to_terra(self):
+        with _peek(**{"openai-codex": 72.0}):
+            decision = _usage_step_down(self._sol(kind="long"), ROUTER_CFG)
+        self.assertEqual((decision.tier, decision.model), ("terra", "gpt-terra"))
+        self.assertEqual(decision.reason, "usage soft limit: sol→terra (weekly 72%)")
+        self.assertEqual(decision.kind, "long")
+
+    def test_nothing_changes_below_the_limit_when_unknown_or_unguarded(self):
+        for peeked, cfg in (({"openai-codex": 50.0}, ROUTER_CFG), ({}, ROUTER_CFG),
+                            ({"openai-codex": 99.0}, {k: v for k, v in ROUTER_CFG.items() if k != "usage_guard"})):
+            with self.subTest(peeked=peeked), _peek(**peeked):
+                self.assertEqual(_usage_step_down(self._sol(), cfg).tier, "sol")
+
+    def test_a_mandatory_route_is_never_stepped_down(self):
+        with _peek(**{"openai-codex": 72.0}):
+            self.assertEqual(_usage_step_down(self._sol(mandatory=True), ROUTER_CFG).tier, "sol")
+
+    def test_an_unavailable_target_keeps_the_tier_and_says_why(self):
+        cfg = {**ROUTER_CFG, "callable": {**ROUTER_CFG["callable"], "terra": False}}
+        with _peek(**{"openai-codex": 72.0}):
+            decision = _usage_step_down(self._sol(), cfg)
+        self.assertEqual(decision.tier, "sol")
+        self.assertIn("usage soft limit: sol→terra skipped (terra unavailable)", decision.reason)
+
+
+class AccountMarkTests(unittest.TestCase):
+    def test_marks_name_the_account_state(self):
+        with _peek(**{"openai-codex": 72.0, "anthropic": 95.0}):
+            notes = _target_availability(["sol", "opus5", "luna"], ROUTER_CFG)
+        self.assertEqual(notes["sol"], " [Codex soft limit]")
+        self.assertEqual(notes["opus5"], " [Claude closed]")
+
+    def test_no_guard_no_marks(self):
+        cfg = {k: v for k, v in ROUTER_CFG.items() if k != "usage_guard"}
+        with _peek(**{"openai-codex": 99.0}):
+            self.assertEqual(_target_availability(["sol"], cfg), {"sol": ""})
+
+
 if __name__ == "__main__":
     unittest.main()

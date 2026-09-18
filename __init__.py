@@ -534,6 +534,29 @@ def _require_callable(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDeci
     return resolved
 
 
+def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecision:
+    """At an account's soft limit, step its heaviest routed tier down.
+
+    Codex is the only account this router routes itself, so this is the Codex
+    counterpart of delegate_claude's opus→sonnet. Never touches a mandatory
+    decision, and never moves work onto an unavailable tier.
+    """
+    if decision.mandatory:
+        return decision
+    account = _account_of(decision.tier, cfg)
+    if not account or not usage_guard.guarded(account, cfg):
+        return decision
+    outcome = usage_guard.apply(account, decision.tier, cfg, usage_guard.peek(account, cfg))
+    if not outcome.adjusted:
+        return decision
+    target = outcome.tier
+    if not _is_routable_tier(target, cfg) or not _is_callable_tier(target, cfg):
+        return replace(decision, reason=f"{decision.reason}; usage soft limit: "
+                                        f"{decision.tier}→{target} skipped ({target} unavailable)")
+    stepped = _decision(target, f"usage soft limit: {decision.tier}→{target} (weekly {outcome.usage})", cfg)
+    return replace(stepped, kind=decision.kind)
+
+
 def _load_config() -> Dict[str, Any]:
     if not _CONFIG_PATH.exists() or yaml is None:
         return _deep_merge({}, _DEFAULT_CONFIG)
@@ -2069,6 +2092,27 @@ def _peers_for(name: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
     return ()
 
 
+def _account_of(name: str, cfg: Dict[str, Any]) -> str:
+    return str((cfg.get("tier_providers") or {}).get(name) or "")
+
+
+def _account_states(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """State per guarded account, from the non-blocking cached reading."""
+    accounts = (usage_guard.guard_config(cfg).get("accounts") or {})
+    return {account: usage_guard.state(account, cfg, usage_guard.peek(account, cfg))
+            for account in accounts if usage_guard.guarded(account, cfg)}
+
+
+def _account_mark(name: str, cfg: Dict[str, Any], states: Dict[str, str]) -> str:
+    account = _account_of(name, cfg)
+    state = states.get(account)
+    if state == "soft":
+        return f" [{usage_guard.account_label(account)} soft limit]"
+    if state == "closed":
+        return f" [{usage_guard.account_label(account)} closed]"
+    return ""
+
+
 def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str, str]:
     """Per-target cooldown note, empty when the target is available.
 
@@ -2080,18 +2124,19 @@ def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str,
     lets the conductor wait or narrow the objective instead.
     """
     offered = set(names)
+    states = _account_states(cfg)
     notes = {}
     for name in names:
         remaining = _tier_cooldown_remaining(name, cfg)
         if not remaining:
-            notes[name] = ""
+            notes[name] = _account_mark(name, cfg, states)
             continue
         alive = [
             peer for peer in _peers_for(name, cfg)
             if peer in offered and not _tier_cooldown_remaining(peer, cfg)
         ]
         instead = f"; use {' or '.join(alive)} instead" if alive else ""
-        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min{instead}]"
+        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min{instead}]" + _account_mark(name, cfg, states)
     return notes
 
 
@@ -2966,7 +3011,7 @@ _CLAUDE_DELEGATION_AVAILABLE_LINE = (
 )
 
 
-def _note_names(kind: str, cfg: Dict[str, Any], state: str, claude_offered: set) -> list:
+def _note_names(kind: str, cfg: Dict[str, Any], states: Dict[str, str], claude_offered: set) -> list:
     """The kind's preference chain, limited to what can be offered, in advice order."""
     names = []
     for name in _preference_list(kind, cfg):
@@ -2975,20 +3020,20 @@ def _note_names(kind: str, cfg: Dict[str, Any], state: str, claude_offered: set)
                 names.append(name)
         elif _is_routable_tier(name, cfg) and _target_is_offered(name, cfg):
             names.append(name)
-    if state in ("soft", "closed"):
-        # At the soft limit Claude still runs, but it is no longer the first thing to reach for.
-        names = ([n for n in names if n not in claude_delegation.TIER_FOR_TARGET]
-                 + [n for n in names if n in claude_delegation.TIER_FOR_TARGET])
+    held = {account for account, state in states.items() if state in ("soft", "closed")}
+    if held:
+        # An account at its limit still runs, but it is no longer the first thing to reach for.
+        names = ([n for n in names if _account_of(n, cfg) not in held]
+                 + [n for n in names if _account_of(n, cfg) in held])
     return names
 
 
-def _note_label(name: str, state: str, notes: Dict[str, str], *, as_call: bool) -> str:
-    tier = claude_delegation.TIER_FOR_TARGET.get(name)
-    mark = {"soft": " (soft limit)", "closed": " (closed)"}.get(state, "") if tier else ""
+def _note_label(name: str, notes: Dict[str, str], *, as_call: bool) -> str:
     if not as_call:
-        return f"{name}{mark}{notes.get(name, '')}"
+        return f"{name}{notes.get(name, '')}"
+    tier = claude_delegation.TIER_FOR_TARGET.get(name)
     call = f'delegate_claude(tier="{tier}")' if tier else f"delegate_task (goal prefix [{name}])"
-    return f"{name} → {call}{mark}{notes.get(name, '')}"
+    return f"{name} → {call}{notes.get(name, '')}"
 
 
 def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str, Any]) -> str:
@@ -3013,37 +3058,39 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
         kind = classify_request(request, api_call_count=1, config=cfg).kind or "default"
     except Exception:
         kind = "default"
-    reading = usage_guard.peek("anthropic", cfg)
-    state = usage_guard.state("anthropic", cfg, reading)
+    states = _account_states(cfg)
     claude_offered = set(_delegation_target_names())
 
-    chain = _note_names(kind, cfg, state, claude_offered)
+    chain = _note_names(kind, cfg, states, claude_offered)
     notes = _target_availability(chain, cfg)
     lines = [f"[ROUTER] This turn classifies as: {kind}."]
     if chain:
         lines.append(f"If you delegate {kind} work: "
-                     + " > ".join(_note_label(n, state, notes, as_call=True) for n in chain) + ".")
+                     + " > ".join(_note_label(n, notes, as_call=True) for n in chain) + ".")
     else:
         lines.append(f"No preference is configured for {kind} work; delegate_task keeps its built-in route.")
     others = []
     for other in WORK_KINDS:
         if other == kind:
             continue
-        names = _note_names(other, cfg, state, claude_offered)
+        names = _note_names(other, cfg, states, claude_offered)
         if names:
             other_notes = _target_availability(names, cfg)
-            others.append(f"{other}: " + " > ".join(_note_label(n, state, other_notes, as_call=False)
+            others.append(f"{other}: " + " > ".join(_note_label(n, other_notes, as_call=False)
                                                    for n in names))
     if others:
         lines.append("Other kinds: " + "; ".join(others) + ".")
     if not any(name in claude_delegation.TIER_FOR_TARGET for k in WORK_KINDS for name in _preference_list(k, cfg)):
         lines.append(_CLAUDE_DELEGATION_AVAILABLE_LINE)
-    limits = usage_guard.account_limits("anthropic", cfg) or {"soft_percent": 70.0, "hard_percent": 90.0}
-    soft, hard = limits["soft_percent"], limits["hard_percent"]
-    if reading is None or reading.weekly is None:
-        lines.append(f"Claude weekly usage: unknown (soft limit {soft:.0f}%, hard {hard:.0f}%).")
-    else:
-        lines.append(f"Claude weekly usage {reading.weekly:.0f}% (soft limit {soft:.0f}%, hard {hard:.0f}%).")
+    usage = []
+    for account in sorted(states, key=lambda a: usage_guard.account_label(a) != "Claude"):
+        limits = usage_guard.account_limits(account, cfg)
+        reading = usage_guard.peek(account, cfg)
+        value = "unknown" if reading is None or reading.weekly is None else f"{reading.weekly:.0f}%"
+        usage.append(f"{usage_guard.account_label(account)} weekly {value} "
+                     f"(soft {limits['soft_percent']:.0f}%, hard {limits['hard_percent']:.0f}%)")
+    if usage:
+        lines.append("Usage: " + "; ".join(usage) + ".")
     lines.append(_DEFERRED_DELEGATION_HINT.rstrip())
     lines.append("Advisory: if you route differently, say why in one line.")
     return "\n\n" + "\n".join(lines) + "\n"
@@ -3252,6 +3299,7 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     # Rules above may intentionally rewrite the tier (root labels, subagents,
     # quota). Re-validate the final destination immediately before dispatch.
     decision = _require_callable(decision, cfg)
+    decision = _usage_step_down(decision, cfg)
     forced_preflight_request = (
         _force_terra_supervisor_preflight(kwargs, cfg, decision)
         if decision.tier in {str(cfg.get("default_model", "terra")), "sol"}
