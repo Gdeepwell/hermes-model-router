@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover - Hermes includes PyYAML
     yaml = None
 
-from . import claude_wing
+from . import claude_delegation
 
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
@@ -1276,7 +1276,7 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
         "it is cooling.\n"
         + "\n".join(lines)
         + ("\nRe-dispatch each one with the call named above and tell the retry to "
-           if claude_wing.is_active() else
+           if claude_delegation.is_active() else
            "\nRe-dispatch each one with the model: parameter named above and tell the retry to ")
         + "continue from what the stopped worker already committed in its worktree instead of "
         "starting over. Do not re-plan or narrow the goal: only the account changed.\n"
@@ -1933,16 +1933,16 @@ def _host_delegate_has_model(request: Any) -> bool:
 
 
 def _dispatch_phrase(target: str) -> str:
-    """How a conductor reaches a target: the wing's tool for Claude, else model:<name>.
+    """How a conductor reaches a target: the delegate_claude tool for Claude, else model:<name>.
 
-    While the wing is active, a non-Claude target is no longer phrased as
+    While Claude delegation is active, a non-Claude target is no longer phrased as
     ``model:<name>`` either -- that reads as the same delegate_task 'model'
     parameter this host does not have. It is named as the goal-prefix route
     instead; the Claude route through ``delegate_claude`` is unaffected.
     """
-    if not claude_wing.is_active():
+    if not claude_delegation.is_active():
         return f"model:{target}"
-    tier = claude_wing.TIER_FOR_TARGET.get(target)
+    tier = claude_delegation.TIER_FOR_TARGET.get(target)
     if tier:
         return f'delegate_claude(tier="{tier}")'
     return f"delegate_task (goal prefix [{target}])"
@@ -2005,13 +2005,13 @@ def _delegation_target_names() -> Tuple[str, ...]:
     """Every delegation target the conductor may be offered.
 
     Hermes's ``delegation.targets`` plus, while ``delegate_claude`` is registered,
-    the Claude wing's targets. The wing reaches them through its own tool rather
+    Claude delegation's targets. It reaches them through its own tool rather
     than ``delegate_task(model=...)``, so they need no entry in Hermes's config --
     and without this, ``haiku`` could never appear in a recommendation.
     """
     names = set(_hermes_delegation_target_names())
-    if claude_wing.is_active():
-        names |= set(claude_wing.target_names(_load_config()))
+    if claude_delegation.is_active():
+        names |= set(claude_delegation.target_names(_load_config()))
     return tuple(sorted(names))
 
 
@@ -2127,8 +2127,8 @@ def _external_target_for_model(model: str) -> Optional[str]:
     for name, spec in _delegation_targets_detail().items():
         if spec.get("model") == model:
             return name
-    if claude_wing.is_active():
-        return claude_wing.target_for_model(model, _load_config())
+    if claude_delegation.is_active():
+        return claude_delegation.target_for_model(model, _load_config())
     return None
 
 
@@ -2178,7 +2178,7 @@ def _model_param_contract(
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
     )
-    if model_param or not claude_wing.is_active():
+    if model_param or not claude_delegation.is_active():
         opening = (
             f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
             "A goal-text prefix only renames the model inside the default provider and cannot reach a "
@@ -2190,14 +2190,14 @@ def _model_param_contract(
             "goal-text prefix picks a tier inside the default provider and cannot reach a target on a "
             "separate account. "
         )
-    if claude_wing.is_active():
+    if claude_delegation.is_active():
         claude_rule = (
             "Concretely: [opus5] and [sonnet5] are not labels, and neither is a model parameter. A goal "
             "beginning with one is not routed to Claude; the prefix is inert, the goal is classified on its "
             "remaining text, and the leaf runs on this provider -- so it is stopped at its first call and "
             "returned for re-dispatch. Claude targets are reached only by calling delegate_claude with tier "
             "\"haiku\", \"sonnet\" or \"opus\". "
-        ) + _DEFERRED_WING_HINT
+        ) + _DEFERRED_DELEGATION_HINT
     else:
         # The general rule was already here and lost anyway, seven goals running.
         # It shares a paragraph with [spark]/[sol], which *are* prefixes, so
@@ -2258,7 +2258,7 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
     decides = (
         "and it decides which call carries the leaf: a Claude target goes through delegate_claude with its "
         "tier, any other target through delegate_task. "
-        if claude_wing.is_active() else
+        if claude_delegation.is_active() else
         "and it decides the leaf's model: parameter. "
     )
     return (
@@ -2419,7 +2419,7 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
     paragraph: the unconditional default beat the hedged preference sentence
     every time, so ``code -> model:opus5`` never once decided a leaf.
     """
-    claude_names = {"opus5", "sonnet5", "haiku"} if claude_wing.is_active() else {"opus5", "sonnet5"}
+    claude_names = {"opus5", "sonnet5", "haiku"} if claude_delegation.is_active() else {"opus5", "sonnet5"}
     claude = [name for name in names if name in claude_names]
     if not claude:
         return ""
@@ -2434,7 +2434,7 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
     )
     reach = (
         'Reach them with delegate_claude(tier="haiku"|"sonnet"|"opus"), never with delegate_task. '
-        if claude_wing.is_active() else ""
+        if claude_delegation.is_active() else ""
     )
     return (
         f"{' and '.join(claude)} run on Claude, a different subscription from every other "
@@ -2535,8 +2535,8 @@ def _prepare_orchestration_delegation(
     model_param = _host_delegate_has_model(request)
     claude_hint = (
         "For real work prefer a native Claude worker through delegate_claude when one is offered. "
-        + _DEFERRED_WING_HINT
-        if claude_wing.is_active() else
+        + _DEFERRED_DELEGATION_HINT
+        if claude_delegation.is_active() else
         "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered. "
     )
     instruction = (
@@ -2953,14 +2953,14 @@ _NOTE_TOOL_NAMES = frozenset({"delegate_task", "mcp__delegate_task", "delegate_c
 # Hermes's Tool Search defers every plugin tool by default: the parent sees only
 # tool_search/tool_describe/tool_call plus a catalog stub, and a direct call to
 # delegate_claude is rejected as unknown until it is loaded once. Every place
-# that tells a parent to call delegate_claude while the wing is active must also
+# that tells a parent to call delegate_claude while Claude delegation is active must also
 # say how to reach it.
-_DEFERRED_WING_HINT = (
+_DEFERRED_DELEGATION_HINT = (
     'If delegate_claude is not in your tool list it is a deferred tool: load it once with tool_describe, '
     'then call it through tool_call with name "delegate_claude". '
 )
-_WING_AVAILABLE_LINE = (
-    'The Claude wing is available through delegate_claude: tier "haiku" for quick lookups, "sonnet" as '
+_CLAUDE_DELEGATION_AVAILABLE_LINE = (
+    'Claude delegation is available through delegate_claude: tier "haiku" for quick lookups, "sonnet" as '
     'the default worker, "opus" for hard or consequential work.'
 )
 
@@ -2969,20 +2969,20 @@ def _note_names(kind: str, cfg: Dict[str, Any], state: str, claude_offered: set)
     """The kind's preference chain, limited to what can be offered, in advice order."""
     names = []
     for name in _preference_list(kind, cfg):
-        if name in claude_wing.TIER_FOR_TARGET:
+        if name in claude_delegation.TIER_FOR_TARGET:
             if name in claude_offered and _target_is_offered(name, cfg):
                 names.append(name)
         elif _is_routable_tier(name, cfg) and _target_is_offered(name, cfg):
             names.append(name)
     if state in ("soft", "closed"):
         # At the soft limit Claude still runs, but it is no longer the first thing to reach for.
-        names = ([n for n in names if n not in claude_wing.TIER_FOR_TARGET]
-                 + [n for n in names if n in claude_wing.TIER_FOR_TARGET])
+        names = ([n for n in names if n not in claude_delegation.TIER_FOR_TARGET]
+                 + [n for n in names if n in claude_delegation.TIER_FOR_TARGET])
     return names
 
 
 def _note_label(name: str, state: str, notes: Dict[str, str], *, as_call: bool) -> str:
-    tier = claude_wing.TIER_FOR_TARGET.get(name)
+    tier = claude_delegation.TIER_FOR_TARGET.get(name)
     mark = {"soft": " (soft limit)", "closed": " (closed)"}.get(state, "") if tier else ""
     if not as_call:
         return f"{name}{mark}{notes.get(name, '')}"
@@ -2991,13 +2991,13 @@ def _note_label(name: str, state: str, notes: Dict[str, str], *, as_call: bool) 
 
 
 def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str, Any]) -> str:
-    """Advice for a Claude parent: which wing and tier, per kind of work.
+    """Advice for a Claude parent: which account and tier, per kind of work.
 
     With orchestration off, a parent on an external account got no routing advice
     at all; the preference chains only ever reached a forced conductor. This is
     that advice, once per turn, and advisory: the parent may overrule it.
     """
-    if not claude_wing.is_active():
+    if not claude_delegation.is_active():
         return ""
     if int(kwargs.get("api_call_count", 1) or 1) != 1:
         return ""
@@ -3012,8 +3012,8 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
         kind = classify_request(request, api_call_count=1, config=cfg).kind or "default"
     except Exception:
         kind = "default"
-    reading = claude_wing.peek_usage(cfg)
-    state = claude_wing.wing_state(cfg, reading)
+    reading = claude_delegation.peek_usage(cfg)
+    state = claude_delegation.usage_state(cfg, reading)
     claude_offered = set(_delegation_target_names())
 
     chain = _note_names(kind, cfg, state, claude_offered)
@@ -3035,14 +3035,14 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
                                                    for n in names))
     if others:
         lines.append("Other kinds: " + "; ".join(others) + ".")
-    if not any(name in claude_wing.TIER_FOR_TARGET for k in WORK_KINDS for name in _preference_list(k, cfg)):
-        lines.append(_WING_AVAILABLE_LINE)
-    soft, hard = claude_wing.guard_limits(cfg)
+    if not any(name in claude_delegation.TIER_FOR_TARGET for k in WORK_KINDS for name in _preference_list(k, cfg)):
+        lines.append(_CLAUDE_DELEGATION_AVAILABLE_LINE)
+    soft, hard = claude_delegation.guard_limits(cfg)
     if reading is None or reading.weekly is None:
         lines.append(f"Claude weekly usage: unknown (soft limit {soft:.0f}%, hard {hard:.0f}%).")
     else:
         lines.append(f"Claude weekly usage {reading.weekly:.0f}% (soft limit {soft:.0f}%, hard {hard:.0f}%).")
-    lines.append(_DEFERRED_WING_HINT.rstrip())
+    lines.append(_DEFERRED_DELEGATION_HINT.rstrip())
     lines.append("Advisory: if you route differently, say why in one line.")
     return "\n\n" + "\n".join(lines) + "\n"
 
@@ -4065,4 +4065,4 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("subagent_start", on_subagent_start)
     ctx.register_hook("subagent_stop", on_subagent_stop)
-    claude_wing.register(ctx)
+    claude_delegation.register(ctx)

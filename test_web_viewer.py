@@ -933,7 +933,7 @@ class ConfigPathTests(unittest.TestCase):
 
 
 class HaikuDashboardTests(DashboardProbeMixin, unittest.TestCase):
-    """The Claude wing adds a third Claude tier; the dashboard must show it
+    """Claude delegation adds a third Claude tier; the dashboard must show it
     wherever it shows the other two, or Haiku workers are counted nowhere."""
 
     def test_haiku_is_styled_like_sonnet5(self):

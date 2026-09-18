@@ -16,18 +16,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from model_router import claude_wing
-from model_router.claude_wing import (
+from model_router import claude_delegation
+from model_router.claude_delegation import (
     TARGET_FOR_TIER,
     TIER_FOR_TARGET,
     registration_block,
     target_for_model,
     target_names,
     tier_model,
-    wing_config,
+    delegation_config,
 )
 
-WING = {
+CLAUDE_DELEGATION = {
     "enabled": True,
     "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5"},
     "default_tier": "sonnet",
@@ -44,7 +44,7 @@ def _cfg(**overrides):
         "fallbacks": {"opus5": "sol"},
         "peer_groups": {"heavy": ["terra", "opus5", "sonnet5"], "light": ["luna", "spark", "haiku"]},
         "default_model": "terra",
-        "claude_wing": json.loads(json.dumps(WING)),
+        "claude_delegation": json.loads(json.dumps(CLAUDE_DELEGATION)),
     }
     cfg.update(overrides)
     return cfg
@@ -53,14 +53,14 @@ def _cfg(**overrides):
 class WingConfigTests(unittest.TestCase):
     def test_a_config_without_the_block_leaves_the_wing_off(self):
         """Configuring nothing must change nothing."""
-        self.assertFalse(wing_config({})["enabled"])
-        self.assertFalse(wing_config(None)["enabled"])
+        self.assertFalse(delegation_config({})["enabled"])
+        self.assertFalse(delegation_config(None)["enabled"])
 
     def test_a_partial_guard_keeps_the_other_defaults(self):
-        wing = wing_config({"claude_wing": {"enabled": True, "usage_guard": {"soft_percent": 60}}})
-        self.assertEqual(wing["usage_guard"]["soft_percent"], 60)
-        self.assertEqual(wing["usage_guard"]["hard_percent"], 90)
-        self.assertEqual(wing["tiers"]["opus"], "claude-opus-5")
+        settings = delegation_config({"claude_delegation": {"enabled": True, "usage_guard": {"soft_percent": 60}}})
+        self.assertEqual(settings["usage_guard"]["soft_percent"], 60)
+        self.assertEqual(settings["usage_guard"]["hard_percent"], 90)
+        self.assertEqual(settings["tiers"]["opus"], "claude-opus-5")
 
     def test_names_map_both_ways(self):
         self.assertEqual(TARGET_FOR_TIER, {"haiku": "haiku", "sonnet": "sonnet5", "opus": "opus5"})
@@ -73,7 +73,7 @@ class WingConfigTests(unittest.TestCase):
     def test_target_names_skip_a_tier_without_a_model(self):
         cfg = _cfg()
         self.assertEqual(target_names(cfg), ("haiku", "opus5", "sonnet5"))
-        cfg["claude_wing"]["tiers"]["haiku"] = ""
+        cfg["claude_delegation"]["tiers"]["haiku"] = ""
         self.assertEqual(target_names(cfg), ("opus5", "sonnet5"))
 
     def test_a_model_maps_back_to_its_target(self):
@@ -85,7 +85,7 @@ class WingConfigTests(unittest.TestCase):
 class RegistrationBlockTests(unittest.TestCase):
     def test_a_disabled_wing_does_not_register(self):
         cfg = _cfg()
-        cfg["claude_wing"]["enabled"] = False
+        cfg["claude_delegation"]["enabled"] = False
         self.assertIn("enabled", registration_block(cfg))
 
     def test_every_claude_target_switched_off_does_not_register(self):
@@ -95,21 +95,21 @@ class RegistrationBlockTests(unittest.TestCase):
         self.assertIn("switched off", registration_block(cfg))
 
     def test_a_host_without_the_api_does_not_register(self):
-        with patch.object(claude_wing, "host_check", return_value=(False, "delegate_task lacks credentials_cfg")):
+        with patch.object(claude_delegation, "host_check", return_value=(False, "delegate_task lacks credentials_cfg")):
             self.assertIn("credentials_cfg", registration_block(_cfg()))
 
     def test_an_enabled_wing_on_a_capable_host_registers(self):
-        with patch.object(claude_wing, "host_check", return_value=(True, "")):
+        with patch.object(claude_delegation, "host_check", return_value=(True, "")):
             self.assertEqual(registration_block(_cfg()), "")
 
 
-from model_router.claude_wing import (  # noqa: E402
+from model_router.claude_delegation import (  # noqa: E402
     GuardOutcome,
     UsageReading,
     apply_guard,
     peek_usage,
     read_usage,
-    wing_state,
+    usage_state,
 )
 
 
@@ -135,7 +135,7 @@ class GuardTests(unittest.TestCase):
 
     def test_the_hard_limit_closes_the_wing(self):
         outcome = apply_guard("haiku", _cfg(), _reading(95))
-        self.assertIn("Claude wing closed: weekly usage 95%", outcome.refused)
+        self.assertIn("Claude delegation closed: weekly usage 95%", outcome.refused)
 
     def test_a_full_session_window_also_closes_it(self):
         outcome = apply_guard("sonnet", _cfg(), _reading(40, session=92))
@@ -146,21 +146,21 @@ class GuardTests(unittest.TestCase):
         still stops a child, and the router records that as a cooldown."""
         self.assertEqual(apply_guard("opus", _cfg(), None), GuardOutcome("opus"))
 
-    def test_wing_state(self):
-        self.assertEqual(wing_state(_cfg(), None), "unknown")
-        self.assertEqual(wing_state(_cfg(), _reading(50)), "open")
-        self.assertEqual(wing_state(_cfg(), _reading(75)), "soft")
-        self.assertEqual(wing_state(_cfg(), _reading(90)), "closed")
+    def test_usage_state(self):
+        self.assertEqual(usage_state(_cfg(), None), "unknown")
+        self.assertEqual(usage_state(_cfg(), _reading(50)), "open")
+        self.assertEqual(usage_state(_cfg(), _reading(75)), "soft")
+        self.assertEqual(usage_state(_cfg(), _reading(90)), "closed")
 
 
 class UsageCacheTests(unittest.TestCase):
     def setUp(self):
-        claude_wing._reset_usage_cache()
-        self.addCleanup(claude_wing._reset_usage_cache)
+        claude_delegation._reset_usage_cache()
+        self.addCleanup(claude_delegation._reset_usage_cache)
 
     def test_one_fetch_per_cache_period(self):
         fetch = MagicMock(return_value=_reading(40))
-        with patch.object(claude_wing, "_fetch_reading", fetch):
+        with patch.object(claude_delegation, "_fetch_reading", fetch):
             read_usage(_cfg(), now=1000.0)
             read_usage(_cfg(), now=1010.0)
             self.assertEqual(fetch.call_count, 1)
@@ -169,7 +169,7 @@ class UsageCacheTests(unittest.TestCase):
 
     def test_a_failed_reading_is_not_retried_within_the_period(self):
         fetch = MagicMock(return_value=None)
-        with patch.object(claude_wing, "_fetch_reading", fetch):
+        with patch.object(claude_delegation, "_fetch_reading", fetch):
             self.assertIsNone(read_usage(_cfg(), now=1000.0))
             self.assertIsNone(read_usage(_cfg(), now=1010.0))
         self.assertEqual(fetch.call_count, 1)
@@ -177,26 +177,26 @@ class UsageCacheTests(unittest.TestCase):
     def test_a_configured_state_file_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             cfg = _cfg()
-            cfg["claude_wing"]["usage_guard"]["state_path"] = str(Path(directory) / "usage.json")
-            with patch.object(claude_wing, "_fetch_reading", return_value=_reading(61)):
+            cfg["claude_delegation"]["usage_guard"]["state_path"] = str(Path(directory) / "usage.json")
+            with patch.object(claude_delegation, "_fetch_reading", return_value=_reading(61)):
                 read_usage(cfg, now=1000.0)
-            claude_wing._reset_usage_cache()  # a new process
+            claude_delegation._reset_usage_cache()  # a new process
             fetch = MagicMock()
-            with patch.object(claude_wing, "_fetch_reading", fetch):
+            with patch.object(claude_delegation, "_fetch_reading", fetch):
                 reading = read_usage(cfg, now=1010.0)
         self.assertEqual(reading.weekly, 61)
         fetch.assert_not_called()
 
     def test_no_state_path_means_no_file(self):
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(claude_wing, "_fetch_reading", return_value=_reading(61)):
+             patch.object(claude_delegation, "_fetch_reading", return_value=_reading(61)):
             read_usage(_cfg(), now=1000.0)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_peek_never_fetches_and_starts_one_refresh_when_stale(self):
         fetch, refresh = MagicMock(), MagicMock()
-        with patch.object(claude_wing, "_fetch_reading", fetch), \
-             patch.object(claude_wing, "_start_refresh", refresh):
+        with patch.object(claude_delegation, "_fetch_reading", fetch), \
+             patch.object(claude_delegation, "_start_refresh", refresh):
             self.assertIsNone(peek_usage(_cfg()))
             peek_usage(_cfg())
         fetch.assert_not_called()
@@ -204,14 +204,14 @@ class UsageCacheTests(unittest.TestCase):
 
     def test_peek_returns_a_fresh_reading_without_refreshing(self):
         refresh = MagicMock()
-        with patch.object(claude_wing, "_fetch_reading", return_value=_reading(40)):
+        with patch.object(claude_delegation, "_fetch_reading", return_value=_reading(40)):
             read_usage(_cfg())
-        with patch.object(claude_wing, "_start_refresh", refresh):
+        with patch.object(claude_delegation, "_start_refresh", refresh):
             self.assertEqual(peek_usage(_cfg()).weekly, 40)
         refresh.assert_not_called()
 
 
-from model_router.claude_wing import build_schema, handle_delegate_claude  # noqa: E402
+from model_router.claude_delegation import build_schema, handle_delegate_claude  # noqa: E402
 
 
 def _fake_host(parent, result=None):
@@ -227,7 +227,7 @@ def _fake_host(parent, result=None):
 
 class SchemaTests(unittest.TestCase):
     def test_the_schema_mirrors_delegate_task_plus_a_tier(self):
-        with patch.object(claude_wing, "_independent_completions", return_value=False):
+        with patch.object(claude_delegation, "_independent_completions", return_value=False):
             schema = build_schema(_cfg())
         self.assertEqual(schema["name"], "delegate_claude")
         properties = schema["parameters"]["properties"]
@@ -241,16 +241,16 @@ class SchemaTests(unittest.TestCase):
 
 class HandlerTests(unittest.TestCase):
     def setUp(self):
-        claude_wing._reset_usage_cache()
-        self.addCleanup(claude_wing._reset_usage_cache)
+        claude_delegation._reset_usage_cache()
+        self.addCleanup(claude_delegation._reset_usage_cache)
 
     def _call(self, args, *, cfg=None, parent=None, usage=40.0, result=None):
         parent = parent if parent is not None else SimpleNamespace(_delegate_depth=0)
         calls, host = _fake_host(parent, result)
         reading = None if usage is None else _reading(usage)
         with patch("model_router._load_config", return_value=cfg or _cfg()), \
-             patch.object(claude_wing, "_host", host), \
-             patch.object(claude_wing, "read_usage", return_value=reading):
+             patch.object(claude_delegation, "_host", host), \
+             patch.object(claude_delegation, "read_usage", return_value=reading):
             raw = handle_delegate_claude(args)
         return json.loads(raw), calls
 
@@ -288,7 +288,7 @@ class HandlerTests(unittest.TestCase):
     def test_no_active_parent_is_refused(self):
         calls, _host = _fake_host(None)
         with patch("model_router._load_config", return_value=_cfg()), \
-             patch.object(claude_wing, "_host", lambda: (lambda **k: calls.append(k), lambda: None)):
+             patch.object(claude_delegation, "_host", lambda: (lambda **k: calls.append(k), lambda: None)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("agent turn", payload["error"])
         self.assertEqual(calls, [])
@@ -309,7 +309,7 @@ class HandlerTests(unittest.TestCase):
 
     def test_the_hard_limit_refuses_and_names_the_codex_call(self):
         payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, usage=95.0)
-        self.assertIn("Claude wing closed", payload["error"])
+        self.assertIn("Claude delegation closed", payload["error"])
         self.assertIn("[sol]", payload["error"])
         self.assertEqual(calls, [])
 
@@ -322,16 +322,16 @@ class HandlerTests(unittest.TestCase):
             raise ValueError("Cannot resolve delegation provider 'anthropic'")
 
         with patch("model_router._load_config", return_value=_cfg()), \
-             patch.object(claude_wing, "_host", lambda: (boom, lambda: SimpleNamespace(_delegate_depth=0))), \
-             patch.object(claude_wing, "read_usage", return_value=_reading(10)):
+             patch.object(claude_delegation, "_host", lambda: (boom, lambda: SimpleNamespace(_delegate_depth=0))), \
+             patch.object(claude_delegation, "read_usage", return_value=_reading(10)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("Cannot resolve delegation provider", payload["error"])
 
     def test_a_configured_audit_log_gets_one_line_per_call(self):
         with tempfile.TemporaryDirectory() as directory:
             cfg = _cfg()
-            log = Path(directory) / "claude-wing.jsonl"
-            cfg["claude_wing"]["log_path"] = str(log)
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
             self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg, usage=75.0)
             entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertEqual(entry["event"], "delegate_claude")
@@ -342,8 +342,8 @@ class HandlerTests(unittest.TestCase):
     def test_a_delegate_task_error_is_audited_as_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             cfg = _cfg()
-            log = Path(directory) / "claude-wing.jsonl"
-            cfg["claude_wing"]["log_path"] = str(log)
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
             self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg,
                        result={"error": "Delegation depth limit reached"})
             entry = json.loads(log.read_text(encoding="utf-8").strip())
@@ -353,52 +353,52 @@ class HandlerTests(unittest.TestCase):
 
 class RegisterTests(unittest.TestCase):
     def setUp(self):
-        self.addCleanup(setattr, claude_wing, "_ACTIVE", False)
+        self.addCleanup(setattr, claude_delegation, "_ACTIVE", False)
 
     def test_an_enabled_wing_registers_in_the_delegation_toolset(self):
         ctx = MagicMock()
-        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
-             patch.object(claude_wing, "_independent_completions", return_value=False), \
-             patch.object(claude_wing, "_exempt_from_sequential_deadline", return_value=True):
-            self.assertTrue(claude_wing.register(ctx, _cfg()))
+        with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
+             patch.object(claude_delegation, "_independent_completions", return_value=False), \
+             patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=True):
+            self.assertTrue(claude_delegation.register(ctx, _cfg()))
         kwargs = ctx.register_tool.call_args.kwargs
         self.assertEqual((kwargs["name"], kwargs["toolset"]), ("delegate_claude", "delegation"))
         self.assertIs(kwargs["handler"], handle_delegate_claude)
-        self.assertTrue(claude_wing.is_active())
+        self.assertTrue(claude_delegation.is_active())
 
     def test_a_disabled_wing_registers_nothing(self):
         ctx = MagicMock()
         cfg = _cfg()
-        cfg["claude_wing"]["enabled"] = False
-        self.assertFalse(claude_wing.register(ctx, cfg))
+        cfg["claude_delegation"]["enabled"] = False
+        self.assertFalse(claude_delegation.register(ctx, cfg))
         ctx.register_tool.assert_not_called()
-        self.assertFalse(claude_wing.is_active())
+        self.assertFalse(claude_delegation.is_active())
 
     def test_register_tool_returning_none_means_not_registered(self):
         ctx = MagicMock()
         ctx.register_tool.return_value = None
-        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
-             patch.object(claude_wing, "_independent_completions", return_value=False), \
-             patch.object(claude_wing, "_exempt_from_sequential_deadline", return_value=True):
-            self.assertFalse(claude_wing.register(ctx, _cfg()))
-        self.assertFalse(claude_wing.is_active())
+        with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
+             patch.object(claude_delegation, "_independent_completions", return_value=False), \
+             patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=True):
+            self.assertFalse(claude_delegation.register(ctx, _cfg()))
+        self.assertFalse(claude_delegation.is_active())
 
     def test_register_calls_the_deadline_exemption_only_after_success(self):
         ctx = MagicMock()
         exempt = MagicMock(return_value=True)
-        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
-             patch.object(claude_wing, "_independent_completions", return_value=False), \
-             patch.object(claude_wing, "_exempt_from_sequential_deadline", exempt):
-            self.assertTrue(claude_wing.register(ctx, _cfg()))
+        with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
+             patch.object(claude_delegation, "_independent_completions", return_value=False), \
+             patch.object(claude_delegation, "_exempt_from_sequential_deadline", exempt):
+            self.assertTrue(claude_delegation.register(ctx, _cfg()))
         exempt.assert_called_once_with()
 
     def test_register_does_not_block_when_the_exemption_fails(self):
         ctx = MagicMock()
-        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
-             patch.object(claude_wing, "_independent_completions", return_value=False), \
-             patch.object(claude_wing, "_exempt_from_sequential_deadline", return_value=False):
-            self.assertTrue(claude_wing.register(ctx, _cfg()))
-        self.assertTrue(claude_wing.is_active())
+        with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
+             patch.object(claude_delegation, "_independent_completions", return_value=False), \
+             patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=False):
+            self.assertTrue(claude_delegation.register(ctx, _cfg()))
+        self.assertTrue(claude_delegation.is_active())
 
 
 class SequentialDeadlineExemptionTests(unittest.TestCase):
@@ -406,7 +406,7 @@ class SequentialDeadlineExemptionTests(unittest.TestCase):
         fake = types.ModuleType("agent.tool_executor")
         fake._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset({"delegate_task", "manage_connections"})
         with patch.dict(sys.modules, {"agent.tool_executor": fake}):
-            self.assertTrue(claude_wing._exempt_from_sequential_deadline())
+            self.assertTrue(claude_delegation._exempt_from_sequential_deadline())
         self.assertEqual(
             fake._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS,
             frozenset({"delegate_task", "manage_connections", "delegate_claude"}),
@@ -415,11 +415,11 @@ class SequentialDeadlineExemptionTests(unittest.TestCase):
     def test_a_missing_attribute_returns_false_without_raising(self):
         fake = types.ModuleType("agent.tool_executor")
         with patch.dict(sys.modules, {"agent.tool_executor": fake}):
-            self.assertFalse(claude_wing._exempt_from_sequential_deadline())
+            self.assertFalse(claude_delegation._exempt_from_sequential_deadline())
 
     def test_an_unimportable_module_returns_false_without_raising(self):
         with patch.dict(sys.modules, {"agent.tool_executor": None}):
-            self.assertFalse(claude_wing._exempt_from_sequential_deadline())
+            self.assertFalse(claude_delegation._exempt_from_sequential_deadline())
 
 
 def _hermes_importable():
@@ -439,7 +439,7 @@ class UsagePayloadTests(unittest.TestCase):
     def _fetch(self, payload):
         with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
              patch("agent.account_usage._get_json", return_value=payload) as get_json:
-            reading = claude_wing._fetch_reading()
+            reading = claude_delegation._fetch_reading()
         return reading, get_json
 
     def test_utilization_is_taken_as_a_percentage(self):
@@ -458,7 +458,7 @@ class UsagePayloadTests(unittest.TestCase):
     def test_no_token_is_no_reading(self):
         with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value=""), \
              patch("agent.account_usage._get_json") as get_json:
-            self.assertIsNone(claude_wing._fetch_reading())
+            self.assertIsNone(claude_delegation._fetch_reading())
         get_json.assert_not_called()
 
 
@@ -467,7 +467,7 @@ class RealHostTests(unittest.TestCase):
     """Against the installed Hermes: the guarantees the wing leans on."""
 
     def test_the_installed_hermes_passes_the_host_check(self):
-        self.assertEqual(claude_wing.host_check(), (True, ""))
+        self.assertEqual(claude_delegation.host_check(), (True, ""))
 
     def test_a_leaf_loses_the_delegation_toolset(self):
         from tools.delegate_tool_toolsets import _strip_blocked_tools
@@ -478,7 +478,7 @@ class RealHostTests(unittest.TestCase):
 
         original = tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS
         self.addCleanup(setattr, tool_executor, "_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS", original)
-        self.assertTrue(claude_wing._exempt_from_sequential_deadline())
+        self.assertTrue(claude_delegation._exempt_from_sequential_deadline())
         self.assertIn("delegate_task", tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS)
         self.assertIn("delegate_claude", tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS)
 
@@ -486,8 +486,8 @@ class RealHostTests(unittest.TestCase):
         """Nothing spawns from an agent at max_spawn_depth, whichever tool asked."""
         parent = SimpleNamespace(_delegate_depth=99)
         with patch("model_router._load_config", return_value=_cfg()), \
-             patch.object(claude_wing, "_host", lambda: (claude_wing._host_delegate_task(), lambda: parent)), \
-             patch.object(claude_wing, "read_usage", return_value=_reading(10)):
+             patch.object(claude_delegation, "_host", lambda: (claude_delegation._host_delegate_task(), lambda: parent)), \
+             patch.object(claude_delegation, "read_usage", return_value=_reading(10)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("depth limit", payload["error"].lower())
 
@@ -514,14 +514,14 @@ class OfferedNamesTests(unittest.TestCase):
     def test_an_inactive_wing_adds_nothing(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(model_router, "_HERMES_CONFIG_PATH", self._hermes_config(directory)), \
-             patch.object(claude_wing, "_ACTIVE", False):
+             patch.object(claude_delegation, "_ACTIVE", False):
             self.assertEqual(model_router._delegation_target_names(), ("opus5", "sonnet5"))
             self.assertIsNone(model_router._external_target_for_model("claude-haiku-4-5-20251001"))
 
     def test_an_active_wing_offers_and_counts_haiku(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(model_router, "_HERMES_CONFIG_PATH", self._hermes_config(directory)), \
-             patch.object(claude_wing, "_ACTIVE", True), \
+             patch.object(claude_delegation, "_ACTIVE", True), \
              patch("model_router._load_config", return_value=_cfg()):
             self.assertEqual(model_router._delegation_target_names(), ("haiku", "opus5", "sonnet5"))
             self.assertEqual(model_router._external_target_for_model("claude-haiku-4-5-20251001"), "haiku")
@@ -534,14 +534,14 @@ class ShippedConfigTests(unittest.TestCase):
         self.cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     def test_the_wing_ships_enabled_with_its_files(self):
-        wing = self.cfg["claude_wing"]
-        self.assertTrue(wing["enabled"])
-        self.assertEqual(wing["tiers"], WING["tiers"])
-        self.assertEqual(wing["default_tier"], "sonnet")
-        self.assertEqual(wing["usage_guard"]["soft_percent"], 70)
-        self.assertEqual(wing["usage_guard"]["hard_percent"], 90)
-        self.assertEqual(wing["usage_guard"]["state_path"], "~/.hermes/state/model-router-claude-usage.json")
-        self.assertEqual(wing["log_path"], "~/.hermes/logs/claude-wing.jsonl")
+        settings = self.cfg["claude_delegation"]
+        self.assertTrue(settings["enabled"])
+        self.assertEqual(settings["tiers"], CLAUDE_DELEGATION["tiers"])
+        self.assertEqual(settings["default_tier"], "sonnet")
+        self.assertEqual(settings["usage_guard"]["soft_percent"], 70)
+        self.assertEqual(settings["usage_guard"]["hard_percent"], 90)
+        self.assertEqual(settings["usage_guard"]["state_path"], "~/.hermes/state/model-router-usage.json")
+        self.assertEqual(settings["log_path"], "~/.hermes/logs/claude-delegation.jsonl")
 
     def test_haiku_is_a_known_claude_target(self):
         self.assertIs(self.cfg["callable"]["haiku"], True)
@@ -579,7 +579,7 @@ CONTRACT_TARGETS = ("haiku", "luna", "opus5", "sol", "sonnet5", "terra")
 
 
 def _contract(cfg, *, active, model_param=True):
-    with patch.object(claude_wing, "_ACTIVE", active), \
+    with patch.object(claude_delegation, "_ACTIVE", active), \
          patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
          patch("model_router._tier_cooldown_remaining", return_value=0.0), \
          patch("model_router._recent_account_load", return_value={}):
@@ -604,9 +604,9 @@ class ContractTextTests(unittest.TestCase):
         self.assertNotIn("Route choice for delegated workers", contract)
 
     def test_the_dispatch_phrase_names_the_goal_prefix_route_while_active(self):
-        with patch.object(claude_wing, "_ACTIVE", True):
+        with patch.object(claude_delegation, "_ACTIVE", True):
             self.assertEqual(_dispatch_phrase("terra"), "delegate_task (goal prefix [terra])")
-        with patch.object(claude_wing, "_ACTIVE", False):
+        with patch.object(claude_delegation, "_ACTIVE", False):
             self.assertEqual(_dispatch_phrase("terra"), "model:terra")
             self.assertEqual(_dispatch_phrase("opus5"), "model:opus5")
 
@@ -645,9 +645,9 @@ class ContractTextTests(unittest.TestCase):
 
     def test_the_preference_order_names_the_call(self):
         cfg = _cfg(preferences={"code": ["terra", "sonnet5"]})
-        with patch.object(claude_wing, "_ACTIVE", True):
+        with patch.object(claude_delegation, "_ACTIVE", True):
             active = _preference_sentence(["terra", "sonnet5"], cfg)
-        with patch.object(claude_wing, "_ACTIVE", False):
+        with patch.object(claude_delegation, "_ACTIVE", False):
             inactive = _preference_sentence(["terra", "sonnet5"], cfg)
         self.assertIn("code: terra > sonnet5", active)
         self.assertIn("delegate_claude", active)
@@ -655,14 +655,14 @@ class ContractTextTests(unittest.TestCase):
         self.assertIn("model: parameter", inactive)
 
     def test_the_claude_sentence_covers_haiku_and_the_tool(self):
-        with patch.object(claude_wing, "_ACTIVE", True):
+        with patch.object(claude_delegation, "_ACTIVE", True):
             sentence = _claude_target_sentence(["haiku", "opus5", "sonnet5"], _cfg())
         self.assertIn("haiku", sentence)
         self.assertIn('delegate_claude(tier="haiku"|"sonnet"|"opus")', sentence)
         self.assertIn("Use sonnet5 by default", sentence)
 
     def test_the_redispatch_notice_names_delegate_claude(self):
-        with patch.object(claude_wing, "_ACTIVE", True), \
+        with patch.object(claude_delegation, "_ACTIVE", True), \
              patch("model_router._tier_cooldown_remaining", return_value=0.0), \
              patch("model_router._delegation_target_names", return_value=REDISPATCH_TARGETS):
             instruction = _quota_redispatch_instruction(request_for(envelope()), REDISPATCH_CFG)
@@ -672,7 +672,7 @@ class ContractTextTests(unittest.TestCase):
 
     def test_the_preflight_prefers_a_claude_worker_through_the_tool(self):
         cfg = _cfg(orchestration={"enabled": True, "max_tasks": 2})
-        with patch.object(claude_wing, "_ACTIVE", True), \
+        with patch.object(claude_delegation, "_ACTIVE", True), \
              patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
              patch("model_router._recent_account_load", return_value={}):
             routed = _prepare_orchestration_delegation(_delegating_request(), "plan-x", 2, cfg=cfg)
@@ -688,7 +688,7 @@ class ContractTextTests(unittest.TestCase):
 
     def test_the_preflight_keeps_todays_text_while_the_wing_is_off(self):
         cfg = _cfg(orchestration={"enabled": True, "max_tasks": 2})
-        with patch.object(claude_wing, "_ACTIVE", False), \
+        with patch.object(claude_delegation, "_ACTIVE", False), \
              patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
              patch("model_router._recent_account_load", return_value={}):
             routed = _prepare_orchestration_delegation(_delegating_request(), "plan-x", 2, cfg=cfg)
@@ -724,8 +724,8 @@ def _parent_request(tools=("delegate_task", "delegate_claude")):
 def _note(kind="code", weekly=40.0, cfg=None, active=True, request=None, **kwargs):
     reading = None if weekly is None else _reading(weekly)
     kwargs = {"api_call_count": 1, "turn_id": "t1", "platform": "cli", **kwargs}
-    with patch.object(claude_wing, "_ACTIVE", active), \
-         patch.object(claude_wing, "peek_usage", return_value=reading), \
+    with patch.object(claude_delegation, "_ACTIVE", active), \
+         patch.object(claude_delegation, "peek_usage", return_value=reading), \
          patch("model_router.classify_request", return_value=SimpleNamespace(kind=kind)), \
          patch("model_router._delegation_target_names", return_value=("haiku", "opus5", "sonnet5")), \
          patch("model_router._tier_cooldown_remaining", return_value=0.0):
@@ -765,14 +765,14 @@ class RoutingNoteTests(unittest.TestCase):
 
     def test_no_claude_preference_still_announces_the_wing(self):
         note = _note(cfg=_cfg(preferences={"code": ["terra"]}))
-        self.assertIn("The Claude wing is available through delegate_claude", note)
+        self.assertIn("Claude delegation is available through delegate_claude", note)
 
     def test_a_kind_without_a_preference_keeps_the_built_in_route(self):
         self.assertIn("delegate_task keeps its built-in route", _note(kind="chat"))
 
     def test_the_note_is_only_for_a_root_parents_first_call(self):
         cases = {
-            "inactive wing": dict(active=False),
+            "inactive delegation": dict(active=False),
             "subagent": dict(platform="subagent"),
             "mid-loop": dict(api_call_count=2),
             "no delegation tool": dict(request=_parent_request(tools=("read_file",))),
@@ -797,8 +797,8 @@ class RoutingNoteMiddlewareTests(unittest.TestCase):
                    orchestration={"enabled": orchestration, "max_tasks": 2,
                                   "path": str(Path(directory.name) / "orchestration.jsonl")},
                    logging={"enabled": False}, shadow={"enabled": False})
-        with patch.object(claude_wing, "_ACTIVE", True), \
-             patch.object(claude_wing, "peek_usage", return_value=_reading(40)), \
+        with patch.object(claude_delegation, "_ACTIVE", True), \
+             patch.object(claude_delegation, "peek_usage", return_value=_reading(40)), \
              patch("model_router._load_config", return_value=cfg), \
              patch("model_router._log_decision"), \
              patch("model_router._orchestration_event"), \

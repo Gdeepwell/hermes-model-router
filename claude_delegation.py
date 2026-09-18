@@ -1,10 +1,10 @@
-"""The Claude wing: Claude workers as real Hermes children, next to the Codex workforce.
+"""Claude delegation: Claude workers as real Hermes children, next to the Codex workforce.
 
 Hermes's ``delegate_task`` has one delegation route per process, and on this host
 it is pinned to Codex. ``delegate_claude`` reaches Claude by calling the same
 ``delegate_task`` with a per-call route (``credentials_cfg``) pinned to the
 ``anthropic`` provider -- the mechanism Hermes's own /review uses. Pinning the
-provider, rather than inheriting the parent's, is what keeps the wing working
+provider, rather than inheriting the parent's, is what keeps Claude delegation working
 while the parent itself is on a Codex fallback.
 
 Nothing here is imported from the router at module level: the router imports
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-_logger = logging.getLogger("model_router.claude_wing")
+_logger = logging.getLogger("model_router.claude_delegation")
 
 TIERS: Tuple[str, ...] = ("haiku", "sonnet", "opus")
 # Router target names stay what the config, cooldowns and dashboard already use;
@@ -49,9 +49,9 @@ def is_active() -> bool:
     return _ACTIVE
 
 
-def wing_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """The ``claude_wing`` block with defaults filled in; off unless configured on."""
-    raw = (cfg or {}).get("claude_wing")
+def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The ``claude_delegation`` block with defaults filled in; off unless configured on."""
+    raw = (cfg or {}).get("claude_delegation")
     raw = raw if isinstance(raw, dict) else {}
     merged = deepcopy(DEFAULTS)
     for key, value in raw.items():
@@ -64,7 +64,7 @@ def wing_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def tier_model(tier: str, cfg: Dict[str, Any]) -> str:
-    return str(wing_config(cfg)["tiers"].get(tier) or "").strip()
+    return str(delegation_config(cfg)["tiers"].get(tier) or "").strip()
 
 
 def target_names(cfg: Dict[str, Any]) -> Tuple[str, ...]:
@@ -82,11 +82,11 @@ def target_for_model(model: str, cfg: Dict[str, Any]) -> Optional[str]:
 
 
 def host_check() -> Tuple[bool, str]:
-    """Whether this Hermes still has the two internals the wing stands on.
+    """Whether this Hermes still has the two internals Claude delegation stands on.
 
     ``credentials_cfg`` is commented "internal callers only" upstream, and the
-    active-parent lookup is not on the plugin context. If either moves, the wing
-    must not register rather than fail at call time.
+    active-parent lookup is not on the plugin context. If either moves,
+    delegate_claude must not register rather than fail at call time.
     """
     try:
         from tools.delegate_tool import delegate_task
@@ -102,8 +102,8 @@ def host_check() -> Tuple[bool, str]:
 
 def registration_block(cfg: Dict[str, Any]) -> str:
     """Why ``delegate_claude`` must not be registered, or "" when it may be."""
-    if not wing_config(cfg).get("enabled"):
-        return "claude_wing.enabled is false"
+    if not delegation_config(cfg).get("enabled"):
+        return "claude_delegation.enabled is false"
     switches = cfg.get("callable") or {}
     if not any(switches.get(target) is True for target in TARGET_FOR_TIER.values()):
         return "every Claude target is switched off in `callable`"
@@ -144,16 +144,16 @@ def _num(value: Any) -> Optional[float]:
 
 
 def guard_limits(cfg: Dict[str, Any]) -> Tuple[float, float]:
-    guard = wing_config(cfg)["usage_guard"]
+    guard = delegation_config(cfg)["usage_guard"]
     return float(guard.get("soft_percent", 70)), float(guard.get("hard_percent", 90))
 
 
 def _ttl(cfg: Dict[str, Any]) -> float:
-    return max(1.0, float(wing_config(cfg)["usage_guard"].get("cache_seconds", 300) or 300))
+    return max(1.0, float(delegation_config(cfg)["usage_guard"].get("cache_seconds", 300) or 300))
 
 
 def _state_path(cfg: Dict[str, Any]) -> Optional[Path]:
-    configured = str(wing_config(cfg)["usage_guard"].get("state_path") or "").strip()
+    configured = str(delegation_config(cfg)["usage_guard"].get("state_path") or "").strip()
     return Path(os.path.expanduser(configured)) if configured else None
 
 
@@ -200,7 +200,7 @@ def _fetch_reading() -> Optional[UsageReading]:
     Read raw rather than through ``fetch_account_usage``: the endpoint reports
     utilization as a percentage (checked live 2026-09-18: 5.0 and 13.0), but
     Hermes's reader scales any value <= 1 by 100 -- a 1% session would read as
-    100% and close the wing. Same request, headers and helper Hermes uses.
+    100% and close Claude delegation. Same request, headers and helper Hermes uses.
     """
     try:
         from agent.account_usage import _get_json
@@ -248,7 +248,7 @@ def read_usage(cfg: Dict[str, Any], *, now: Optional[float] = None) -> Optional[
             fresh = replace(fresh, fetched_at=now)
             _USAGE["reading"], _USAGE["failed_at"] = fresh, 0.0
     if fresh is None:
-        _logger.warning("claude_wing: Anthropic usage unavailable; the guard fails open for %ds", int(ttl))
+        _logger.warning("claude_delegation: Anthropic usage unavailable; the guard fails open for %ds", int(ttl))
         return None
     _persist(cfg, fresh)
     return fresh
@@ -262,7 +262,7 @@ def _start_refresh(cfg: Dict[str, Any]) -> None:
             with _USAGE_LOCK:
                 _USAGE["refreshing"] = False
 
-    threading.Thread(target=run, name="claude-wing-usage", daemon=True).start()
+    threading.Thread(target=run, name="claude-delegation-usage", daemon=True).start()
 
 
 def peek_usage(cfg: Dict[str, Any]) -> Optional[UsageReading]:
@@ -284,7 +284,7 @@ def peek_usage(cfg: Dict[str, Any]) -> Optional[UsageReading]:
     return reading
 
 
-def wing_state(cfg: Dict[str, Any], reading: Optional[UsageReading]) -> str:
+def usage_state(cfg: Dict[str, Any], reading: Optional[UsageReading]) -> str:
     if reading is None:
         return "unknown"
     soft, hard = guard_limits(cfg)
@@ -302,10 +302,10 @@ def apply_guard(tier: str, cfg: Dict[str, Any], reading: Optional[UsageReading])
     weekly, session = reading.weekly or 0.0, reading.session or 0.0
     usage = f"{weekly:.0f}%"
     if weekly >= hard:
-        return GuardOutcome(tier, refused=f"Claude wing closed: weekly usage {weekly:.0f}% "
+        return GuardOutcome(tier, refused=f"Claude delegation closed: weekly usage {weekly:.0f}% "
                                           f"(hard limit {hard:.0f}%).", usage=usage)
     if session >= hard:
-        return GuardOutcome(tier, refused=f"Claude wing closed: 5-hour session usage {session:.0f}% "
+        return GuardOutcome(tier, refused=f"Claude delegation closed: 5-hour session usage {session:.0f}% "
                                           f"(hard limit {hard:.0f}%).", usage=usage)
     if weekly >= soft and tier == "opus":
         return GuardOutcome("sonnet", adjusted=f"opus→sonnet (weekly usage {weekly:.0f}%)", usage=usage)
@@ -376,7 +376,7 @@ def _tasks_schema() -> Dict[str, Any]:
 
 
 def build_schema(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    default_tier = wing_config(cfg).get("default_tier") or "sonnet"
+    default_tier = delegation_config(cfg).get("default_tier") or "sonnet"
     return {
         "name": TOOL_NAME,
         "description": _DESCRIPTION,
@@ -400,7 +400,7 @@ def _error(message: str) -> str:
 
 
 def next_codex_route(target: str, cfg: Dict[str, Any]) -> str:
-    """The Codex tier to name when the Claude wing cannot take this target's work."""
+    """The Codex tier to name when Claude delegation cannot take this target's work."""
     from . import _is_callable_tier, _is_routable_tier, _peers_for
 
     def usable(name: str) -> bool:
@@ -457,7 +457,7 @@ def _strip_hidden(tasks: Any) -> Any:
 
 def _audit(cfg: Dict[str, Any], requested: str, used: str, outcome: GuardOutcome, result: str,
            message: str = "") -> None:
-    configured = str(wing_config(cfg).get("log_path") or "").strip()
+    configured = str(delegation_config(cfg).get("log_path") or "").strip()
     if not configured:
         return
     # No "tier" key on purpose: the router's per-account load counts lines by tier,
@@ -516,8 +516,8 @@ def _dispatch(args: Dict[str, Any]) -> str:
     from . import _load_config
 
     cfg = _load_config()
-    wing = wing_config(cfg)
-    requested = str(args.get("tier") or wing.get("default_tier") or "sonnet").strip().casefold()
+    settings = delegation_config(cfg)
+    requested = str(args.get("tier") or settings.get("default_tier") or "sonnet").strip().casefold()
     if requested not in TIERS:
         return _error(f"Unknown tier {requested!r}; use one of: {', '.join(TIERS)}.")
     delegate_task, active_parent = _host()
@@ -539,7 +539,7 @@ def _dispatch(args: Dict[str, Any]) -> str:
         return _error(message)
     model = tier_model(tier, cfg)
     if not model:
-        return _error(f"Claude tier \"{tier}\" has no model under claude_wing.tiers.")
+        return _error(f"Claude tier \"{tier}\" has no model under claude_delegation.tiers.")
 
     raw = delegate_task(
         goal=args.get("goal"),
@@ -583,13 +583,13 @@ def _exempt_from_sequential_deadline() -> bool:
         tool_executor = importlib.import_module("agent.tool_executor")
     except Exception as exc:
         _logger.warning(
-            "claude_wing: could not exempt delegate_claude from the sequential tool deadline: %s", exc
+            "claude_delegation: could not exempt delegate_claude from the sequential tool deadline: %s", exc
         )
         return False
     existing = getattr(tool_executor, "_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS", None)
     if not isinstance(existing, frozenset):
         _logger.warning(
-            "claude_wing: could not exempt delegate_claude from the sequential tool deadline: "
+            "claude_delegation: could not exempt delegate_claude from the sequential tool deadline: "
             "_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS is missing or not a frozenset"
         )
         return False
@@ -598,7 +598,7 @@ def _exempt_from_sequential_deadline() -> bool:
 
 
 def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
-    """Register delegate_claude when the wing is on and the host can carry it."""
+    """Register delegate_claude when Claude delegation is on and the host can carry it."""
     global _ACTIVE
     if cfg is None:
         from . import _load_config
@@ -606,18 +606,18 @@ def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
     reason = registration_block(cfg)
     if reason:
         _ACTIVE = False
-        _logger.info("claude_wing: delegate_claude not registered: %s", reason)
+        _logger.info("claude_delegation: delegate_claude not registered: %s", reason)
         return False
     try:
         handle = ctx.register_tool(name=TOOL_NAME, toolset="delegation", schema=build_schema(cfg),
                                    handler=handle_delegate_claude, description=_DESCRIPTION, emoji="🪶")
     except Exception as exc:
         _ACTIVE = False
-        _logger.warning("claude_wing: registering delegate_claude failed: %s", exc)
+        _logger.warning("claude_delegation: registering delegate_claude failed: %s", exc)
         return False
     if handle is None:
         _ACTIVE = False
-        _logger.info("claude_wing: delegate_claude not registered: ctx.register_tool returned None")
+        _logger.info("claude_delegation: delegate_claude not registered: ctx.register_tool returned None")
         return False
     _ACTIVE = True
     _exempt_from_sequential_deadline()

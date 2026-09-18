@@ -161,11 +161,11 @@ shadow:
   limit: 0
   path: ~/.hermes/logs/spark-shadow-benchmark.jsonl
 
-# Claude workers next to the Codex workforce: delegate_claude runs children on the
-# anthropic provider through Hermes's own delegate_task. The guard reads Anthropic's
-# weekly usage: from soft_percent opus work steps down to sonnet, and from
-# hard_percent the wing refuses and names a Codex tier instead.
-claude_wing:
+# Claude delegation: delegate_claude runs children on the anthropic provider through
+# Hermes's own delegate_task. The guard reads Anthropic's weekly usage: from
+# soft_percent opus work steps down to sonnet, and from hard_percent delegate_claude
+# refuses and names a Codex tier instead.
+claude_delegation:
   enabled: true
   tiers:
     haiku: claude-haiku-4-5-20251001
@@ -176,5 +176,5 @@ claude_wing:
     soft_percent: 70
     hard_percent: 90
     cache_seconds: 300
-    state_path: ~/.hermes/state/model-router-claude-usage.json
-  log_path: ~/.hermes/logs/claude-wing.jsonl
+    state_path: ~/.hermes/state/model-router-usage.json
+  log_path: ~/.hermes/logs/claude-delegation.jsonl
