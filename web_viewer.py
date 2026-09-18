@@ -499,6 +499,10 @@ def _accounts_status(config: dict) -> dict:
 def _save_usage_limits(raw, config: dict):
     if not isinstance(raw, dict):
         return "usage_limits must be an object of account -> {soft_percent, hard_percent}"
+    if not raw:
+        # Nothing to save: leave an absent usage_guard block absent rather than
+        # setdefault()-ing an empty one into existence on every settings save.
+        return None
     accounts = ((config.setdefault("usage_guard", {})).setdefault("accounts", {}))
     for account, values in raw.items():
         if account not in accounts:

@@ -1220,6 +1220,15 @@ class AccountsApiTests(unittest.TestCase):
             self.assertIsNotNone(web_viewer._save_usage_limits(
                 {"nope": {"soft_percent": 10, "hard_percent": 90}}, config))
 
+    def test_an_empty_usage_limits_payload_touches_nothing(self):
+        """M9: setdefault()-ing usage_guard/accounts even for an empty payload
+        added an empty `usage_guard: {accounts: {}}` block to a config that
+        never had one."""
+        config = {"callable": {}, "tier_providers": {}}
+        error = web_viewer._save_usage_limits({}, config)
+        self.assertIsNone(error)
+        self.assertNotIn("usage_guard", config)
+
     def test_save_claude_delegation_updates_and_validates(self):
         with tempfile.TemporaryDirectory() as directory:
             config, _, _ = self._build_config(directory)
