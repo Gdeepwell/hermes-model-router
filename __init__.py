@@ -2197,7 +2197,7 @@ def _model_param_contract(
             "remaining text, and the leaf runs on this provider -- so it is stopped at its first call and "
             "returned for re-dispatch. Claude targets are reached only by calling delegate_claude with tier "
             "\"haiku\", \"sonnet\" or \"opus\". "
-        )
+        ) + _DEFERRED_WING_HINT
     else:
         # The general rule was already here and lost anyway, seven goals running.
         # It shares a paragraph with [spark]/[sol], which *are* prefixes, so
@@ -2535,6 +2535,7 @@ def _prepare_orchestration_delegation(
     model_param = _host_delegate_has_model(request)
     claude_hint = (
         "For real work prefer a native Claude worker through delegate_claude when one is offered. "
+        + _DEFERRED_WING_HINT
         if claude_wing.is_active() else
         "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered. "
     )
@@ -2943,6 +2944,15 @@ def _force_shadow_delegation_if_eligible(kwargs: Dict[str, Any], cfg: Dict[str, 
 
 
 _NOTE_TOOL_NAMES = frozenset({"delegate_task", "mcp__delegate_task", "delegate_claude", "mcp__delegate_claude"})
+# Hermes's Tool Search defers every plugin tool by default: the parent sees only
+# tool_search/tool_describe/tool_call plus a catalog stub, and a direct call to
+# delegate_claude is rejected as unknown until it is loaded once. Every place
+# that tells a parent to call delegate_claude while the wing is active must also
+# say how to reach it.
+_DEFERRED_WING_HINT = (
+    'If delegate_claude is not in your tool list it is a deferred tool: load it once with tool_describe, '
+    'then call it through tool_call with name "delegate_claude". '
+)
 _WING_AVAILABLE_LINE = (
     'The Claude wing is available through delegate_claude: tier "haiku" for quick lookups, "sonnet" as '
     'the default worker, "opus" for hard or consequential work.'
@@ -3026,6 +3036,7 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
         lines.append(f"Claude weekly usage: unknown (soft limit {soft:.0f}%, hard {hard:.0f}%).")
     else:
         lines.append(f"Claude weekly usage {reading.weekly:.0f}% (soft limit {soft:.0f}%, hard {hard:.0f}%).")
+    lines.append(_DEFERRED_WING_HINT.rstrip())
     lines.append("Advisory: if you route differently, say why in one line.")
     return "\n\n" + "\n".join(lines) + "\n"
 
@@ -3087,7 +3098,12 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         )
         # The forced preflight already carries the full contract; the note is for
         # the turns it leaves alone.
-        note = _routing_note(request, kwargs, cfg) if forced is None else ""
+        note = ""
+        if forced is None:
+            try:
+                note = _routing_note(request, kwargs, cfg)
+            except Exception:
+                note = ""
         if forced is None and not redispatch and not note:
             return None
         forced = deepcopy(forced if forced is not None else request)

@@ -7,8 +7,10 @@ network or model call.
 """
 
 import json
+import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -337,6 +339,17 @@ class HandlerTests(unittest.TestCase):
                          ("opus", "sonnet", "lowered"))
         self.assertNotIn("tier", entry)  # keeps it out of the router's per-account load
 
+    def test_a_delegate_task_error_is_audited_as_an_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-wing.jsonl"
+            cfg["claude_wing"]["log_path"] = str(log)
+            self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg,
+                       result={"error": "Delegation depth limit reached"})
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(entry["outcome"], "error")
+        self.assertEqual(entry["message"], "Delegation depth limit reached")
+
 
 class RegisterTests(unittest.TestCase):
     def setUp(self):
@@ -345,7 +358,8 @@ class RegisterTests(unittest.TestCase):
     def test_an_enabled_wing_registers_in_the_delegation_toolset(self):
         ctx = MagicMock()
         with patch.object(claude_wing, "host_check", return_value=(True, "")), \
-             patch.object(claude_wing, "_independent_completions", return_value=False):
+             patch.object(claude_wing, "_independent_completions", return_value=False), \
+             patch.object(claude_wing, "_exempt_from_sequential_deadline", return_value=True):
             self.assertTrue(claude_wing.register(ctx, _cfg()))
         kwargs = ctx.register_tool.call_args.kwargs
         self.assertEqual((kwargs["name"], kwargs["toolset"]), ("delegate_claude", "delegation"))
@@ -359,6 +373,53 @@ class RegisterTests(unittest.TestCase):
         self.assertFalse(claude_wing.register(ctx, cfg))
         ctx.register_tool.assert_not_called()
         self.assertFalse(claude_wing.is_active())
+
+    def test_register_tool_returning_none_means_not_registered(self):
+        ctx = MagicMock()
+        ctx.register_tool.return_value = None
+        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
+             patch.object(claude_wing, "_independent_completions", return_value=False), \
+             patch.object(claude_wing, "_exempt_from_sequential_deadline", return_value=True):
+            self.assertFalse(claude_wing.register(ctx, _cfg()))
+        self.assertFalse(claude_wing.is_active())
+
+    def test_register_calls_the_deadline_exemption_only_after_success(self):
+        ctx = MagicMock()
+        exempt = MagicMock(return_value=True)
+        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
+             patch.object(claude_wing, "_independent_completions", return_value=False), \
+             patch.object(claude_wing, "_exempt_from_sequential_deadline", exempt):
+            self.assertTrue(claude_wing.register(ctx, _cfg()))
+        exempt.assert_called_once_with()
+
+    def test_register_does_not_block_when_the_exemption_fails(self):
+        ctx = MagicMock()
+        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
+             patch.object(claude_wing, "_independent_completions", return_value=False), \
+             patch.object(claude_wing, "_exempt_from_sequential_deadline", return_value=False):
+            self.assertTrue(claude_wing.register(ctx, _cfg()))
+        self.assertTrue(claude_wing.is_active())
+
+
+class SequentialDeadlineExemptionTests(unittest.TestCase):
+    def test_a_fake_module_gains_delegate_claude_and_keeps_existing_members(self):
+        fake = types.ModuleType("agent.tool_executor")
+        fake._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset({"delegate_task", "manage_connections"})
+        with patch.dict(sys.modules, {"agent.tool_executor": fake}):
+            self.assertTrue(claude_wing._exempt_from_sequential_deadline())
+        self.assertEqual(
+            fake._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS,
+            frozenset({"delegate_task", "manage_connections", "delegate_claude"}),
+        )
+
+    def test_a_missing_attribute_returns_false_without_raising(self):
+        fake = types.ModuleType("agent.tool_executor")
+        with patch.dict(sys.modules, {"agent.tool_executor": fake}):
+            self.assertFalse(claude_wing._exempt_from_sequential_deadline())
+
+    def test_an_unimportable_module_returns_false_without_raising(self):
+        with patch.dict(sys.modules, {"agent.tool_executor": None}):
+            self.assertFalse(claude_wing._exempt_from_sequential_deadline())
 
 
 def _hermes_importable():
@@ -379,6 +440,15 @@ class RealHostTests(unittest.TestCase):
     def test_a_leaf_loses_the_delegation_toolset(self):
         from tools.delegate_tool_toolsets import _strip_blocked_tools
         self.assertNotIn("delegation", _strip_blocked_tools(["delegation", "file"]))
+
+    def test_the_exemption_helper_adds_delegate_claude_on_the_real_host(self):
+        import agent.tool_executor as tool_executor
+
+        original = tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS
+        self.addCleanup(setattr, tool_executor, "_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS", original)
+        self.assertTrue(claude_wing._exempt_from_sequential_deadline())
+        self.assertIn("delegate_task", tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS)
+        self.assertIn("delegate_claude", tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS)
 
     def test_the_depth_limit_holds_for_delegate_claude(self):
         """Nothing spawns from an agent at max_spawn_depth, whichever tool asked."""
@@ -529,6 +599,18 @@ class ContractTextTests(unittest.TestCase):
         self.assertIn("Name those targets only in the model parameter", contract)
         self.assertNotIn("delegate_claude", contract)
 
+    def test_the_active_contract_names_the_deferred_tool_hint(self):
+        contract = _contract(_cfg(), active=True)
+        self.assertIn(
+            'If delegate_claude is not in your tool list it is a deferred tool: load it once with '
+            'tool_describe, then call it through tool_call with name "delegate_claude".',
+            contract,
+        )
+
+    def test_an_inactive_contract_has_no_deferred_tool_hint(self):
+        contract = _contract(_cfg(), active=False)
+        self.assertNotIn("deferred tool", contract)
+
     def test_the_preference_order_names_the_call(self):
         cfg = _cfg(preferences={"code": ["terra", "sonnet5"]})
         with patch.object(claude_wing, "_ACTIVE", True):
@@ -566,6 +648,25 @@ class ContractTextTests(unittest.TestCase):
         self.assertIn("prefer a native Claude worker through delegate_claude", text)
         self.assertNotIn("model:opus5 / model:sonnet5", text)
         self.assertNotIn("Set the delegate_task 'model' parameter", text)
+        self.assertIn(
+            'If delegate_claude is not in your tool list it is a deferred tool: load it once with '
+            'tool_describe, then call it through tool_call with name "delegate_claude".',
+            text,
+        )
+
+    def test_the_preflight_keeps_todays_text_while_the_wing_is_off(self):
+        cfg = _cfg(orchestration={"enabled": True, "max_tasks": 2})
+        with patch.object(claude_wing, "_ACTIVE", False), \
+             patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
+             patch("model_router._recent_account_load", return_value={}):
+            routed = _prepare_orchestration_delegation(_delegating_request(), "plan-x", 2, cfg=cfg)
+        text = routed["messages"][-1]["content"]
+        self.assertIn(
+            "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered.",
+            text,
+        )
+        self.assertIn("Set the delegate_task 'model' parameter", text)
+        self.assertNotIn("delegate_claude", text)
 
 
 from model_router import _routing_note, route_llm_request  # noqa: E402
@@ -609,6 +710,15 @@ class RoutingNoteTests(unittest.TestCase):
         self.assertIn("review: sonnet5 > opus5 > terra", note)
         self.assertIn("Claude weekly usage 40% (soft limit 70%, hard 90%).", note)
         self.assertIn("Advisory: if you route differently, say why in one line.", note)
+
+    def test_the_note_names_the_deferred_tool_hint_before_the_advisory_line(self):
+        note = _note()
+        hint = (
+            'If delegate_claude is not in your tool list it is a deferred tool: load it once with '
+            'tool_describe, then call it through tool_call with name "delegate_claude".'
+        )
+        self.assertIn(hint, note)
+        self.assertLess(note.index(hint), note.index("Advisory:"))
 
     def test_the_soft_limit_moves_claude_behind_codex(self):
         note = _note(kind="review", weekly=75.0)
@@ -673,6 +783,13 @@ class RoutingNoteMiddlewareTests(unittest.TestCase):
     def test_a_forced_preflight_carries_the_contract_instead(self):
         routed = self._route(orchestration=True)
         self.assertNotIn("[ROUTER] This turn classifies as", json.dumps(routed["request"]))
+
+    def test_a_broken_routing_note_does_not_drop_the_redispatch_notice(self):
+        """The routing note must never abort the whole response: a raise there
+        must not cost the parent its redispatch notice, or return None entirely."""
+        with patch("model_router._routing_note", side_effect=RuntimeError("boom")):
+            routed = self._route(orchestration=False)
+        self.assertIsNone(routed)
 
 
 if __name__ == "__main__":

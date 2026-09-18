@@ -475,6 +475,18 @@ def _audit(cfg: Dict[str, Any], requested: str, used: str, outcome: GuardOutcome
         pass
 
 
+def _raw_error(raw: Any) -> Optional[str]:
+    """The "error" text when ``raw`` parses as a JSON object carrying one, else None."""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    return str(error) if error else None
+
+
 def _annotate(raw: Any, tier: str, outcome: GuardOutcome) -> Any:
     try:
         payload = json.loads(raw)
@@ -529,7 +541,11 @@ def _dispatch(args: Dict[str, Any]) -> str:
         background=not getattr(parent, "_delegate_depth", 0) > 0,
         credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
     )
-    _audit(cfg, requested, tier, outcome, "lowered" if outcome.adjusted else "ran")
+    error_message = _raw_error(raw)
+    if error_message is not None:
+        _audit(cfg, requested, tier, outcome, "error", error_message[:300])
+    else:
+        _audit(cfg, requested, tier, outcome, "lowered" if outcome.adjusted else "ran")
     return _annotate(raw, tier, outcome)
 
 
@@ -539,6 +555,36 @@ def handle_delegate_claude(args: Dict[str, Any], **_kwargs: Any) -> str:
         return _dispatch(args if isinstance(args, dict) else {})
     except Exception as exc:
         return _error(f"delegate_claude failed: {type(exc).__name__}: {exc}")
+
+
+def _exempt_from_sequential_deadline() -> bool:
+    """Exempt delegate_claude from Hermes's 420s sequential tool deadline.
+
+    A background delegate_task batch runs synchronously when the async pool is
+    full or the session can't take async completions, and such a batch can run
+    long. delegate_task and manage_connections are already exempt
+    (``agent.tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS``); without the same
+    exemption a real delegate_claude batch times out and orphans its workers.
+    Never raises: a host that no longer exposes this set must not block
+    registration.
+    """
+    try:
+        import importlib
+        tool_executor = importlib.import_module("agent.tool_executor")
+    except Exception as exc:
+        _logger.warning(
+            "claude_wing: could not exempt delegate_claude from the sequential tool deadline: %s", exc
+        )
+        return False
+    existing = getattr(tool_executor, "_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS", None)
+    if not isinstance(existing, frozenset):
+        _logger.warning(
+            "claude_wing: could not exempt delegate_claude from the sequential tool deadline: "
+            "_SEQUENTIAL_DEADLINE_EXEMPT_TOOLS is missing or not a frozenset"
+        )
+        return False
+    tool_executor._SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset(existing | {TOOL_NAME})
+    return True
 
 
 def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
@@ -553,11 +599,16 @@ def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
         _logger.info("claude_wing: delegate_claude not registered: %s", reason)
         return False
     try:
-        ctx.register_tool(name=TOOL_NAME, toolset="delegation", schema=build_schema(cfg),
-                          handler=handle_delegate_claude, description=_DESCRIPTION, emoji="🪶")
+        handle = ctx.register_tool(name=TOOL_NAME, toolset="delegation", schema=build_schema(cfg),
+                                   handler=handle_delegate_claude, description=_DESCRIPTION, emoji="🪶")
     except Exception as exc:
         _ACTIVE = False
         _logger.warning("claude_wing: registering delegate_claude failed: %s", exc)
         return False
+    if handle is None:
+        _ACTIVE = False
+        _logger.info("claude_wing: delegate_claude not registered: ctx.register_tool returned None")
+        return False
     _ACTIVE = True
+    _exempt_from_sequential_deadline()
     return True
