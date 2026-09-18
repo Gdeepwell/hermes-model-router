@@ -1,8 +1,10 @@
 import json
 import tempfile
 import threading
+import time
 import subprocess
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -977,3 +979,196 @@ class HaikuDashboardTests(DashboardProbeMixin, unittest.TestCase):
         observed = json.loads(result.stdout)
         self.assertEqual(observed["kinds"], ["haiku"])
         self.assertEqual(observed["summary"]["haiku"], 1)
+
+
+class AccountsApiTests(unittest.TestCase):
+    """The dashboard's per-account view: usage, guard limits, and delegation state,
+    the same shape for every account the router can delegate to."""
+
+    def _build_config(self, directory):
+        state_path = Path(directory) / "usage-state.json"
+        log_path = Path(directory) / "claude-delegation.jsonl"
+        fetched_at = time.time() - 60
+        state_path.write_text(json.dumps({
+            "anthropic": {
+                "weekly": 13, "session": 5,
+                "weekly_resets_at": "2026-09-24T16:00:00+00:00",
+                "session_resets_at": None,
+                "fetched_at": fetched_at,
+            },
+        }), encoding="utf-8")
+        log_path.write_text("\n".join([
+            json.dumps({"event": "registration", "registered": True, "reason": ""}),
+            json.dumps({"event": "delegate_claude", "session_id": "s1", "turn_id": "t1", "outcome": "ran"}),
+            json.dumps({"event": "delegate_claude", "session_id": "s1", "turn_id": "t2", "outcome": "refused"}),
+        ]), encoding="utf-8")
+        config = {
+            "callable": {
+                "luna": True, "terra": True, "sol": True,
+                "haiku": True, "sonnet5": True, "opus5": True,
+                "qwen": False,
+            },
+            "tier_providers": {
+                "luna": "openai-codex", "terra": "openai-codex", "sol": "openai-codex",
+                "haiku": "anthropic", "sonnet5": "anthropic", "opus5": "anthropic",
+                "qwen": "qwen-token",
+            },
+            "usage_guard": {
+                "state_path": str(state_path),
+                "accounts": {
+                    "anthropic": {"soft_percent": 70, "hard_percent": 90, "step_down": {"opus5": "sonnet5"}},
+                    "openai-codex": {"soft_percent": 70, "hard_percent": 90, "step_down": {"sol": "terra"}},
+                },
+            },
+            "claude_delegation": {
+                "enabled": True,
+                "default_tier": "sonnet",
+                "log_path": str(log_path),
+            },
+        }
+        return config, state_path, log_path
+
+    def setUp(self):
+        import model_router
+
+        self.model_router = model_router
+        model_router.usage_guard._reset_cache()
+
+    def tearDown(self):
+        self.model_router.usage_guard._reset_cache()
+
+    def test_accounts_status_covers_every_account_with_a_callable_tier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+
+        # Qwen has no callable tier, so it is absent entirely.
+        self.assertEqual(set(accounts.keys()), {"openai-codex", "anthropic"})
+
+        claude = accounts["anthropic"]
+        self.assertEqual(claude["label"], "Claude")
+        self.assertEqual(claude["state"], "open")
+        self.assertEqual(claude["usage"]["weekly"], 13)
+        self.assertTrue(50 <= claude["usage_age_seconds"] <= 120)
+        self.assertIs(claude["guard"], True)
+        self.assertEqual(claude["soft_percent"], 70)
+        self.assertEqual(claude["delegation"], {
+            "tool": "delegate_claude",
+            "enabled": True,
+            "registered": True,
+            "restart_needed": False,
+            "default_tier": "sonnet",
+            "tiers": list(self.model_router.claude_delegation.TIERS),
+        })
+
+        codex = accounts["openai-codex"]
+        self.assertIsNone(codex["usage"])
+        self.assertEqual(codex["state"], "unknown")
+        self.assertEqual(codex["delegation"], {"tool": "delegate_task", "always_on": True})
+
+    def test_accounts_status_never_fetches_usage(self):
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            anthropic_fetcher = MagicMock()
+            codex_fetcher = MagicMock()
+            with patch.dict(self.model_router.usage_guard.FETCHERS,
+                             {"anthropic": anthropic_fetcher, "openai-codex": codex_fetcher}), \
+                 patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                web_viewer._accounts_status(config)
+            anthropic_fetcher.assert_not_called()
+            codex_fetcher.assert_not_called()
+
+    def test_save_usage_limits_updates_and_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+
+            error = web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 60, "hard_percent": 85}}, config
+            )
+            self.assertIsNone(error)
+            self.assertEqual(config["usage_guard"]["accounts"]["anthropic"]["soft_percent"], 60)
+            self.assertEqual(config["usage_guard"]["accounts"]["anthropic"]["hard_percent"], 85)
+
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 90, "hard_percent": 85}}, config))
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 10, "hard_percent": 150}}, config))
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 0, "hard_percent": 90}}, config))
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"nope": {"soft_percent": 10, "hard_percent": 90}}, config))
+
+    def test_save_claude_delegation_updates_and_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+
+            error = web_viewer._save_claude_delegation(
+                {"enabled": False, "default_tier": "haiku"}, config
+            )
+            self.assertIsNone(error)
+            self.assertEqual(config["claude_delegation"]["enabled"], False)
+            self.assertEqual(config["claude_delegation"]["default_tier"], "haiku")
+
+            self.assertIsNotNone(web_viewer._save_claude_delegation({"default_tier": "gpt"}, config))
+            self.assertIsNotNone(web_viewer._save_claude_delegation({"enabled": "yes"}, config))
+
+    def test_read_delegation_log_separates_audits_from_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            audits, registration = web_viewer._read_delegation_log(config)
+            self.assertEqual(len(audits), 2)
+            self.assertEqual({a["outcome"] for a in audits}, {"ran", "refused"})
+            self.assertTrue(all(a["session_id"] == "s1" for a in audits))
+            self.assertEqual(registration, {"event": "registration", "registered": True, "reason": ""})
+
+    def test_usage_refresh_endpoint_reads_through_the_shared_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            config_path = Path(directory) / "router_config.yaml"
+            with open(config_path, "w", encoding="utf-8") as f:
+                web_viewer.yaml.dump(config, f)
+
+            reading = self.model_router.usage_guard.Reading(
+                weekly=20.0, session=4.0,
+                weekly_resets_at="2026-09-25T00:00:00+00:00", session_resets_at=None,
+                fetched_at=time.time(),
+            )
+
+            def fake_read(account, cfg):
+                # Mimics the real read()'s cache side effect, without a network call.
+                self.model_router.usage_guard._slot(account)["reading"] = reading
+                return reading
+
+            with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+                 patch.object(self.model_router.usage_guard, "read", side_effect=fake_read) as mocked_read:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=anthropic",
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(request) as response:
+                        status = response.status
+                        payload = json.load(response)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["account"]["usage"]["weekly"], 20.0)
+                    mocked_read.assert_called_once()
+
+                    bad_request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=nope",
+                        method="POST",
+                    )
+                    try:
+                        urllib.request.urlopen(bad_request)
+                        self.fail("expected HTTPError for unknown account")
+                    except urllib.error.HTTPError as exc:
+                        self.assertEqual(exc.code, 400)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)

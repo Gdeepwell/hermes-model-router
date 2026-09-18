@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -369,6 +370,121 @@ def _router_status() -> dict:
         }
     except Exception:
         return empty
+
+
+def _tier_accounts(config: dict) -> dict:
+    return {str(t): str(a) for t, a in (config.get("tier_providers") or {}).items()}
+
+
+def _delegation_log_path(config: dict):
+    configured = str((config.get("claude_delegation") or {}).get("log_path") or "").strip()
+    return Path(configured).expanduser() if configured else None
+
+
+def _read_delegation_log(config: dict, limit: int = 500):
+    """(audit lines, latest registration line) from claude-delegation.jsonl; malformed lines skipped."""
+    path = _delegation_log_path(config)
+    audits, registration = [], None
+    if path is None or not path.exists():
+        return audits, registration
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-max(limit * 2, limit):]
+    except OSError:
+        return audits, registration
+    for raw in lines:
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("event") == "registration":
+            registration = entry
+        elif entry.get("event") == "delegate_claude":
+            audits.append(entry)
+    return audits[-limit:], registration
+
+
+def _accounts_status(config: dict) -> dict:
+    """One object per account that has a callable tier, in the same shape for every account."""
+    router = _router_module()
+    guard = getattr(router, "usage_guard", None) if router else None
+    delegation = getattr(router, "claude_delegation", None) if router else None
+    callable_tiers = {t for t, on in (config.get("callable") or {}).items() if on is True}
+    tiers_by_account: dict = {}
+    for tier, account in _tier_accounts(config).items():
+        if tier in callable_tiers:
+            tiers_by_account.setdefault(account, []).append(tier)
+    _audits, registration = _read_delegation_log(config)
+    now = time.time()
+    accounts = {}
+    for account, tiers in sorted(tiers_by_account.items()):
+        limits = guard.account_limits(account, config) if guard else None
+        reading = guard.cached(account, config) if guard else None
+        state = guard.state(account, config, reading) if guard else "unknown"
+        label = guard.account_label(account) if guard else account
+        item = {
+            "label": label,
+            "tiers": sorted(tiers),
+            "state": state,
+            "usage": None if reading is None else {
+                "weekly": reading.weekly, "session": reading.session,
+                "weekly_resets_at": reading.weekly_resets_at, "session_resets_at": reading.session_resets_at,
+            },
+            "usage_age_seconds": None if reading is None else max(0, int(now - reading.fetched_at)),
+            "has_usage_source": bool(guard and guard.has_fetcher(account)),
+            "guard": limits is not None,
+            "soft_percent": limits["soft_percent"] if limits else None,
+            "hard_percent": limits["hard_percent"] if limits else None,
+            "step_down": limits["step_down"] if limits else {},
+        }
+        if account == "anthropic":
+            block = config.get("claude_delegation") or {}
+            enabled = bool(block.get("enabled"))
+            registered = bool(registration and registration.get("registered"))
+            item["delegation"] = {
+                "tool": "delegate_claude", "enabled": enabled, "registered": registered,
+                "restart_needed": enabled != registered,
+                "default_tier": str(block.get("default_tier") or "sonnet"),
+                "tiers": list(getattr(delegation, "TIERS", ("haiku", "sonnet", "opus"))),
+            }
+        else:
+            item["delegation"] = {"tool": "delegate_task", "always_on": True}
+        accounts[account] = item
+    return accounts
+
+
+def _save_usage_limits(raw, config: dict):
+    if not isinstance(raw, dict):
+        return "usage_limits must be an object of account -> {soft_percent, hard_percent}"
+    accounts = ((config.setdefault("usage_guard", {})).setdefault("accounts", {}))
+    for account, values in raw.items():
+        if account not in accounts:
+            return f"No usage guard is configured for account '{account}'"
+        try:
+            soft, hard = float(values["soft_percent"]), float(values["hard_percent"])
+        except Exception:
+            return f"Limits for '{account}' need numeric soft_percent and hard_percent"
+        if not (0 < soft < hard <= 100):
+            return f"Limits for '{account}' must satisfy 0 < soft < hard <= 100"
+        accounts[account]["soft_percent"], accounts[account]["hard_percent"] = soft, hard
+    return None
+
+
+def _save_claude_delegation(raw, config: dict):
+    if not isinstance(raw, dict):
+        return "claude_delegation must be an object"
+    block = config.setdefault("claude_delegation", {})
+    if "enabled" in raw:
+        if not isinstance(raw["enabled"], bool):
+            return "claude_delegation.enabled must be true or false"
+        block["enabled"] = raw["enabled"]
+    if "default_tier" in raw:
+        tier = str(raw["default_tier"])
+        if tier not in ("haiku", "sonnet", "opus"):
+            return f"Unknown Claude tier '{tier}'"
+        block["default_tier"] = tier
+    return None
 
 
 HTML = r'''<!doctype html>
@@ -1254,6 +1370,24 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         return
                     config["preferences"] = cleaned
+                if "usage_limits" in data:
+                    error = _save_usage_limits(data["usage_limits"], config)
+                    if error:
+                        self._send(
+                            400,
+                            json.dumps({"error": error, "success": False}).encode("utf-8"),
+                            "application/json",
+                        )
+                        return
+                if "claude_delegation" in data:
+                    error = _save_claude_delegation(data["claude_delegation"], config)
+                    if error:
+                        self._send(
+                            400,
+                            json.dumps({"error": error, "success": False}).encode("utf-8"),
+                            "application/json",
+                        )
+                        return
                 if "default_model" in data:
                     error = _save_default_model(str(data["default_model"]), config)
                     if error:
@@ -1269,6 +1403,23 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"success": True}).encode("utf-8"), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e), "success": False}).encode("utf-8"), "application/json")
+            return
+        if parsed.path == "/api/usage/refresh":
+            account = (parse_qs(parsed.query).get("account") or [""])[0]
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                router = _router_module()
+                status = _accounts_status(config)
+                if account not in status or router is None:
+                    self._send(400, json.dumps({"error": f"Unknown account '{account}'"}).encode("utf-8"),
+                               "application/json")
+                    return
+                router.usage_guard.read(account, config)
+                self._send(200, json.dumps({"account": _accounts_status(config)[account]}).encode("utf-8"),
+                           "application/json")
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode("utf-8"), "application/json")
             return
         self._send(404, b'{"error":"not found"}', "application/json")
 
@@ -1308,6 +1459,11 @@ class Handler(BaseHTTPRequestHandler):
             entries, selected_root_count = select_recent_root_closure(
                 source_entries, activity, requested_root_limit
             )
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    config_for_log = yaml.safe_load(f) or {} if yaml is not None else {}
+            except Exception:
+                config_for_log = {}
             body = json.dumps(
                 {
                     "entries": entries,
@@ -1315,6 +1471,7 @@ class Handler(BaseHTTPRequestHandler):
                     "selected_root_count": selected_root_count,
                     "source_entry_count": len(source_entries),
                     "raw_history_limit": RAW_HISTORY_LIMIT,
+                    "delegations": _read_delegation_log(config_for_log)[0],
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
@@ -1341,6 +1498,8 @@ class Handler(BaseHTTPRequestHandler):
                         "children": _hermes_chain("delegation", "fallback_providers"),
                     },
                     "fallback_options": _fallback_chain_options(config),
+                    "accounts": _accounts_status(config),
+                    "tier_accounts": _tier_accounts(config),
                     # ``routable`` (which names the router can serve itself, as opposed to
                     # delegation-only targets) already comes from _router_status().
                     **_router_status(),
