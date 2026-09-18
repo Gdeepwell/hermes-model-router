@@ -1290,6 +1290,26 @@ class AccountsApiTests(unittest.TestCase):
             self.assertEqual(audits[0]["session_id"], "s2")
             self.assertIsNone(registration)
 
+    def test_registration_is_found_within_the_tail_regardless_of_the_audit_limit(self):
+        """M7: the old code additionally windowed the already-tail-restricted
+        lines down to `limit*2`, so a registration line older than that second
+        window (but still well within the tail bytes) was missed even though
+        it was right there in what got read."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = self._build_config(directory)
+            registration = json.dumps({"event": "registration", "registered": True, "reason": ""})
+            audits = [
+                json.dumps({"event": "delegate_claude", "session_id": f"s{i}",
+                            "turn_id": f"t{i}", "outcome": "ran"})
+                for i in range(10)
+            ]
+            log_path.write_text("\n".join([registration] + audits), encoding="utf-8")
+
+            _audits, found = web_viewer._read_delegation_log(config, limit=2)
+
+            self.assertEqual(found, {"event": "registration", "registered": True, "reason": ""})
+            self.assertEqual(len(_audits), 2)
+
     def test_usage_refresh_endpoint_reads_through_the_shared_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             config, _, _ = self._build_config(directory)
@@ -1444,6 +1464,27 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
                              delegation=dict(self.CLAUDE_INFO["delegation"], restart_needed=True))
         restarting = self._card("anthropic", restart_info)
         self.assertIn("account.delegation.restart", restarting)
+
+    def test_the_live_and_restart_badge_lives_in_the_card_header_not_the_delegation_row(self):
+        """M7: it used to sit inside the Delegation row; the card header (next
+        to the state badge) is where the other at-a-glance status lives."""
+        registered = self._card("anthropic", self.CLAUDE_INFO)
+        head_start = registered.index('class="account-head"')
+        head_end = registered.index('</div>', head_start)
+        head = registered[head_start:head_end]
+        self.assertIn("account.delegation.live", head)
+
+        delegation_row_start = registered.index('class="account-row delegation"')
+        delegation_row_end = registered.index('</div></div>', delegation_row_start)
+        delegation_row = registered[delegation_row_start:delegation_row_end]
+        self.assertNotIn("account.delegation.live", delegation_row)
+
+        restart_info = dict(self.CLAUDE_INFO,
+                             delegation=dict(self.CLAUDE_INFO["delegation"], restart_needed=True))
+        restarting = self._card("anthropic", restart_info)
+        restart_head_start = restarting.index('class="account-head"')
+        restart_head_end = restarting.index('</div>', restart_head_start)
+        self.assertIn("account.delegation.restart", restarting[restart_head_start:restart_head_end])
 
     def test_codex_card_specifics(self):
         codex_card = self._card("openai-codex", self.CODEX_INFO)

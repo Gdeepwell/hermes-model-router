@@ -425,7 +425,12 @@ def _read_delegation_log(config: dict, limit: int = 500):
             lines = handle.readlines()
     except OSError:
         return audits, registration
-    for raw in lines[-max(limit * 2, limit):]:
+    # The registration line is looked for across the WHOLE tail (already
+    # bounded by _DELEGATION_LOG_TAIL_BYTES above), independent of `limit`:
+    # windowing it down further to the last `limit*2` lines could drop a
+    # registration that was still well within what got read, just older than
+    # that second, audit-sized window.
+    for raw in lines:
         try:
             entry = json.loads(raw.decode("utf-8"))
         except Exception:
@@ -1061,9 +1066,12 @@ function accountCard(account,info){const callable=currentConfig.callable||{},coo
   const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button></div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button></div>`):`<div class="usage-none">${t('account.usage.none')}</div>`;
   const off=info.guard?'':'disabled',step=Object.entries(info.step_down||{}).map(([a,b])=>`${a} → ${b}`).join(', ');
   const limits=`<label>${t('account.limits.soft')} <input type="number" min="1" max="99" data-limit="soft" data-account="${account}" value="${info.soft_percent??''}" ${off}>%</label> <label>${t('account.limits.hard')} <input type="number" min="2" max="100" data-limit="hard" data-account="${account}" value="${info.hard_percent??''}" ${off}>%</label>${step?` <span class="stepdown">${t('account.limits.stepdown')}: ${step}</span>`:''}`;
-  const delegation=d.tool==='delegate_claude'?`<label class="switch"><input type="checkbox" data-account-toggle="${account}" ${d.enabled?'checked':''}><span class="slider"></span></label> ${t('account.delegation.via').replace('{tool}','delegate_claude')} · ${t('account.delegation.default_tier')} <select data-default-tier="${account}">${(d.tiers||[]).map(x=>`<option value="${x}" ${x===d.default_tier?'selected':''}>${x}</option>`).join('')}</select> ${d.restart_needed?`<span class="restart">${t('account.delegation.restart')}</span>`:(d.registered?`<span class="live">${t('account.delegation.live')}</span>`:'')}`:`${t('account.delegation.via').replace('{tool}',d.tool||'delegate_task')} · ${t('account.delegation.always')}`;
+  const delegation=d.tool==='delegate_claude'?`<label class="switch"><input type="checkbox" data-account-toggle="${account}" ${d.enabled?'checked':''}><span class="slider"></span></label> ${t('account.delegation.via').replace('{tool}','delegate_claude')} · ${t('account.delegation.default_tier')} <select data-default-tier="${account}">${(d.tiers||[]).map(x=>`<option value="${x}" ${x===d.default_tier?'selected':''}>${x}</option>`).join('')}</select>`:`${t('account.delegation.via').replace('{tool}',d.tool||'delegate_task')} · ${t('account.delegation.always')}`;
+  // M7: the live/restart badge moved out of the Delegation row and into the
+  // card header, next to the state badge -- the other at-a-glance status.
+  const liveBadge=d.tool!=='delegate_claude'?'':d.restart_needed?` <span class="restart">${t('account.delegation.restart')}</span>`:(d.registered?` <span class="live">${t('account.delegation.live')}</span>`:'');
   const stale=info.usage_age_seconds!=null&&info.usage_age_seconds>600;
-  return `<div class="account-card ${account}${stale?' stale':''}"><div class="account-head"><b>${info.label}</b> <span class="state-badge ${info.state}">${t('account.state.'+info.state)}</span></div>`
+  return `<div class="account-card ${account}${stale?' stale':''}"><div class="account-head"><b>${info.label}</b> <span class="state-badge ${info.state}">${t('account.state.'+info.state)}</span>${liveBadge}</div>`
     +`<div class="account-row models"><span>${t('account.models')}</span><div>${models}</div></div>`
     +`<div class="account-row usage"><span>${t('account.usage')}</span><div>${usage}</div></div>`
     +`<div class="account-row limits"><span>${t('account.limits')}</span><div>${limits}</div></div>`
