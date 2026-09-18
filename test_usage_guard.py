@@ -348,6 +348,21 @@ class CodexStepDownTests(unittest.TestCase):
         self.assertEqual(decision.tier, "terra")
         self.assertIn("usage hard limit: sol→terra", decision.reason)
 
+    def test_the_hard_session_limit_reason_names_the_session_window_not_weekly(self):
+        """M10: the hard limit can trigger on either window; the reason must
+        say which one actually did, not always claim "weekly"."""
+        with patch.object(usage_guard, "peek",
+                          side_effect=lambda account, cfg: _reading(75.0, session=95.0)
+                          if account == "openai-codex" else None):
+            decision = _usage_step_down(self._sol(kind="long"), ROUTER_CFG)
+        self.assertIn("usage hard limit: sol→terra (session 95%)", decision.reason)
+        self.assertNotIn("weekly 75%", decision.reason)
+
+    def test_the_hard_weekly_limit_reason_still_names_weekly(self):
+        with _peek(**{"openai-codex": 95.0}):
+            decision = _usage_step_down(self._sol(kind="long"), ROUTER_CFG)
+        self.assertIn("usage hard limit: sol→terra (weekly 95%)", decision.reason)
+
     def test_nothing_changes_below_the_limit_when_unknown_or_unguarded(self):
         for peeked, cfg in (({"openai-codex": 50.0}, ROUTER_CFG), ({}, ROUTER_CFG),
                             ({"openai-codex": 99.0}, {k: v for k, v in ROUTER_CFG.items() if k != "usage_guard"})):

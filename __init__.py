@@ -551,10 +551,11 @@ def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecis
         account = _account_of(decision.tier, cfg)
         if not account or not usage_guard.guarded(account, cfg):
             return decision
-        outcome = usage_guard.apply(account, decision.tier, cfg, usage_guard.peek(account, cfg))
+        reading = usage_guard.peek(account, cfg)
+        outcome = usage_guard.apply(account, decision.tier, cfg, reading)
         if outcome.adjusted:
-            label = "soft"
-            target = outcome.tier
+            label, target = "soft", outcome.tier
+            window_reason = f"weekly {outcome.usage}"
         elif outcome.refused:
             # The hard limit refuses the call outright rather than naming a
             # step-down target, so the target comes from the same step_down
@@ -566,12 +567,20 @@ def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecis
             if not target:
                 return decision
             label = "hard"
+            # M10: the hard limit can trigger on either window; name whichever
+            # one actually did rather than always claiming "weekly".
+            hard_percent = limits.get("hard_percent", 90.0)
+            session_value = reading.session if reading is not None else None
+            if session_value is not None and session_value >= hard_percent:
+                window_reason = f"session {session_value:.0f}%"
+            else:
+                window_reason = f"weekly {outcome.usage}"
         else:
             return decision
         if not _is_routable_tier(target, cfg) or not _is_callable_tier(target, cfg):
             return replace(decision, reason=f"{decision.reason}; usage {label} limit: "
                                             f"{decision.tier}→{target} skipped ({target} unavailable)")
-        step_reason = f"usage {label} limit: {decision.tier}→{target} (weekly {outcome.usage})"
+        step_reason = f"usage {label} limit: {decision.tier}→{target} ({window_reason})"
         stepped = _decision(target, f"{decision.reason}; {step_reason}", cfg)
         return replace(stepped, kind=decision.kind)
     except Exception:

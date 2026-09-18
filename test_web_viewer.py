@@ -1186,6 +1186,17 @@ class AccountsApiTests(unittest.TestCase):
         self.assertIn("anthropic", accounts)
         self.assertEqual(set(accounts["anthropic"]["tiers"]), {"haiku", "sonnet5", "opus5"})
 
+    def test_accounts_status_serves_cache_seconds_for_staleness(self):
+        """M10: the dashboard greys out a card at 2x cache_seconds, so that
+        value has to travel with the account, not be assumed client-side."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            config["usage_guard"]["cache_seconds"] = 120
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+        self.assertEqual(accounts["anthropic"]["cache_seconds"], 120)
+        self.assertEqual(accounts["openai-codex"]["cache_seconds"], 120)
+
     def test_accounts_status_never_fetches_usage(self):
         from unittest.mock import MagicMock
 
@@ -1506,6 +1517,25 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('data-limit="soft" data-account="qwen-token" value="" disabled', card)
         self.assertIn('data-limit="hard" data-account="qwen-token" value="" disabled', card)
 
+    def test_cooldown_pill_shows_its_reason(self):
+        """M10: the old UI showed why a tier is cooling, not just for how long."""
+        config = {
+            "callable": {}, "cooldowns": {"luna": {"seconds": 120, "reason": "3 failures within 60s"}},
+            "load": {}, "window_minutes": 60, "accounts": {"openai-codex": self.CODEX_INFO},
+        }
+        script = (f"let currentConfig={json.dumps(config)};"
+                  f"console.log(accountCard('openai-codex',currentConfig.accounts['openai-codex']));")
+        out = self._run(script)
+        self.assertIn("3 failures within 60s", out)
+
+    def test_a_card_greys_out_at_twice_the_cache_seconds_not_a_fixed_ten_minutes(self):
+        """M10: staleness used to be a hardcoded 600s; it now follows 2x
+        whatever cache_seconds the accounts payload actually served."""
+        fresh_info = dict(self.CLAUDE_INFO, usage_age_seconds=250, cache_seconds=200)
+        stale_info = dict(self.CLAUDE_INFO, usage_age_seconds=250, cache_seconds=100)
+        self.assertNotIn(' stale', self._card("anthropic", fresh_info))
+        self.assertIn(' stale', self._card("anthropic", stale_info))
+
     def test_usage_row_places_soft_and_hard_ticks(self):
         script = "console.log(usageRow('account.usage.week',55,null,70,90));"
         row = self._run(script)
@@ -1605,6 +1635,18 @@ class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('style="left:70%"', out)
         self.assertIn('style="left:90%"', out)
         self.assertIn('75%', out)
+
+    def test_compact_usage_color_follows_state_not_weekly_percent(self):
+        """M10: an account can be `closed` on its session window while its
+        weekly percent alone would still read green; the compact bar must
+        show the account's actual state, not recompute a color from weekly."""
+        info = {
+            "state": "closed", "has_usage_source": True, "soft_percent": 70, "hard_percent": 90,
+            "usage": {"weekly": 10, "weekly_resets_at": None, "session": 95},
+            "usage_age_seconds": 30,
+        }
+        out = self._run(f"console.log(compactUsage({json.dumps(info)}));")
+        self.assertIn("background:#ff6b7a", out)
 
     def test_compact_usage_with_no_usage_source_shows_the_none_message(self):
         out = self._run(f"console.log(compactUsage({json.dumps({'has_usage_source': False})}));")
