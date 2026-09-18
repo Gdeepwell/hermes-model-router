@@ -858,6 +858,127 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         for text in (english, hungarian):
             self.assertIn("~/.hermes/config.yaml", text)
 
+    def test_options_include_every_router_model_and_a_claude_tier(self):
+        """Restricting the picker to Hermes delegation targets alone rejected the
+        operator's own orchestrator chain, which named this router's own account
+        (openai-codex/gpt-5.6-sol) -- never a Hermes delegation target in the
+        first place."""
+        router_cfg = {
+            "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+            "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
+            "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5"}},
+        }
+        with patch.object(web_viewer, "_read_hermes_config", return_value={}):
+            options = web_viewer._fallback_chain_options(router_cfg)
+        self.assertIn({"key": "sol", "provider": "openai-codex", "model": "gpt-5.6-sol"}, options)
+        self.assertIn({"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"}, options)
+
+    def test_options_still_include_the_hermes_delegation_targets(self):
+        router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
+        with patch.object(web_viewer, "_read_hermes_config",
+                          return_value={"delegation": {"targets": {
+                              "qwen": {"provider": "qwen-token", "model": "qwen3.7-plus"}}}}):
+            options = web_viewer._fallback_chain_options(router_cfg)
+        self.assertIn({"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"}, options)
+
+    def test_a_route_already_in_the_saved_chain_can_never_fail_a_save(self):
+        """Measured live 2026-09-18: every settings save 400'd and reverted every
+        toggle, because the operator's real orchestrator chain named a route
+        (openai-codex/gpt-5.6-sol) the old picker never offered. Whatever is
+        already saved must always be re-acceptable, even if the picker's own
+        options do not (any longer, or yet) include it."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text(
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "delegation:\n  targets:\n"
+                "    opus5:\n      provider: anthropic\n      model: claude-opus-5\n"
+                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
+                encoding="utf-8")
+            router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]}, router_cfg)
+            self.assertIsNone(error)
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["fallback_providers"][0]["model"], "gpt-5.6-sol")
+
+    def test_an_unknown_route_outside_the_saved_chain_is_still_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text(
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "delegation:\n  targets: {}\n",
+                encoding="utf-8")
+            router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [{"provider": "evil", "model": "x"}]}, router_cfg)
+            self.assertIsNotNone(error)
+            self.assertIn("Unknown route", error)
+
+    def test_the_operators_live_payload_saves_instead_of_reverting(self):
+        """End-to-end reproduction of the live failure: a real POST /api/config
+        with the operator's exact settings-page payload must now return 200 and
+        actually write the callable change, instead of 400ing and leaving the
+        page to reload the old config over every toggle."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "router_config.yaml"
+            router_cfg = {
+                "callable": {"terra": True, "sol": True},
+                "default_model": "terra",
+                "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+                "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
+                "preferences": {},
+                "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5"}},
+            }
+            with open(config_path, "w", encoding="utf-8") as f:
+                web_viewer.yaml.dump(router_cfg, f)
+
+            hermes_path = Path(directory) / "hermes-config.yaml"
+            hermes_path.write_text(
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "delegation:\n  targets:\n"
+                "    opus5:\n      provider: anthropic\n      model: claude-opus-5\n"
+                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
+                encoding="utf-8")
+
+            payload = json.dumps({
+                "callable": {"terra": True, "sol": False},
+                "default_model": "terra",
+                "preferences": {},
+                "hermes_fallback": {"orchestrator": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]},
+                "usage_limits": {},
+            }).encode("utf-8")
+
+            with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+                 patch.object(web_viewer, "HERMES_CONFIG_PATH", hermes_path):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/config",
+                        data=payload, method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request) as response:
+                        status = response.status
+                        body = json.load(response)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+            self.assertEqual(status, 200)
+            self.assertTrue(body.get("success"))
+            written = web_viewer.yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(written["callable"]["sol"], False)
+
 
 class CooldownPillLayoutTests(DashboardProbeMixin, unittest.TestCase):
     """A long cooldown reason must stay inside its card.

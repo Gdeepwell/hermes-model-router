@@ -88,19 +88,29 @@ def _save_hermes_fallback(payload, router_cfg: dict):
     if not isinstance(payload, dict):
         return "hermes_fallback must be an object"
     options = _fallback_chain_options(router_cfg)
+    config = _read_hermes_config()
+    if not config:
+        return "The Hermes config could not be read; refusing to overwrite it"
+    # Whatever is already saved is always accepted, even when it names a route the
+    # picker no longer (or never did) offer -- a chain the operator already has
+    # configured, elsewhere, must never be the reason a save 400s.
+    already_saved = {
+        "orchestrator": _hermes_chain("fallback_providers"),
+        "children": _hermes_chain("delegation", "fallback_providers"),
+    }
     chains = {}
     for key, label in (("orchestrator", "orchestrator"), ("children", "delegated children")):
         if key not in payload:
             continue
-        chain, error = _clean_fallback_chain(payload[key], options)
+        allowed = options + [
+            {"key": "", "provider": e["provider"], "model": e["model"]} for e in already_saved[key]
+        ]
+        chain, error = _clean_fallback_chain(payload[key], allowed)
         if error:
             return f"{label}: {error}"
         chains[key] = chain
     if not chains:
         return None
-    config = _read_hermes_config()
-    if not config:
-        return "The Hermes config could not be read; refusing to overwrite it"
     if "orchestrator" in chains:
         config["fallback_providers"] = chains["orchestrator"]
     if "children" in chains:
@@ -205,21 +215,49 @@ def _save_default_model(requested: str, config: dict) -> str | None:
     return None
 
 
-def _fallback_chain_options(router_cfg: dict) -> list:
-    """Accounts a fallback entry may name, taken from the delegation targets.
+# Router target names stay what the config, cooldowns and dashboard already use;
+# claude_delegation.py speaks in short tier names ("haiku"/"sonnet"/"opus"). Mirrored
+# here rather than imported so this file keeps working as a standalone script.
+_CLAUDE_TARGET_FOR_TIER = {"haiku": "haiku", "sonnet": "sonnet5", "opus": "opus5"}
 
-    Sourced from Hermes's own ``delegation.targets`` rather than a hardcoded list so
-    the picker cannot offer a route the installation does not actually have.
+
+def _fallback_chain_options(router_cfg: dict) -> list:
+    """Every route a fallback entry may name: this router's own models, its Claude
+    delegation tiers, and Hermes's own ``delegation.targets``.
+
+    Restricting this to Hermes delegation targets alone rejected a chain that named
+    a route this installation plainly has -- the router's own account, or a Claude
+    tier -- because it was never registered as a Hermes delegation target. Offering
+    every route the installation actually has, from every source that knows about
+    one, is what makes the picker (and a save) match what is really configured.
     """
-    targets = ((_read_hermes_config().get("delegation") or {}).get("targets") or {})
     options = []
+    seen = set()
+
+    def add(key: str, provider: str, model: str) -> None:
+        provider, model = provider.strip(), model.strip()
+        if not provider or not model or (provider, model) in seen:
+            return
+        seen.add((provider, model))
+        options.append({"key": key, "provider": provider, "model": model})
+
+    tier_providers = router_cfg.get("tier_providers") or {}
+    for tier, model in (router_cfg.get("models") or {}).items():
+        provider = tier_providers.get(tier)
+        if provider:
+            add(str(tier), str(provider), str(model))
+
+    for tier, model in ((router_cfg.get("claude_delegation") or {}).get("tiers") or {}).items():
+        target = _CLAUDE_TARGET_FOR_TIER.get(str(tier))
+        if target and model:
+            add(target, "anthropic", str(model))
+
+    targets = ((_read_hermes_config().get("delegation") or {}).get("targets") or {})
     for name, spec in targets.items():
         if not isinstance(spec, dict):
             continue
-        provider = str(spec.get("provider") or "").strip()
-        model = str(spec.get("model") or "").strip()
-        if provider and model:
-            options.append({"key": str(name), "provider": provider, "model": model})
+        add(str(name), str(spec.get("provider") or ""), str(spec.get("model") or ""))
+
     return sorted(options, key=lambda o: o["key"])
 
 
