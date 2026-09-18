@@ -2096,6 +2096,77 @@ def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
     return switches.get(name) is True if name in switches else True
 
 
+def _read_only_leaf_tier(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """The tier a bounded read-only evidence leaf may actually be labelled with.
+
+    The conductor contract named Spark unconditionally. With ``callable.spark``
+    switched off Spark is not offered at all, so that sentence pointed the
+    conductor at a tier it cannot spawn and left read-only discovery with no
+    labelled home -- and an unlabelled goal is the one case the design gate
+    still decides from raw keywords.
+    """
+    cfg = cfg if isinstance(cfg, dict) else _load_config()
+    for tier in ("spark", "luna"):
+        if _target_is_offered(tier, cfg):
+            return tier
+    return ""
+
+
+def _read_only_leaf_sentence(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """What the bounded read-only worker is for, named after a tier that exists."""
+    tier = _read_only_leaf_tier(cfg)
+    if not tier:
+        return ""
+    return (
+        f"Use [{tier}] with model:{tier} for bounded low-risk read-only source/component discovery, "
+        "logs, test-case design, isolated patch proposals, or research. Reading and mapping source "
+        "that happens to contain UI is such a leaf, not design work. "
+    )
+
+
+def _read_only_delegation_clause(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Name the read-only worker's route in the conductor's own contract."""
+    tier = _read_only_leaf_tier(cfg)
+    if not tier:
+        return ""
+    return (
+        f"Delegate bounded, self-contained low-risk non-design read-only evidence loops to "
+        f"{tier.capitalize()} with a goal beginning [{tier}] and model:{tier}. "
+    )
+
+
+def _leaf_label_contract(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """The rule that every leaf goal opens with its own tier label.
+
+    Stating the prefix per tier -- "prefix a Spark leaf with [spark]", "design
+    must be prefixed [sol]" -- only ever covered the tiers it named, so a leaf
+    the conductor did not file under one of them went out with no label. That is
+    not neutral: the design gate runs ahead of every label check and is waived
+    only for a labelled worker, so an unlabelled goal is classified from its own
+    words, where one mention of UI, UX, CSS or layout reads as design work and
+    pins the leaf to Sol however read-only it is. Measured on 2026-09-18: two
+    read-only discovery leaves ("identify ... UI components and existing
+    route/UI tests", "the STAFF receipt issuer self-service UI") both opened on
+    Sol from their first call, on the bare word "ui".
+    """
+    cfg = cfg if isinstance(cfg, dict) else _load_config()
+    labels = [
+        f"[{tier}]" for tier in ("luna", "spark", "terra", "sol")
+        if _target_is_offered(tier, cfg)
+    ]
+    if not labels:
+        return ""
+    return (
+        f"Begin every worker goal with that leaf's own tier label in square brackets "
+        f"({', '.join(labels)}), matching the same leaf's model: parameter. This is not optional "
+        "and not only for design or read-only leaves: a goal that starts with no label is "
+        "re-classified from its own text, and there a single mention of UI, UX, CSS, layout or "
+        "styling is read as design work and forces the leaf onto Sol no matter how read-only it "
+        "is -- naming UI files to grep is enough to trigger it. The label is what tells the router "
+        "the tier was already decided by a planner that saw the objective. "
+    )
+
+
 def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None) -> str:
     """The sentence that makes route choice expressible instead of implied.
 
@@ -2525,10 +2596,11 @@ def _prepare_orchestration_delegation(
         f"and a goal beginning with [{orchestrator_tier}]. This creates a dedicated {orchestrator_tier} planner and conductor, not a benchmark worker. "
         "Give that conductor the full current objective. It must first inspect any current image itself and Create a structured dispatch plan "
         f"before any implementation. The plan may contain zero to {max_tasks} independent workers; do not invent work merely to fill slots. "
-        f"{orchestrator_tier} chooses the decomposition from the actual task: prefix every Spark leaf goal with [spark] and use it only for bounded low-risk read-only source/component discovery, "
-        "logs, test-case design, isolated patch proposals, or research. Any visual/product/UI/UX/CSS/layout/design-system analysis or implementation is Sol-only and must be prefixed [sol]; prefix a consequential "
-        f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Spark/Sol workers receive a "
-        "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
+        f"{orchestrator_tier} chooses the decomposition from the actual task. {_leaf_label_contract(cfg)}"
+        f"{_read_only_leaf_sentence(cfg)}"
+        "Any visual/product/UI/UX/CSS/layout/design-system analysis or implementation is Sol-only and must be prefixed [sol]; prefix a consequential "
+        f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Workers receive a "
+        "self-contained textual scope, never the original image. A read-only leaf must stay read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
         f"{_model_param_contract(orchestrator_tier, cfg)} "
         "A [sonnet-review] or [opus-review] leaf takes no 'model', because its route is its label; it is read-only "
@@ -2570,7 +2642,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
