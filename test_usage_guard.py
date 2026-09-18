@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import model_router as model_router_module
 from model_router import usage_guard
 from model_router.usage_guard import GuardOutcome, Reading
 
@@ -378,6 +379,20 @@ class CodexStepDownTests(unittest.TestCase):
         with _peek(**{"openai-codex": 72.0}):
             self.assertEqual(_usage_step_down(self._sol(), cfg).tier, "sol")
 
+    def test_a_malformed_guard_logs_once_with_the_traceback(self):
+        """M8: the fail-open except must not swallow the failure silently --
+        it logs once through the router's own logger, with exc_info so the
+        traceback is not lost."""
+        cfg = {**ROUTER_CFG, "usage_guard": {"cache_seconds": 300, "accounts": {
+            "openai-codex": {"soft_percent": "seventy", "hard_percent": 90, "step_down": {"sol": "terra"}},
+        }}}
+        with _peek(**{"openai-codex": 72.0}):
+            with self.assertLogs("model_router", level="WARNING") as cm:
+                decision = _usage_step_down(self._sol(), cfg)
+        self.assertEqual(decision.tier, "sol")
+        self.assertEqual(len(cm.records), 1)
+        self.assertIsNotNone(cm.records[0].exc_info)
+
 
 class AccountMarkTests(unittest.TestCase):
     def test_marks_name_the_account_state(self):
@@ -404,6 +419,27 @@ class AccountMarkTests(unittest.TestCase):
         }}}
         with _peek(**{"openai-codex": 72.0}):
             self.assertEqual(_target_availability(["sol"], cfg), {"sol": ""})
+
+    def test_account_states_logs_once_on_a_malformed_guard(self):
+        cfg = {**ROUTER_CFG, "usage_guard": {"cache_seconds": 300, "accounts": {
+            "openai-codex": {"soft_percent": "seventy", "hard_percent": 90, "step_down": {"sol": "terra"}},
+        }}}
+        with _peek(**{"openai-codex": 72.0}):
+            with self.assertLogs("model_router", level="WARNING") as cm:
+                states = model_router_module._account_states(cfg)
+        self.assertEqual(states, {})
+        self.assertEqual(len(cm.records), 1)
+        self.assertIsNotNone(cm.records[0].exc_info)
+
+    def test_account_mark_logs_once_when_it_fails(self):
+        with patch.object(usage_guard, "account_label", side_effect=RuntimeError("boom")):
+            with self.assertLogs("model_router", level="WARNING") as cm:
+                mark = model_router_module._account_mark(
+                    "sol", ROUTER_CFG, {"openai-codex": "soft"}
+                )
+        self.assertEqual(mark, "")
+        self.assertEqual(len(cm.records), 1)
+        self.assertIsNotNone(cm.records[0].exc_info)
 
 
 if __name__ == "__main__":

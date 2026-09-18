@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ except ImportError:  # pragma: no cover - Hermes includes PyYAML
 from . import claude_delegation
 from . import usage_guard
 
+_logger = logging.getLogger("model_router")
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _PLUGIN_DIR / "router_config.yaml"
@@ -573,6 +575,7 @@ def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecis
         stepped = _decision(target, f"{decision.reason}; {step_reason}", cfg)
         return replace(stepped, kind=decision.kind)
     except Exception:
+        _logger.warning("_usage_step_down failed; routing continues without a step-down", exc_info=True)
         return decision
 
 
@@ -2131,6 +2134,7 @@ def _account_states(cfg: Dict[str, Any], readings: Optional[Dict[str, Any]] = No
             for account in accounts if usage_guard.guarded(account, cfg)
         }
     except Exception:
+        _logger.warning("_account_states failed; reporting no guarded accounts", exc_info=True)
         return {}
 
 
@@ -2144,6 +2148,7 @@ def _account_mark(name: str, cfg: Dict[str, Any], states: Dict[str, str]) -> str
             return f" [{usage_guard.account_label(account)} closed]"
         return ""
     except Exception:
+        _logger.warning("_account_mark failed for %r; no mark added", name, exc_info=True)
         return ""
 
 
