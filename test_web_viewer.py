@@ -1618,7 +1618,49 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         ))
         self.assertEqual(json.loads(out), ["Claude: haiku"])
 
-    def test_delegation_chips_are_wired_into_the_live_run_header(self):
+    def test_delegation_chips_are_appended_to_the_routes_cell_not_the_header(self):
+        """.router-run-header is a CSS grid with a fixed number of column tracks
+        (redefined at the 1120px and 700px breakpoints, plus .no-details) — an
+        extra header child auto-places onto a stray grid cell instead of
+        flowing inline. The chips must attach to the existing router-run-routes
+        cell instead, after its route pills."""
         renderer = HTML[HTML.rindex("render=function(){"):]
         self.assertIn("const delegationMap=assignDelegations(runData,delegations)", renderer)
-        self.assertIn("delegationChips(", renderer)
+        routes_start = renderer.index(
+            "const routes=document.createElement('span');routes.className='router-run-routes';"
+        )
+        header_append = renderer.index(
+            "header.append(dateEl,timeEl,prompt,stateEl,total,routes,workers);"
+        )
+        between = renderer[routes_start:header_append]
+        self.assertIn("routes.append(delegationChips(", between)
+        self.assertNotIn("header.append(delegationChips(", renderer)
+
+    def test_delegation_chips_are_a_descendant_of_the_routes_cell_at_runtime(self):
+        """Node probe over the live renderer's actual header-building statements
+        (not a reimplementation): builds the same header/routes elements the
+        real code builds and asserts the chips box lands inside routes.children,
+        never directly in header.children."""
+        renderer = HTML[HTML.rindex("render=function(){"):]
+        start = renderer.index("const routes=document.createElement")
+        end = renderer.index("if(hasDetails)header.addEventListener")
+        segment = renderer[start:end]
+        probe = (
+            self.DOM_SHIM
+            + "const header={children:[],append(...els){this.children.push(...els)}};"
+            + "const dateEl='dateEl',timeEl='timeEl',prompt='prompt',stateEl='stateEl',total='total';"
+            + "const t=k=>k;const accountingCalls=[];const workerCalls=0;"
+            + "function appendRoutePills(el,calls){el.append('PILL')}"
+            + "function delegationChips(record,audits){const b=document.createElement('span');b.className='delegation-chips';return b}"
+            + "const record={id:'r'},delegationMap=new Map([[0,['audit']]]),runIndex=0;"
+            + segment
+            + "console.log(JSON.stringify({"
+            + "routesHasChip:routes.children.some(c=>c&&c.className==='delegation-chips'),"
+            + "headerHasChip:header.children.some(c=>c&&c.className==='delegation-chips'),"
+            + "headerHasRoutes:header.children.includes(routes)}));"
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        observed = json.loads(result.stdout)
+        self.assertTrue(observed["routesHasChip"])
+        self.assertFalse(observed["headerHasChip"])
+        self.assertTrue(observed["headerHasRoutes"])
