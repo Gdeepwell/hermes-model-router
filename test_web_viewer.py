@@ -1056,7 +1056,10 @@ class AccountsApiTests(unittest.TestCase):
             "callable": {
                 "luna": True, "terra": True, "sol": True,
                 "haiku": True, "sonnet5": True, "opus5": True,
-                "qwen": False,
+                # qwen deliberately has no entry at all here (not even False):
+                # a tier with a `callable` key, on or off, still gets a card and
+                # a switch (see test_a_switched_off_tier_still_appears_with_its_switch);
+                # only a tier the config never mentions is truly absent.
             },
             "tier_providers": {
                 "luna": "openai-codex", "terra": "openai-codex", "sol": "openai-codex",
@@ -1116,6 +1119,27 @@ class AccountsApiTests(unittest.TestCase):
         self.assertIsNone(codex["usage"])
         self.assertEqual(codex["state"], "unknown")
         self.assertEqual(codex["delegation"], {"tool": "delegate_task", "always_on": True})
+
+    def test_a_switched_off_tier_still_appears_with_its_switch(self):
+        """The shipped config ships spark:false. Dropping it from `tiers` when it
+        is off meant the switch that would turn it back on vanished with it."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            config["callable"]["spark"] = False
+            config["tier_providers"]["spark"] = "openai-codex"
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+        self.assertIn("spark", accounts["openai-codex"]["tiers"])
+
+    def test_an_account_with_every_tier_switched_off_still_gets_a_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            for tier in ("haiku", "sonnet5", "opus5"):
+                config["callable"][tier] = False
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+        self.assertIn("anthropic", accounts)
+        self.assertEqual(set(accounts["anthropic"]["tiers"]), {"haiku", "sonnet5", "opus5"})
 
     def test_accounts_status_never_fetches_usage(self):
         from unittest.mock import MagicMock

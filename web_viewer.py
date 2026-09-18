@@ -444,10 +444,13 @@ def _accounts_status(config: dict) -> dict:
     router = _router_module()
     guard = getattr(router, "usage_guard", None) if router else None
     delegation = getattr(router, "claude_delegation", None) if router else None
-    callable_tiers = {t for t, on in (config.get("callable") or {}).items() if on is True}
+    # Every tier with a `callable` entry, on or off: a switched-off tier (the
+    # shipped config ships spark: false) still needs its switch so it can be
+    # turned back on, not just the ones currently enabled.
+    known_tiers = config.get("callable") or {}
     tiers_by_account: dict = {}
     for tier, account in _tier_accounts(config).items():
-        if tier in callable_tiers:
+        if tier in known_tiers:
             tiers_by_account.setdefault(account, []).append(tier)
     _audits, registration = _read_delegation_log(config)
     now = time.time()
