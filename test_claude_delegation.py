@@ -750,5 +750,39 @@ class RoutingNoteMiddlewareTests(unittest.TestCase):
         self.assertIsNone(routed)
 
 
+class UsageStepDownIntegrationTests(unittest.TestCase):
+    """The step-down must land on the *dispatched* tier: the orchestration
+    gates (forced preflight, forced shadow) have to see the request's original
+    classification, not a tier the usage guard already moved it off of."""
+
+    def test_a_codex_root_request_at_the_soft_limit_steps_down_before_dispatch(self):
+        cfg = _cfg(preferences=PREFS, provider="openai-codex",
+                   orchestration={"enabled": False}, logging={"enabled": False},
+                   shadow={"enabled": False})
+        cfg["usage_guard"]["accounts"]["openai-codex"] = {
+            "soft_percent": 70, "hard_percent": 90, "step_down": {"sol": "terra"},
+        }
+        # The same "long request" fixture test_model_router.py uses to prove a
+        # long prompt classifies to sol -- non-mandatory, so it is eligible for
+        # the step-down.
+        request = chat_request("Elemezd részletesen. " + "x" * 4200)
+        preflight = MagicMock(wraps=model_router._force_terra_supervisor_preflight)
+        log_decision = MagicMock()
+        with patch.object(usage_guard, "peek", side_effect=lambda account, cfg: (
+                 _reading(72.0) if account == "openai-codex" else None)), \
+             patch("model_router._load_config", return_value=cfg), \
+             patch("model_router._log_decision", log_decision), \
+             patch("model_router._force_terra_supervisor_preflight", preflight):
+            routed = route_llm_request(request=request, provider="openai-codex", model="gpt-terra",
+                                       api_call_count=1, turn_id="root-turn", platform="cli")
+        self.assertIsNotNone(routed)
+        self.assertEqual(routed["request"]["model"], "gpt-terra")
+        self.assertIn("usage soft limit: sol→terra", routed["reason"])
+        logged = log_decision.call_args.args[0]
+        self.assertIn("usage soft limit: sol→terra", logged.reason)
+        preflight_decision = preflight.call_args.args[2]
+        self.assertEqual(preflight_decision.tier, "sol")
+
+
 if __name__ == "__main__":
     unittest.main()

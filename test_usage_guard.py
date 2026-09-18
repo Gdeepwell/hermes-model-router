@@ -328,8 +328,24 @@ class CodexStepDownTests(unittest.TestCase):
         with _peek(**{"openai-codex": 72.0}):
             decision = _usage_step_down(self._sol(kind="long"), ROUTER_CFG)
         self.assertEqual((decision.tier, decision.model), ("terra", "gpt-terra"))
-        self.assertEqual(decision.reason, "usage soft limit: sol→terra (weekly 72%)")
+        self.assertIn("usage soft limit: sol→terra (weekly 72%)", decision.reason)
+        self.assertTrue(decision.reason.startswith("long work; "))
         self.assertEqual(decision.kind, "long")
+
+    def test_the_hard_weekly_limit_also_steps_sol_down_to_terra(self):
+        with _peek(**{"openai-codex": 95.0}):
+            decision = _usage_step_down(self._sol(kind="long"), ROUTER_CFG)
+        self.assertEqual(decision.tier, "terra")
+        self.assertIn("usage hard limit: sol→terra (weekly 95%)", decision.reason)
+        self.assertEqual(decision.kind, "long")
+
+    def test_the_hard_session_limit_also_steps_sol_down_to_terra(self):
+        with patch.object(usage_guard, "peek",
+                          side_effect=lambda account, cfg: _reading(75.0, session=95.0)
+                          if account == "openai-codex" else None):
+            decision = _usage_step_down(self._sol(kind="long"), ROUTER_CFG)
+        self.assertEqual(decision.tier, "terra")
+        self.assertIn("usage hard limit: sol→terra", decision.reason)
 
     def test_nothing_changes_below_the_limit_when_unknown_or_unguarded(self):
         for peeked, cfg in (({"openai-codex": 50.0}, ROUTER_CFG), ({}, ROUTER_CFG),
@@ -348,6 +364,20 @@ class CodexStepDownTests(unittest.TestCase):
         self.assertEqual(decision.tier, "sol")
         self.assertIn("usage soft limit: sol→terra skipped (terra unavailable)", decision.reason)
 
+    def test_an_unavailable_target_keeps_the_tier_and_says_why_at_the_hard_limit(self):
+        cfg = {**ROUTER_CFG, "callable": {**ROUTER_CFG["callable"], "terra": False}}
+        with _peek(**{"openai-codex": 95.0}):
+            decision = _usage_step_down(self._sol(), cfg)
+        self.assertEqual(decision.tier, "sol")
+        self.assertIn("usage hard limit: sol→terra skipped (terra unavailable)", decision.reason)
+
+    def test_a_malformed_guard_fails_open(self):
+        cfg = {**ROUTER_CFG, "usage_guard": {"cache_seconds": 300, "accounts": {
+            "openai-codex": {"soft_percent": "seventy", "hard_percent": 90, "step_down": {"sol": "terra"}},
+        }}}
+        with _peek(**{"openai-codex": 72.0}):
+            self.assertEqual(_usage_step_down(self._sol(), cfg).tier, "sol")
+
 
 class AccountMarkTests(unittest.TestCase):
     def test_marks_name_the_account_state(self):
@@ -355,10 +385,24 @@ class AccountMarkTests(unittest.TestCase):
             notes = _target_availability(["sol", "opus5", "luna"], ROUTER_CFG)
         self.assertEqual(notes["sol"], " [Codex soft limit]")
         self.assertEqual(notes["opus5"], " [Claude closed]")
+        self.assertEqual(notes["luna"], " [Codex soft limit]")
 
     def test_no_guard_no_marks(self):
         cfg = {k: v for k, v in ROUTER_CFG.items() if k != "usage_guard"}
         with _peek(**{"openai-codex": 99.0}):
+            self.assertEqual(_target_availability(["sol"], cfg), {"sol": ""})
+
+    def test_a_cooling_tier_keeps_both_its_cooldown_and_its_account_mark(self):
+        with _peek(**{"openai-codex": 72.0}), \
+             patch("model_router._tier_cooldown_remaining", side_effect=lambda name, cfg: 90.0 if name == "sol" else 0.0):
+            notes = _target_availability(["sol"], ROUTER_CFG)
+        self.assertEqual(notes["sol"], " [unavailable for another 2 min] [Codex soft limit]")
+
+    def test_a_malformed_guard_fails_open(self):
+        cfg = {**ROUTER_CFG, "usage_guard": {"cache_seconds": 300, "accounts": {
+            "openai-codex": {"soft_percent": "seventy", "hard_percent": 90, "step_down": {"sol": "terra"}},
+        }}}
+        with _peek(**{"openai-codex": 72.0}):
             self.assertEqual(_target_availability(["sol"], cfg), {"sol": ""})
 
 

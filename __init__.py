@@ -535,26 +535,45 @@ def _require_callable(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDeci
 
 
 def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecision:
-    """At an account's soft limit, step its heaviest routed tier down.
+    """At an account's soft or hard limit, step its heaviest routed tier down.
 
     Codex is the only account this router routes itself, so this is the Codex
     counterpart of delegate_claude's opus→sonnet. Never touches a mandatory
-    decision, and never moves work onto an unavailable tier.
+    decision, never moves work onto an unavailable tier, and never lets a
+    malformed usage_guard block disable routing -- any failure here fails open
+    and leaves the decision exactly as it arrived.
     """
     if decision.mandatory:
         return decision
-    account = _account_of(decision.tier, cfg)
-    if not account or not usage_guard.guarded(account, cfg):
+    try:
+        account = _account_of(decision.tier, cfg)
+        if not account or not usage_guard.guarded(account, cfg):
+            return decision
+        outcome = usage_guard.apply(account, decision.tier, cfg, usage_guard.peek(account, cfg))
+        if outcome.adjusted:
+            label = "soft"
+            target = outcome.tier
+        elif outcome.refused:
+            # The hard limit refuses the call outright rather than naming a
+            # step-down target, so the target comes from the same step_down
+            # map the soft limit uses -- delegation to the account is closed
+            # either way, and a configured step-down tier is the one route
+            # left that does not depend on it.
+            limits = usage_guard.account_limits(account, cfg) or {}
+            target = (limits.get("step_down") or {}).get(decision.tier)
+            if not target:
+                return decision
+            label = "hard"
+        else:
+            return decision
+        if not _is_routable_tier(target, cfg) or not _is_callable_tier(target, cfg):
+            return replace(decision, reason=f"{decision.reason}; usage {label} limit: "
+                                            f"{decision.tier}→{target} skipped ({target} unavailable)")
+        step_reason = f"usage {label} limit: {decision.tier}→{target} (weekly {outcome.usage})"
+        stepped = _decision(target, f"{decision.reason}; {step_reason}", cfg)
+        return replace(stepped, kind=decision.kind)
+    except Exception:
         return decision
-    outcome = usage_guard.apply(account, decision.tier, cfg, usage_guard.peek(account, cfg))
-    if not outcome.adjusted:
-        return decision
-    target = outcome.tier
-    if not _is_routable_tier(target, cfg) or not _is_callable_tier(target, cfg):
-        return replace(decision, reason=f"{decision.reason}; usage soft limit: "
-                                        f"{decision.tier}→{target} skipped ({target} unavailable)")
-    stepped = _decision(target, f"usage soft limit: {decision.tier}→{target} (weekly {outcome.usage})", cfg)
-    return replace(stepped, kind=decision.kind)
 
 
 def _load_config() -> Dict[str, Any]:
@@ -2096,24 +2115,41 @@ def _account_of(name: str, cfg: Dict[str, Any]) -> str:
     return str((cfg.get("tier_providers") or {}).get(name) or "")
 
 
-def _account_states(cfg: Dict[str, Any]) -> Dict[str, str]:
-    """State per guarded account, from the non-blocking cached reading."""
-    accounts = (usage_guard.guard_config(cfg).get("accounts") or {})
-    return {account: usage_guard.state(account, cfg, usage_guard.peek(account, cfg))
-            for account in accounts if usage_guard.guarded(account, cfg)}
+def _account_states(cfg: Dict[str, Any], readings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """State per guarded account, from the non-blocking cached reading.
+
+    Fails open: a malformed ``usage_guard`` block (a bad percent, a broken
+    accounts map, ...) must not take routing down with it, so any exception
+    here is swallowed and reported as "no guarded accounts" instead.
+    """
+    try:
+        accounts = (usage_guard.guard_config(cfg).get("accounts") or {})
+        return {
+            account: usage_guard.state(
+                account, cfg, readings[account] if readings is not None else usage_guard.peek(account, cfg)
+            )
+            for account in accounts if usage_guard.guarded(account, cfg)
+        }
+    except Exception:
+        return {}
 
 
 def _account_mark(name: str, cfg: Dict[str, Any], states: Dict[str, str]) -> str:
-    account = _account_of(name, cfg)
-    state = states.get(account)
-    if state == "soft":
-        return f" [{usage_guard.account_label(account)} soft limit]"
-    if state == "closed":
-        return f" [{usage_guard.account_label(account)} closed]"
-    return ""
+    try:
+        account = _account_of(name, cfg)
+        state = states.get(account)
+        if state == "soft":
+            return f" [{usage_guard.account_label(account)} soft limit]"
+        if state == "closed":
+            return f" [{usage_guard.account_label(account)} closed]"
+        return ""
+    except Exception:
+        return ""
 
 
-def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str, str]:
+def _target_availability(
+    names: Iterable[str], cfg: Dict[str, Any], states: Optional[Dict[str, str]] = None
+) -> Dict[str, str]:
     """Per-target cooldown note, empty when the target is available.
 
     Cooling targets are annotated rather than dropped. LiteLLM excludes a
@@ -2124,7 +2160,7 @@ def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str,
     lets the conductor wait or narrow the objective instead.
     """
     offered = set(names)
-    states = _account_states(cfg)
+    states = _account_states(cfg) if states is None else states
     notes = {}
     for name in names:
         remaining = _tier_cooldown_remaining(name, cfg)
@@ -3058,11 +3094,20 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
         kind = classify_request(request, api_call_count=1, config=cfg).kind or "default"
     except Exception:
         kind = "default"
-    states = _account_states(cfg)
+    # One peek per guarded account for the whole note: the chain, the "other
+    # kinds" summary and the usage line all read the same snapshot instead of
+    # each re-peeking (and each risking a different answer mid-note).
+    try:
+        guarded_accounts = [a for a in (usage_guard.guard_config(cfg).get("accounts") or {})
+                            if usage_guard.guarded(a, cfg)]
+        readings = {account: usage_guard.peek(account, cfg) for account in guarded_accounts}
+    except Exception:
+        readings = {}
+    states = _account_states(cfg, readings)
     claude_offered = set(_delegation_target_names())
 
     chain = _note_names(kind, cfg, states, claude_offered)
-    notes = _target_availability(chain, cfg)
+    notes = _target_availability(chain, cfg, states=states)
     lines = [f"[ROUTER] This turn classifies as: {kind}."]
     if chain:
         lines.append(f"If you delegate {kind} work: "
@@ -3075,7 +3120,7 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
             continue
         names = _note_names(other, cfg, states, claude_offered)
         if names:
-            other_notes = _target_availability(names, cfg)
+            other_notes = _target_availability(names, cfg, states=states)
             others.append(f"{other}: " + " > ".join(_note_label(n, other_notes, as_call=False)
                                                    for n in names))
     if others:
@@ -3085,7 +3130,7 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
     usage = []
     for account in sorted(states, key=lambda a: usage_guard.account_label(a) != "Claude"):
         limits = usage_guard.account_limits(account, cfg)
-        reading = usage_guard.peek(account, cfg)
+        reading = readings.get(account)
         value = "unknown" if reading is None or reading.weekly is None else f"{reading.weekly:.0f}%"
         usage.append(f"{usage_guard.account_label(account)} weekly {value} "
                      f"(soft {limits['soft_percent']:.0f}%, hard {limits['hard_percent']:.0f}%)")
@@ -3299,7 +3344,6 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     # Rules above may intentionally rewrite the tier (root labels, subagents,
     # quota). Re-validate the final destination immediately before dispatch.
     decision = _require_callable(decision, cfg)
-    decision = _usage_step_down(decision, cfg)
     forced_preflight_request = (
         _force_terra_supervisor_preflight(kwargs, cfg, decision)
         if decision.tier in {str(cfg.get("default_model", "terra")), "sol"}
@@ -3310,6 +3354,12 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         if decision.tier == str(cfg.get("default_model", "terra")) and forced_preflight_request is None
         else None
     )
+    # The orchestration gates above must see the tier this request actually
+    # classified to -- an already-stepped-down decision would offer Terra's
+    # preflight to a Sol request that never got Sol's, and would skip the
+    # Sol/Opus preflight the request was actually entitled to. Usage only
+    # touches the *dispatched* tier, once those gates have already run.
+    decision = _usage_step_down(decision, cfg)
     # Hermes middleware cannot switch the underlying provider/transport. If a
     # rule selects a tier owned by another provider, changing only `model`
     # produces invalid calls such as `gpt-5.6-terra` at the Qwen Anthropic
