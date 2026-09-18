@@ -2857,6 +2857,13 @@ def _orchestration_skip_reason(
     user_text, user_index = _last_user_text_and_index(items)
     if not user_text:
         return "no_user_text"
+    # The operator explicitly named a delegation tool for this turn -- the forced
+    # delegate_task planning preflight would override that choice. `user_text` is
+    # the incoming request's own latest user turn, read before this same call adds
+    # the router's routing note or preflight contract to it (those are appended to
+    # a deep copy further down the pipeline), so this cannot fire on our own text.
+    if re.search(r"\bdelegate_(?:claude|task)\b", user_text):
+        return "explicit_delegation_tool"
     # A task too short to decompose is not worth a planner round trip plus up to
     # max_tasks bounded workers. Without this gate every actionable Terra turn
     # forced a fan-out dispatch, the dominant source of perceived latency. That
