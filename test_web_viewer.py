@@ -673,7 +673,7 @@ class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
         )
 
     def _render(self, config, language="en"):
-        source = self.javascript_function("renderPreferences")
+        source = self.javascript_function("chainChipAccount") + "\n" + self.javascript_function("renderPreferences")
         labels = {m: m.upper() for m in
                   ("luna", "spark", "terra", "sol", "opus5", "sonnet5", "qwen")}
         probe = (
@@ -688,6 +688,51 @@ class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
         )
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         return result.stdout
+
+    def _chain_chip_account(self, model, config):
+        source = self.javascript_function("chainChipAccount")
+        probe = self.i18n_runtime() + "let currentConfig=" + json.dumps(config) + ";" + source \
+            + f"\nconsole.log(JSON.stringify(chainChipAccount({json.dumps(model)})));"
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return json.loads(result.stdout)
+
+    def test_chain_chip_account_carries_class_label_and_state_mark(self):
+        config = {
+            "tier_accounts": {"opus5": "anthropic"},
+            "accounts": {"anthropic": {"label": "Claude", "state": "soft"}},
+        }
+        self.assertEqual(
+            self._chain_chip_account("opus5", config),
+            {"account": "anthropic", "label": "Claude", "mark": "soft limit"},
+        )
+
+    def test_chain_chip_account_has_no_mark_when_the_account_is_open(self):
+        config = {
+            "tier_accounts": {"terra": "openai-codex"},
+            "accounts": {"openai-codex": {"label": "Codex", "state": "open"}},
+        }
+        self.assertEqual(
+            self._chain_chip_account("terra", config),
+            {"account": "openai-codex", "label": "Codex", "mark": ""},
+        )
+
+    def test_chain_chip_account_is_null_for_a_model_with_no_known_account(self):
+        self.assertIsNone(self._chain_chip_account("terra", {"tier_accounts": {}, "accounts": {}}))
+
+    def test_preference_chips_carry_the_account_class_label_and_closed_mark(self):
+        html = self._render({
+            "work_kinds": ["design"], "preferences": {"design": ["opus5"]},
+            "routable": ["opus5"], "callable": {"opus5": True},
+            "tier_accounts": {"opus5": "anthropic"},
+            "accounts": {"anthropic": {"label": "Claude", "state": "closed"}},
+        })
+        chip_start = html.index('<span class="pref-chip')
+        chip_end = html.index('</span>', html.rindex('data-act="del"', chip_start))
+        chip = html[chip_start:chip_end]
+        self.assertIn(' anthropic', chip.split('>')[0])
+        self.assertIn('Claude', chip)
+        english, _ = self.i18n('account.state.closed')
+        self.assertIn(english, chip)
 
     def test_a_delegation_only_target_is_marked_apart_from_a_routed_one(self):
         """A purple chip means "handed to the conductor", not "routed here"."""
