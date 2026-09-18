@@ -66,6 +66,24 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
         schema = routed["request"]["tools"][0]["parameters"]
         self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
 
+    def test_the_forced_choice_names_the_tool_as_the_request_names_it(self):
+        """Measured live on 2026-09-18: the preflight forced tool_choice
+        {"name": "delegate_task"} on a Claude parent whose tool was mcp__delegate_task.
+        Anthropic answered 400 "Tool 'delegate_task' not found in provided tools" and the
+        turn fell back off Opus. The forced name must be the one actually offered."""
+        request = _delegating_request("claude-opus-5", "mcp__delegate_task")
+        request["tools"] = [{"name": "mcp__delegate_task",
+                             "input_schema": request["tools"][0]["parameters"]}]
+        with tempfile.TemporaryDirectory() as d, \
+             patch("model_router._load_config", return_value=_cfg(d)), \
+             patch("model_router._log_decision"), \
+             patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")):
+            routed = route_llm_request(request=request, provider="anthropic", model="claude-opus-5",
+                                       api_call_count=1, turn_id="external-parent-turn")
+        self.assertIsNotNone(routed)
+        self.assertEqual(routed["request"]["tool_choice"], {"type": "tool", "name": "mcp__delegate_task"})
+        self.assertEqual([tool["name"] for tool in routed["request"]["tools"]], ["mcp__delegate_task"])
+
     def test_a_request_with_no_delegate_tool_is_still_skipped(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(self._route("claude-sonnet-5", _cfg(d), tool_name="read_file"))

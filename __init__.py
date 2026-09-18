@@ -2622,7 +2622,13 @@ def _prepare_orchestration_delegation(
         # normal complete toolset untouched on the parent's next iteration.
         routed["tools"] = [planner_tool]
         if _is_anthropic_shaped(routed):
-            routed["tool_choice"] = {"type": "tool", "name": "delegate_task"}
+            # Name the tool exactly as offered: Anthropic OAuth requests carry it as
+            # mcp__delegate_task, and forcing the bare name is a 400 that drops the
+            # whole turn onto the fallback account.
+            forced_name = (planner_tool.get("name")
+                           or (planner_tool.get("function") or {}).get("name")
+                           or "delegate_task")
+            routed["tool_choice"] = {"type": "tool", "name": forced_name}
         else:
             routed["tool_choice"] = "required"
             routed["parallel_tool_calls"] = False
