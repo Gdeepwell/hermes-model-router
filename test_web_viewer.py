@@ -1683,6 +1683,21 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn("usage_limits:", source)
         self.assertIn("claude_delegation:", source)
 
+    def test_every_model_control_is_the_same_slider_toggle_as_the_delegation_switch(self):
+        """Live check finding: a model on/off switch must look like the Claude
+        delegation switch -- a slider, not a bare checkbox -- while keeping the
+        data-model attribute the change listener relies on."""
+        import re
+
+        card = self._card("anthropic", self.CLAUDE_INFO)
+        for tier in self.CLAUDE_INFO["tiers"]:
+            match = re.search(
+                r'<label class="switch"><input type="checkbox" data-model="' + tier
+                + r'"[^>]*><span class="slider"></span></label>',
+                card,
+            )
+            self.assertIsNotNone(match, f"{tier} is not rendered as a switch/slider control")
+
 
 class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
     """The main view groups the per-model count cards by account, with a compact
