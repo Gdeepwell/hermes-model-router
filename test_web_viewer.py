@@ -1047,15 +1047,16 @@ class DefaultModelSaveTests(unittest.TestCase):
         "default_model": "terra",
     }
     HERMES = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+    HERMES_CODEX = "model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n"
 
     def _config(self):
         import copy
 
         return copy.deepcopy(self.CONFIG)
 
-    def _hermes_file(self, directory):
+    def _hermes_file(self, directory, content=None):
         target = Path(directory) / "config.yaml"
-        target.write_text(self.HERMES, encoding="utf-8")
+        target.write_text(self.HERMES if content is None else content, encoding="utf-8")
         return target
 
     def test_saving_without_changing_the_default_model_leaves_hermes_alone(self):
@@ -1071,7 +1072,7 @@ class DefaultModelSaveTests(unittest.TestCase):
     def test_changing_the_default_model_writes_it_through_with_a_restore_point(self):
         config = self._config()
         with tempfile.TemporaryDirectory() as directory:
-            target = self._hermes_file(directory)
+            target = self._hermes_file(directory, self.HERMES_CODEX)
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
                 error = web_viewer._save_default_model("luna", config)
             self.assertIsNone(error)
@@ -1082,19 +1083,34 @@ class DefaultModelSaveTests(unittest.TestCase):
             self.assertEqual(written["model"]["api_mode"], "codex_responses")
             backups = list(Path(directory).glob("config.yaml.bak-router-*"))
             self.assertEqual(len(backups), 1)
-            self.assertIn("claude-opus-5", backups[0].read_text(encoding="utf-8"))
+            self.assertIn("gpt-5.6-terra", backups[0].read_text(encoding="utf-8"))
 
     def test_a_disabled_tier_still_resolves_through_the_fallback_chain(self):
         config = self._config()
         config["default_model"] = "luna"
         with tempfile.TemporaryDirectory() as directory:
-            target = self._hermes_file(directory)
+            target = self._hermes_file(directory, self.HERMES_CODEX)
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
                 error = web_viewer._save_default_model("sol", config)
             self.assertIsNone(error)
             self.assertEqual(config["default_model"], "terra")
             written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
             self.assertEqual(written["model"]["default"], "gpt-5.6-terra")
+
+    def test_a_parent_on_another_account_is_never_moved(self):
+        """Measured live 2026-09-18: switching Qwen off moved default_model qwen->terra,
+        and the save wrote gpt-5.6-terra into Hermes's model block -- the Opus parent
+        was gone at the next Hermes start. The router's default tier is its own
+        setting; a parent the router doesn't serve is set in Hermes's config only."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("luna", config)
+            self.assertIsNone(error)
+            self.assertEqual(config["default_model"], "luna")
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
 
     def test_a_chain_with_no_enabled_tier_is_refused(self):
         config = self._config()

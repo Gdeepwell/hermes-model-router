@@ -452,9 +452,12 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertEqual(guard["state_path"], "~/.hermes/state/model-router-usage.json")
         self.assertEqual(guard["accounts"]["anthropic"]["step_down"], {"opus5": "sonnet5"})
         self.assertEqual(guard["accounts"]["openai-codex"]["step_down"], {"sol": "terra"})
+        # The limits are the operator's to tune from the dashboard (the live file is
+        # this one), so pin their shape, not the shipped 70/90.
         for account in ("anthropic", "openai-codex"):
-            self.assertEqual((guard["accounts"][account]["soft_percent"],
-                              guard["accounts"][account]["hard_percent"]), (70, 90))
+            soft = guard["accounts"][account]["soft_percent"]
+            hard = guard["accounts"][account]["hard_percent"]
+            self.assertTrue(0 < soft < hard <= 100, (account, soft, hard))
 
     def test_haiku_is_a_known_claude_target(self):
         self.assertIs(self.cfg["callable"]["haiku"], True)

@@ -210,9 +210,21 @@ def _save_default_model(requested: str, config: dict) -> str | None:
             f"Hermes on; reach it with a delegated worker instead"
         )
     config["default_model"] = candidate
-    if candidate != previous:
+    # Only a parent this router serves itself follows its default tier. A parent on
+    # another account (Claude) is set in Hermes's own config: writing the tier
+    # through would silently drag the whole conversation onto this provider --
+    # measured live when switching Qwen off moved default_model to terra and
+    # replaced the Opus parent at the next Hermes start.
+    if candidate != previous and _parent_is_router_model(config):
         _sync_hermes_default_model(candidate, config)
     return None
+
+
+def _parent_is_router_model(config: dict) -> bool:
+    """Whether Hermes currently starts on one of this router's own models."""
+    model = _read_hermes_config().get("model")
+    parent = str(model.get("default") or "") if isinstance(model, dict) else ""
+    return bool(parent) and parent in set((config.get("models") or {}).values())
 
 
 # Router target names stay what the config, cooldowns and dashboard already use;
