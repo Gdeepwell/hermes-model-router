@@ -1255,7 +1255,7 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
         label = (goal[:120] + "…") if len(goal) > 120 else (goal or "the stopped leaf")
         target = _next_available_entry(kind, cfg)
         if target:
-            lines.append(f"- {label}\n  {kind} work -> re-dispatch with model:{target}")
+            lines.append(f"- {label}\n  {kind} work -> re-dispatch with {_dispatch_phrase(target)}")
             continue
         waiting = _earliest_free_entry(kind, cfg)
         if waiting:
@@ -1275,8 +1275,10 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
         "valid. Sending the same goal to the same target again will fail the same way while "
         "it is cooling.\n"
         + "\n".join(lines)
-        + "\nRe-dispatch each one with the model: parameter named above and tell the retry to "
-        "continue from what the stopped worker already committed in its worktree instead of "
+        + ("\nRe-dispatch each one with the call named above and tell the retry to "
+           if claude_wing.is_active() else
+           "\nRe-dispatch each one with the model: parameter named above and tell the retry to ")
+        + "continue from what the stopped worker already committed in its worktree instead of "
         "starting over. Do not re-plan or narrow the goal: only the account changed.\n"
     )
 
@@ -1423,8 +1425,11 @@ def classify_request(
 # like mutating work. Measured: goal alone reads read-only, goal + contract does not,
 # on the word "apply" from the contract. Stripped before classification only; the
 # preview and the log still show what was actually sent.
+_ROUTE_CHOICE_OPENING = "Route choice for delegated workers"
 _ROUTER_CONTRACT_MARKERS = (
     "Set the delegate_task 'model' parameter",
+    _ROUTE_CHOICE_OPENING,
+    "[ROUTER] This turn classifies as",
     "planning conductor.",
     "[INTERNAL ORCHESTRATOR PREFLIGHT]",
 )
@@ -1911,6 +1916,28 @@ def _tool_schema_slot(tool: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     return tool, "parameters"
 
 
+def _host_delegate_has_model(request: Any) -> bool:
+    """Whether this host's delegate_task really takes a ``model`` argument.
+
+    Hermes v0.21.3 has none. Telling a conductor to set one sends every
+    cross-account leaf to the default route while it believes otherwise.
+    """
+    if not isinstance(request, dict):
+        return False
+    tool = _find_delegate_tool(request)
+    if tool is None:
+        return False
+    owner, key = _tool_schema_slot(tool)
+    schema = owner.get(key)
+    return isinstance(schema, dict) and "model" in (schema.get("properties") or {})
+
+
+def _dispatch_phrase(target: str) -> str:
+    """How a conductor reaches a target: the wing's tool for Claude, else model:<name>."""
+    tier = claude_wing.TIER_FOR_TARGET.get(target) if claude_wing.is_active() else None
+    return f'delegate_claude(tier="{tier}")' if tier else f"model:{target}"
+
+
 def _is_anthropic_shaped(request: Dict[str, Any]) -> bool:
     """True when the request already carries the Anthropic Messages shape."""
     if not isinstance(request.get("messages"), list):
@@ -2110,7 +2137,9 @@ def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
     return switches.get(name) is True if name in switches else True
 
 
-def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None) -> str:
+def _model_param_contract(
+    orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None, *, model_param: bool = True
+) -> str:
     """The sentence that makes route choice expressible instead of implied.
 
     A ``[sol]``/``[spark]`` goal prefix is only a model rename inside the
@@ -2139,19 +2168,41 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
     )
-    return (
-        f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
-        "A goal-text prefix only renames the model inside the default provider and cannot reach a "
-        "target on a separate account, so a leaf intended for one must carry model:<name>. "
+    if model_param:
+        opening = (
+            f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
+            "A goal-text prefix only renames the model inside the default provider and cannot reach a "
+            "target on a separate account, so a leaf intended for one must carry model:<name>. "
+        )
+    else:
+        opening = (
+            f"{_ROUTE_CHOICE_OPENING}{scope}: this host's delegate_task has no model parameter, so a "
+            "goal-text prefix picks a tier inside the default provider and cannot reach a target on a "
+            "separate account. "
+        )
+    if claude_wing.is_active():
+        claude_rule = (
+            "Concretely: [opus5] and [sonnet5] are not labels, and neither is a model parameter. A goal "
+            "beginning with one is not routed to Claude; the prefix is inert, the goal is classified on its "
+            "remaining text, and the leaf runs on this provider -- so it is stopped at its first call and "
+            "returned for re-dispatch. Claude targets are reached only by calling delegate_claude with tier "
+            "\"haiku\", \"sonnet\" or \"opus\". "
+        )
+    else:
         # The general rule was already here and lost anyway, seven goals running.
         # It shares a paragraph with [spark]/[sol], which *are* prefixes, so
         # [opus5] is the obvious blend of the two mechanisms -- and it silently
         # became a Sol leaf. Naming the mistake beats restating the rule.
-        "Concretely: [opus5] and [sonnet5] are not labels. A goal beginning with one is not "
-        "routed to Claude; the prefix is inert, the goal is classified on its remaining text, "
-        "and the leaf runs on this provider -- so it is stopped at its first call and returned "
-        "for re-dispatch. Name those targets only in the model parameter. Prefer "
-        "spreading genuinely independent leaves across different targets so separate accounts and "
+        claude_rule = (
+            "Concretely: [opus5] and [sonnet5] are not labels. A goal beginning with one is not "
+            "routed to Claude; the prefix is inert, the goal is classified on its remaining text, "
+            "and the leaf runs on this provider -- so it is stopped at its first call and returned "
+            "for re-dispatch. Name those targets only in the model parameter. "
+        )
+    return (
+        opening
+        + claude_rule
+        + "Prefer spreading genuinely independent leaves across different targets so separate accounts and "
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names, cfg)}"
@@ -2194,13 +2245,20 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
         chains.append(f"{kind}: " + " > ".join(name + notes.get(name, "") for name in chain))
     if not chains:
         return ""
+    decides = (
+        "and it decides which call carries the leaf: a Claude target goes through delegate_claude with its "
+        "tier, any other target through delegate_task. "
+        if claude_wing.is_active() else
+        "and it decides the leaf's model: parameter. "
+    )
     return (
         "The operator's target order per kind of work, highest priority first -- "
         + "; ".join(chains)
         + ". A leaf of one of these kinds must take the first target in that kind's order, "
         "and when an entry is marked unavailable must move to the next entry in the same "
         "order rather than choosing freely. This is the operator's configuration, not a "
-        "suggestion, and it decides the leaf's model: parameter. "
+        "suggestion, "
+        + decides
     )
 
 
@@ -2351,10 +2409,11 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
     paragraph: the unconditional default beat the hedged preference sentence
     every time, so ``code -> model:opus5`` never once decided a leaf.
     """
-    claude = [name for name in names if name in {"opus5", "sonnet5"}]
+    claude_names = {"opus5", "sonnet5", "haiku"} if claude_wing.is_active() else {"opus5", "sonnet5"}
+    claude = [name for name in names if name in claude_names]
     if not claude:
         return ""
-    both = len(claude) == 2
+    both = "opus5" in claude and "sonnet5" in claude
     # Read the configured lists, not the currently-available winner: a cooling
     # opus5 would otherwise revive the built-in default mid-session, which is the
     # one moment the operator's own order needs to be the thing that speaks.
@@ -2363,11 +2422,16 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
         for kind in WORK_KINDS
         for name in _preference_list(kind, cfg)
     )
+    reach = (
+        'Reach them with delegate_claude(tier="haiku"|"sonnet"|"opus"), never with delegate_task. '
+        if claude_wing.is_active() else ""
+    )
     return (
         f"{' and '.join(claude)} run on Claude, a different subscription from every other "
         f"target, so they are the strongest way to keep independent work off a single quota. "
         f"They are ordinary workers with the usual tools: give them implementation or deep "
         f"review, not just reading. "
+        + reach
         + ("Use sonnet5 by default and reserve opus5 for consequential or hard work. "
            if both and not operator_chose else "")
     )
@@ -2456,8 +2520,14 @@ def _prepare_orchestration_delegation(
     integration ownership.
     """
     orchestrator_tier = _conductor_tier(cfg)
-    
+
     routed = deepcopy(request)
+    model_param = _host_delegate_has_model(request)
+    claude_hint = (
+        "For real work prefer a native Claude worker through delegate_claude when one is offered. "
+        if claude_wing.is_active() else
+        "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered. "
+    )
     instruction = (
         f"\n\n[INTERNAL ORCHESTRATOR PREFLIGHT]\n"
         f"Plan ID: {plan_id}. Before any normal tool action, call delegate_task exactly once with role=\"orchestrator\" "
@@ -2469,10 +2539,10 @@ def _prepare_orchestration_delegation(
         f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Spark/Sol workers receive a "
         "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
-        f"{_model_param_contract(orchestrator_tier, cfg)} "
+        f"{_model_param_contract(orchestrator_tier, cfg, model_param=model_param)} "
         "A [sonnet-review] or [opus-review] leaf takes no 'model', because its route is its label; it is read-only "
-        "and replaces a single call rather than running an agent. For real work prefer a native Claude target via "
-        "model:opus5 / model:sonnet5 when one is offered. "
+        "and replaces a single call rather than running an agent. "
+        f"{claude_hint}"
         "Write the goal as objective and acceptance criteria only: what must change, where, and how it is verified. "
         "Do not restate this routing policy inside the goal. The conductor already receives it verbatim as an immutable "
         "contract in the required `context` field, and the goal is re-read as a description of the work -- routing "
@@ -2509,7 +2579,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg, model_param='model' in properties)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }

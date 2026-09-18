@@ -458,5 +458,102 @@ class ShippedConfigTests(unittest.TestCase):
         })
 
 
+from model_router import (  # noqa: E402
+    _claude_target_sentence,
+    _host_delegate_has_model,
+    _model_param_contract,
+    _preference_sentence,
+    _prepare_orchestration_delegation,
+    _quota_redispatch_instruction,
+    _without_router_contract,
+)
+from model_router.test_external_orchestrator import _delegating_request  # noqa: E402
+from model_router.test_quota_redispatch import CFG as REDISPATCH_CFG  # noqa: E402
+from model_router.test_quota_redispatch import TARGETS as REDISPATCH_TARGETS  # noqa: E402
+from model_router.test_quota_redispatch import envelope, request_for  # noqa: E402
+
+CONTRACT_TARGETS = ("haiku", "luna", "opus5", "sol", "sonnet5", "terra")
+
+
+def _contract(cfg, *, active, model_param=True):
+    with patch.object(claude_wing, "_ACTIVE", active), \
+         patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
+         patch("model_router._tier_cooldown_remaining", return_value=0.0), \
+         patch("model_router._recent_account_load", return_value={}):
+        return _model_param_contract("terra", cfg, model_param=model_param)
+
+
+class ContractTextTests(unittest.TestCase):
+    def test_the_host_schema_decides_whether_a_model_parameter_exists(self):
+        request = _delegating_request()
+        self.assertFalse(_host_delegate_has_model(request))
+        request["tools"][0]["parameters"]["properties"]["model"] = {"type": "string"}
+        self.assertTrue(_host_delegate_has_model(request))
+
+    def test_no_model_parameter_means_no_instruction_to_set_one(self):
+        contract = _contract(_cfg(), active=True, model_param=False)
+        self.assertNotIn("Set the delegate_task 'model' parameter", contract)
+        self.assertTrue(contract.startswith("Route choice for delegated workers"))
+
+    def test_the_default_keeps_todays_opening(self):
+        self.assertTrue(_contract(_cfg(), active=False).startswith("Set the delegate_task 'model' parameter"))
+
+    def test_the_new_opening_and_the_note_header_are_stripped_from_a_leaf(self):
+        goal = "[spark] Read-only discovery of the booking list."
+        for marker in ("Route choice for delegated workers", "[ROUTER] This turn classifies as"):
+            with self.subTest(marker=marker):
+                self.assertEqual(_without_router_contract(f"{goal}\n\n{marker} rest"), goal)
+
+    def test_an_active_wing_names_delegate_claude(self):
+        contract = _contract(_cfg(), active=True)
+        self.assertIn("[opus5] and [sonnet5] are not labels", contract)
+        self.assertIn("stopped at its first call", contract)
+        self.assertIn('delegate_claude with tier "haiku", "sonnet" or "opus"', contract)
+        self.assertNotIn("Name those targets only in the model parameter", contract)
+
+    def test_an_inactive_wing_keeps_todays_text(self):
+        contract = _contract(_cfg(), active=False)
+        self.assertIn("Name those targets only in the model parameter", contract)
+        self.assertNotIn("delegate_claude", contract)
+
+    def test_the_preference_order_names_the_call(self):
+        cfg = _cfg(preferences={"code": ["terra", "sonnet5"]})
+        with patch.object(claude_wing, "_ACTIVE", True):
+            active = _preference_sentence(["terra", "sonnet5"], cfg)
+        with patch.object(claude_wing, "_ACTIVE", False):
+            inactive = _preference_sentence(["terra", "sonnet5"], cfg)
+        self.assertIn("code: terra > sonnet5", active)
+        self.assertIn("delegate_claude", active)
+        self.assertNotIn("model: parameter", active)
+        self.assertIn("model: parameter", inactive)
+
+    def test_the_claude_sentence_covers_haiku_and_the_tool(self):
+        with patch.object(claude_wing, "_ACTIVE", True):
+            sentence = _claude_target_sentence(["haiku", "opus5", "sonnet5"], _cfg())
+        self.assertIn("haiku", sentence)
+        self.assertIn('delegate_claude(tier="haiku"|"sonnet"|"opus")', sentence)
+        self.assertIn("Use sonnet5 by default", sentence)
+
+    def test_the_redispatch_notice_names_delegate_claude(self):
+        with patch.object(claude_wing, "_ACTIVE", True), \
+             patch("model_router._tier_cooldown_remaining", return_value=0.0), \
+             patch("model_router._delegation_target_names", return_value=REDISPATCH_TARGETS):
+            instruction = _quota_redispatch_instruction(request_for(envelope()), REDISPATCH_CFG)
+        self.assertIn('delegate_claude(tier="opus")', instruction)
+        self.assertNotIn("model:opus5", instruction)
+        self.assertIn("with the call named above", instruction)
+
+    def test_the_preflight_prefers_a_claude_worker_through_the_tool(self):
+        cfg = _cfg(orchestration={"enabled": True, "max_tasks": 2})
+        with patch.object(claude_wing, "_ACTIVE", True), \
+             patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
+             patch("model_router._recent_account_load", return_value={}):
+            routed = _prepare_orchestration_delegation(_delegating_request(), "plan-x", 2, cfg=cfg)
+        text = routed["messages"][-1]["content"]
+        self.assertIn("prefer a native Claude worker through delegate_claude", text)
+        self.assertNotIn("model:opus5 / model:sonnet5", text)
+        self.assertNotIn("Set the delegate_task 'model' parameter", text)
+
+
 if __name__ == "__main__":
     unittest.main()
