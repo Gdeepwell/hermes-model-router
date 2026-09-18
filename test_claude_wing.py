@@ -209,5 +209,186 @@ class UsageCacheTests(unittest.TestCase):
         refresh.assert_not_called()
 
 
+from model_router.claude_wing import build_schema, handle_delegate_claude  # noqa: E402
+
+
+def _fake_host(parent, result=None):
+    """A recording delegate_task and a fixed active parent."""
+    calls = []
+
+    def delegate_task(**kwargs):
+        calls.append(kwargs)
+        return json.dumps(result if result is not None else {"status": "dispatched", "delegation_id": "d1"})
+
+    return calls, (lambda: (delegate_task, lambda: parent))
+
+
+class SchemaTests(unittest.TestCase):
+    def test_the_schema_mirrors_delegate_task_plus_a_tier(self):
+        with patch.object(claude_wing, "_independent_completions", return_value=False):
+            schema = build_schema(_cfg())
+        self.assertEqual(schema["name"], "delegate_claude")
+        properties = schema["parameters"]["properties"]
+        self.assertEqual(properties["tier"]["enum"], ["haiku", "sonnet", "opus"])
+        self.assertIn("goal", properties["tasks"]["items"]["properties"])
+        self.assertEqual(properties["tasks"]["items"]["required"], ["goal"])
+        self.assertNotIn("group", properties["tasks"]["items"]["properties"])
+        self.assertNotIn("action", properties)
+        self.assertIn("delegate_task", schema["description"])
+
+
+class HandlerTests(unittest.TestCase):
+    def setUp(self):
+        claude_wing._reset_usage_cache()
+        self.addCleanup(claude_wing._reset_usage_cache)
+
+    def _call(self, args, *, cfg=None, parent=None, usage=40.0, result=None):
+        parent = parent if parent is not None else SimpleNamespace(_delegate_depth=0)
+        calls, host = _fake_host(parent, result)
+        reading = None if usage is None else _reading(usage)
+        with patch("model_router._load_config", return_value=cfg or _cfg()), \
+             patch.object(claude_wing, "_host", host), \
+             patch.object(claude_wing, "read_usage", return_value=reading):
+            raw = handle_delegate_claude(args)
+        return json.loads(raw), calls
+
+    def test_a_call_runs_on_a_pinned_anthropic_route(self):
+        payload, calls = self._call({"tasks": [{"goal": "g", "acp_command": "x"}], "tier": "haiku"})
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(call["credentials_cfg"], {"provider": "anthropic",
+                                                   "model": "claude-haiku-4-5-20251001",
+                                                   "fallback_providers": []})
+        self.assertTrue(call["background"])
+        self.assertEqual(call["tasks"], [{"goal": "g"}])
+        self.assertEqual(payload["claude_tier"], "haiku")
+        self.assertEqual(payload["delegation_id"], "d1")
+
+    def test_the_default_tier_applies_when_none_is_given(self):
+        _payload, calls = self._call({"tasks": [{"goal": "g"}]})
+        self.assertEqual(calls[0]["credentials_cfg"]["model"], "claude-sonnet-5")
+
+    def test_an_orchestrator_child_waits_for_its_workers(self):
+        """Same rule as Hermes: a child at depth > 0 needs results within its turn."""
+        _payload, calls = self._call({"tasks": [{"goal": "g"}]}, parent=SimpleNamespace(_delegate_depth=1))
+        self.assertFalse(calls[0]["background"])
+
+    def test_the_caller_is_the_parent(self):
+        parent = SimpleNamespace(_delegate_depth=0)
+        _payload, calls = self._call({"tasks": [{"goal": "g"}]}, parent=parent)
+        self.assertIs(calls[0]["parent_agent"], parent)
+
+    def test_an_unknown_tier_is_refused(self):
+        payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "gpt"})
+        self.assertIn("Unknown tier", payload["error"])
+        self.assertEqual(calls, [])
+
+    def test_no_active_parent_is_refused(self):
+        calls, _host = _fake_host(None)
+        with patch("model_router._load_config", return_value=_cfg()), \
+             patch.object(claude_wing, "_host", lambda: (lambda **k: calls.append(k), lambda: None)):
+            payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
+        self.assertIn("agent turn", payload["error"])
+        self.assertEqual(calls, [])
+
+    def test_a_switched_off_tier_is_refused_with_a_pointer(self):
+        cfg = _cfg()
+        cfg["callable"]["haiku"] = False
+        payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "haiku"}, cfg=cfg)
+        self.assertIn("switched off", payload["error"])
+        self.assertIn("delegate_task with a goal prefixed [luna]", payload["error"])
+        self.assertEqual(calls, [])
+
+    def test_the_soft_limit_lowers_opus_and_says_so(self):
+        payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, usage=75.0)
+        self.assertEqual(calls[0]["credentials_cfg"]["model"], "claude-sonnet-5")
+        self.assertEqual(payload["claude_tier"], "sonnet")
+        self.assertEqual(payload["tier_adjusted"], "opus→sonnet (weekly usage 75%)")
+
+    def test_the_hard_limit_refuses_and_names_the_codex_call(self):
+        payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, usage=95.0)
+        self.assertIn("Claude wing closed", payload["error"])
+        self.assertIn("[sol]", payload["error"])
+        self.assertEqual(calls, [])
+
+    def test_an_unknown_usage_is_marked(self):
+        payload, _calls = self._call({"tasks": [{"goal": "g"}]}, usage=None)
+        self.assertEqual(payload["usage"], "unknown")
+
+    def test_a_host_error_becomes_a_tool_error(self):
+        def boom(**_kwargs):
+            raise ValueError("Cannot resolve delegation provider 'anthropic'")
+
+        with patch("model_router._load_config", return_value=_cfg()), \
+             patch.object(claude_wing, "_host", lambda: (boom, lambda: SimpleNamespace(_delegate_depth=0))), \
+             patch.object(claude_wing, "read_usage", return_value=_reading(10)):
+            payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
+        self.assertIn("Cannot resolve delegation provider", payload["error"])
+
+    def test_a_configured_audit_log_gets_one_line_per_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-wing.jsonl"
+            cfg["claude_wing"]["log_path"] = str(log)
+            self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg, usage=75.0)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(entry["event"], "delegate_claude")
+        self.assertEqual((entry["tier_requested"], entry["tier_used"], entry["outcome"]),
+                         ("opus", "sonnet", "lowered"))
+        self.assertNotIn("tier", entry)  # keeps it out of the router's per-account load
+
+
+class RegisterTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(setattr, claude_wing, "_ACTIVE", False)
+
+    def test_an_enabled_wing_registers_in_the_delegation_toolset(self):
+        ctx = MagicMock()
+        with patch.object(claude_wing, "host_check", return_value=(True, "")), \
+             patch.object(claude_wing, "_independent_completions", return_value=False):
+            self.assertTrue(claude_wing.register(ctx, _cfg()))
+        kwargs = ctx.register_tool.call_args.kwargs
+        self.assertEqual((kwargs["name"], kwargs["toolset"]), ("delegate_claude", "delegation"))
+        self.assertIs(kwargs["handler"], handle_delegate_claude)
+        self.assertTrue(claude_wing.is_active())
+
+    def test_a_disabled_wing_registers_nothing(self):
+        ctx = MagicMock()
+        cfg = _cfg()
+        cfg["claude_wing"]["enabled"] = False
+        self.assertFalse(claude_wing.register(ctx, cfg))
+        ctx.register_tool.assert_not_called()
+        self.assertFalse(claude_wing.is_active())
+
+
+def _hermes_importable():
+    try:
+        import tools.delegate_tool  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
+class RealHostTests(unittest.TestCase):
+    """Against the installed Hermes: the guarantees the wing leans on."""
+
+    def test_the_installed_hermes_passes_the_host_check(self):
+        self.assertEqual(claude_wing.host_check(), (True, ""))
+
+    def test_a_leaf_loses_the_delegation_toolset(self):
+        from tools.delegate_tool_toolsets import _strip_blocked_tools
+        self.assertNotIn("delegation", _strip_blocked_tools(["delegation", "file"]))
+
+    def test_the_depth_limit_holds_for_delegate_claude(self):
+        """Nothing spawns from an agent at max_spawn_depth, whichever tool asked."""
+        parent = SimpleNamespace(_delegate_depth=99)
+        with patch("model_router._load_config", return_value=_cfg()), \
+             patch.object(claude_wing, "_host", lambda: (claude_wing._host_delegate_task(), lambda: parent)), \
+             patch.object(claude_wing, "read_usage", return_value=_reading(10)):
+            payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
+        self.assertIn("depth limit", payload["error"].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

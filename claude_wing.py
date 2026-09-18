@@ -300,3 +300,264 @@ def apply_guard(tier: str, cfg: Dict[str, Any], reading: Optional[UsageReading])
     if weekly >= soft and tier == "opus":
         return GuardOutcome("sonnet", adjusted=f"opus→sonnet (weekly usage {weekly:.0f}%)", usage=usage)
     return GuardOutcome(tier, usage=usage)
+
+
+# ---------------------------------------------------------------------------
+# The delegate_claude tool
+
+TOOL_NAME = "delegate_claude"
+_DESCRIPTION = (
+    "Spawn subagents on the Claude subscription -- a separate quota from delegate_task, which runs its "
+    "workers on Codex. Same tasks shape as delegate_task, plus one tier for the whole call: \"haiku\" for "
+    "quick lookups and exploration, \"sonnet\" (the default) as the everyday worker, \"opus\" for hard or "
+    "consequential work. Use it when the router's note recommends a Claude target or the work needs Claude. "
+    "Top-level calls run in the background and report back like delegate_task; list, steer or stop Claude "
+    "children with delegate_task(action=...)."
+)
+_FALLBACK_TASKS: Dict[str, Any] = {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "string", "description": "What this subagent should accomplish. Be specific "
+                                                      "and self-contained -- it knows nothing of your conversation."},
+            "context": {"type": "string", "description": "Background this child needs: file paths, error "
+                                                         "messages, constraints."},
+        },
+        "required": ["goal"],
+    },
+}
+_MODEL_HIDDEN_TASK_FIELDS = ("acp_command", "acp_args")
+_AUDIT_LOCK = threading.Lock()
+
+
+def _host_delegate_task() -> Callable[..., str]:
+    from tools.delegate_tool import delegate_task
+    return delegate_task
+
+
+def _host() -> Tuple[Callable[..., str], Callable[[], Any]]:
+    from agent.subagent_lifecycle import get_active_subagent_parent
+    return _host_delegate_task(), get_active_subagent_parent
+
+
+def _independent_completions() -> bool:
+    try:
+        from tools.delegate_tool_config import _get_independent_completions
+        return bool(_get_independent_completions())
+    except Exception:
+        return False
+
+
+def _tasks_schema() -> Dict[str, Any]:
+    """delegate_task's own ``tasks`` item shape, so the two tools cannot drift apart."""
+    try:
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        tasks = deepcopy(DELEGATE_TASK_SCHEMA["parameters"]["properties"]["tasks"])
+    except Exception:
+        tasks = deepcopy(_FALLBACK_TASKS)
+    if not _independent_completions():
+        ((tasks.get("items") or {}).get("properties") or {}).pop("group", None)
+    tasks["description"] = (
+        "One entry per Claude worker. Entries run in parallel, all on the tier chosen for this call."
+    )
+    return tasks
+
+
+def build_schema(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    default_tier = wing_config(cfg).get("default_tier") or "sonnet"
+    return {
+        "name": TOOL_NAME,
+        "description": _DESCRIPTION,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tasks": _tasks_schema(),
+                "tier": {
+                    "type": "string",
+                    "enum": list(TIERS),
+                    "description": f"Claude tier for every task in this call. Default \"{default_tier}\".",
+                },
+            },
+            "required": ["tasks"],
+        },
+    }
+
+
+def _error(message: str) -> str:
+    return json.dumps({"error": message}, ensure_ascii=False)
+
+
+def next_codex_route(target: str, cfg: Dict[str, Any]) -> str:
+    """The Codex tier to name when the Claude wing cannot take this target's work."""
+    from . import _is_callable_tier, _is_routable_tier, _peers_for
+
+    def usable(name: str) -> bool:
+        return bool(name) and _is_routable_tier(name, cfg) and _is_callable_tier(name, cfg)
+
+    chain = cfg.get("fallbacks") or {}
+    seen, current = {target}, target
+    for _ in range(4):
+        following = str(chain.get(current) or "")
+        if not following or following in seen:
+            break
+        if usable(following):
+            return following
+        seen.add(following)
+        current = following
+    for peer in _peers_for(target, cfg):
+        if usable(peer):
+            return peer
+    default = str(cfg.get("default_model") or "")
+    return default if usable(default) else ""
+
+
+def _pointer(target: str, cfg: Dict[str, Any], *, claude_ok: bool) -> str:
+    from . import _is_callable_tier, _peers_for
+
+    options = []
+    if claude_ok:
+        for peer in _peers_for(target, cfg):
+            if peer in TIER_FOR_TARGET and _is_callable_tier(peer, cfg):
+                options.append(f'delegate_claude with tier "{TIER_FOR_TARGET[peer]}"')
+                break
+    codex = next_codex_route(target, cfg)
+    options.append(f"delegate_task with a goal prefixed [{codex}]" if codex else "delegate_task")
+    return "Use " + " or ".join(options) + " instead."
+
+
+def _unavailable(target: str, cfg: Dict[str, Any]) -> str:
+    from . import _tier_cooldown_remaining
+
+    if (cfg.get("callable") or {}).get(target) is not True:
+        return "switched off in the dashboard"
+    remaining = _tier_cooldown_remaining(target, cfg)
+    return f"cooling down for another {int(remaining // 60) + 1} min" if remaining > 0 else ""
+
+
+def _strip_hidden(tasks: Any) -> Any:
+    if not isinstance(tasks, list):
+        return tasks
+    return [
+        {k: v for k, v in task.items() if k not in _MODEL_HIDDEN_TASK_FIELDS} if isinstance(task, dict) else task
+        for task in tasks
+    ]
+
+
+def _audit(cfg: Dict[str, Any], requested: str, used: str, outcome: GuardOutcome, result: str,
+           message: str = "") -> None:
+    configured = str(wing_config(cfg).get("log_path") or "").strip()
+    if not configured:
+        return
+    # No "tier" key on purpose: the router's per-account load counts lines by tier,
+    # and the children's own calls are already counted through the middleware.
+    entry = {
+        "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "event": TOOL_NAME,
+        "tier_requested": requested,
+        "tier_used": used,
+        "target": TARGET_FOR_TIER.get(used, ""),
+        "model": tier_model(used, cfg),
+        "usage": outcome.usage,
+        "outcome": result,
+    }
+    if outcome.adjusted:
+        entry["adjusted"] = outcome.adjusted
+    if message:
+        entry["message"] = message
+    try:
+        path = Path(os.path.expanduser(configured))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _AUDIT_LOCK, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _annotate(raw: Any, tier: str, outcome: GuardOutcome) -> Any:
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return raw
+    if not isinstance(payload, dict):
+        return raw
+    payload["claude_tier"] = tier
+    if outcome.adjusted:
+        payload["tier_adjusted"] = outcome.adjusted
+    if outcome.usage == "unknown":
+        payload["usage"] = "unknown"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _dispatch(args: Dict[str, Any]) -> str:
+    from . import _load_config
+
+    cfg = _load_config()
+    wing = wing_config(cfg)
+    requested = str(args.get("tier") or wing.get("default_tier") or "sonnet").strip().casefold()
+    if requested not in TIERS:
+        return _error(f"Unknown tier {requested!r}; use one of: {', '.join(TIERS)}.")
+    delegate_task, active_parent = _host()
+    parent = active_parent()
+    if parent is None:
+        return _error("delegate_claude must be called from an agent turn; no active Hermes parent was found.")
+
+    outcome = apply_guard(requested, cfg, read_usage(cfg))
+    if outcome.refused:
+        message = f"{outcome.refused} {_pointer(TARGET_FOR_TIER[requested], cfg, claude_ok=False)}"
+        _audit(cfg, requested, requested, outcome, "refused", message)
+        return _error(message)
+    tier = outcome.tier
+    target = TARGET_FOR_TIER[tier]
+    unavailable = _unavailable(target, cfg)
+    if unavailable:
+        message = f"Claude tier \"{tier}\" ({target}) is {unavailable}. {_pointer(target, cfg, claude_ok=True)}"
+        _audit(cfg, requested, tier, outcome, "refused", message)
+        return _error(message)
+    model = tier_model(tier, cfg)
+    if not model:
+        return _error(f"Claude tier \"{tier}\" has no model under claude_wing.tiers.")
+
+    raw = delegate_task(
+        goal=args.get("goal"),
+        context=args.get("context"),
+        tasks=_strip_hidden(args.get("tasks")),
+        parent_agent=parent,
+        # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
+        # top level, synchronous for an orchestrator child that needs its results.
+        background=not getattr(parent, "_delegate_depth", 0) > 0,
+        credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
+    )
+    _audit(cfg, requested, tier, outcome, "lowered" if outcome.adjusted else "ran")
+    return _annotate(raw, tier, outcome)
+
+
+def handle_delegate_claude(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Tool handler. Never raises into the turn: every failure is a tool error."""
+    try:
+        return _dispatch(args if isinstance(args, dict) else {})
+    except Exception as exc:
+        return _error(f"delegate_claude failed: {type(exc).__name__}: {exc}")
+
+
+def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Register delegate_claude when the wing is on and the host can carry it."""
+    global _ACTIVE
+    if cfg is None:
+        from . import _load_config
+        cfg = _load_config()
+    reason = registration_block(cfg)
+    if reason:
+        _ACTIVE = False
+        _logger.info("claude_wing: delegate_claude not registered: %s", reason)
+        return False
+    try:
+        ctx.register_tool(name=TOOL_NAME, toolset="delegation", schema=build_schema(cfg),
+                          handler=handle_delegate_claude, description=_DESCRIPTION, emoji="🪶")
+    except Exception as exc:
+        _ACTIVE = False
+        _logger.warning("claude_wing: registering delegate_claude failed: %s", exc)
+        return False
+    _ACTIVE = True
+    return True

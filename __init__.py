@@ -22,6 +22,8 @@ try:
 except ImportError:  # pragma: no cover - Hermes includes PyYAML
     yaml = None
 
+from . import claude_wing
+
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _PLUGIN_DIR / "router_config.yaml"
@@ -3852,3 +3854,4 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("subagent_start", on_subagent_start)
     ctx.register_hook("subagent_stop", on_subagent_stop)
+    claude_wing.register(ctx)
