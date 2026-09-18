@@ -1384,11 +1384,12 @@ class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
     TIER_ACCOUNTS = {
         "luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex",
         "sol": "openai-codex", "haiku": "anthropic", "sonnet5": "anthropic",
-        "opus5": "anthropic",
+        "opus5": "anthropic", "qwen": "qwen-token",
     }
     ACCOUNTS = {
         "openai-codex": {"label": "Codex"},
         "anthropic": {"label": "Claude"},
+        "qwen-token": {"label": "Qwen"},
     }
 
     def _group_source(self):
@@ -1414,17 +1415,18 @@ class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
             [
                 ("openai-codex", ["luna", "spark", "terra", "sol"]),
                 ("anthropic", ["haiku", "sonnet5", "opus5"]),
+                ("qwen-token", ["qwen"]),
             ],
         )
 
     def test_an_account_with_no_configured_tiers_is_omitted(self):
-        accounts = dict(self.ACCOUNTS, **{"qwen-token": {"label": "Qwen"}})
+        accounts = dict(self.ACCOUNTS, **{"unused-account": {"label": "Unused"}})
         out = self._run(
             "console.log(JSON.stringify(accountGroupsFor("
             + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(accounts) + ")));"
         )
         groups = json.loads(out)
-        self.assertNotIn("qwen-token", [g["account"] for g in groups])
+        self.assertNotIn("unused-account", [g["account"] for g in groups])
 
     def test_claude_group_is_filtered_to_tiers_present_in_tier_accounts(self):
         tier_accounts = dict(self.TIER_ACCOUNTS)
@@ -1460,14 +1462,21 @@ class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
         )
         self.assertIn('<optgroup label="Codex">', out)
         self.assertIn('<optgroup label="Claude">', out)
+        self.assertIn('<optgroup label="Qwen">', out)
         codex_start = out.index('<optgroup label="Codex">')
         claude_start = out.index('<optgroup label="Claude">')
+        qwen_start = out.index('<optgroup label="Qwen">')
+        self.assertLess(claude_start, qwen_start, "Qwen must come after Claude")
         codex_block = out[codex_start:claude_start]
-        claude_block = out[claude_start:]
-        self.assertIn('<option>sol</option>', codex_block)
+        claude_block = out[claude_start:qwen_start]
+        qwen_block = out[qwen_start:]
+        for tier in ("luna", "spark", "terra", "sol"):
+            with self.subTest(tier=tier):
+                self.assertIn(f'<option>{tier}</option>', codex_block)
         for tier in ("sonnet5", "haiku", "opus5"):
             with self.subTest(tier=tier):
                 self.assertIn(f'<option>{tier}</option>', claude_block)
+        self.assertIn('<option>qwen</option>', qwen_block)
 
     def test_static_markup_still_has_every_tier_count_id(self):
         cards_start = HTML.index('class="cards"')
