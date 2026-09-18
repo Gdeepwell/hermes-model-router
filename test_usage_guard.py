@@ -122,9 +122,15 @@ class CacheTests(unittest.TestCase):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0))
 
     def test_no_state_path_means_no_file(self):
-        with tempfile.TemporaryDirectory() as directory, self._fetchers(anthropic=_reading(61)):
-            usage_guard.read("anthropic", _cfg(), now=1000.0)
-            self.assertEqual(list(Path(directory).iterdir()), [])
+        cfg = _cfg()
+        self.assertIsNone(usage_guard._state_path(cfg))
+        with self._fetchers(anthropic=_reading(61)), \
+             patch.object(usage_guard.os, "replace") as replace, \
+             patch.object(Path, "write_text") as write_text:
+            reading = usage_guard.read("anthropic", cfg, now=1000.0)
+        self.assertEqual(reading.weekly, 61)
+        replace.assert_not_called()
+        write_text.assert_not_called()
 
     def test_a_configured_state_file_survives_a_restart(self):
         with tempfile.TemporaryDirectory() as directory:
