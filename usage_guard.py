@@ -154,6 +154,7 @@ def has_fetcher(account: str) -> bool:
 # Cache: memory per process, plus one shared state file when configured
 
 _LOCK = threading.Lock()
+_FILE_LOCK = threading.Lock()
 _CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -199,12 +200,13 @@ def _persist(cfg: Dict[str, Any], account: str, reading: Reading) -> None:
     if path is None:
         return
     try:
-        data = {a: r.__dict__ for a, r in _load_file(cfg).items()}
-        data[account] = reading.__dict__
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(temporary, path)
+        with _FILE_LOCK:
+            data = {a: r.__dict__ for a, r in _load_file(cfg).items()}
+            data[account] = reading.__dict__
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(temporary, path)
     except Exception:
         pass
 

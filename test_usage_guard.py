@@ -137,6 +137,64 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(usage_guard.FETCHERS["anthropic"].call_count, 0)
         self.assertEqual([c.args[0] for c in refresh.call_args_list], ["anthropic", "openai-codex"])
 
+    def test_concurrent_persist_does_not_lose_accounts(self):
+        """Verify that concurrent _persist calls on different accounts don't lose data."""
+        import threading
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.json"
+            cfg = _cfg(str(path))
+
+            # Patch _load_file to sleep briefly, making the race condition reproducible.
+            # Both threads will read the file before either writes, so without the lock
+            # the second write would overwrite the first account's data.
+            original_load_file = usage_guard._load_file
+            def slow_load_file(config):
+                result = original_load_file(config)
+                time.sleep(0.005)
+                return result
+
+            # Run the test multiple times to increase likelihood of hitting the race
+            for round_num in range(50):
+                # Reset the file for each round
+                if path.exists():
+                    path.unlink()
+
+                # Create readings with different values each round
+                reading_anthropic = Reading(10.0 + round_num, 5.0, None, None, time.time())
+                reading_codex = Reading(20.0 + round_num, 15.0, None, None, time.time())
+
+                with patch.object(usage_guard, "_load_file", side_effect=slow_load_file):
+                    # Use threads to simulate concurrent _persist calls
+                    errors = []
+                    def persist_anthropic():
+                        try:
+                            usage_guard._persist(cfg, "anthropic", reading_anthropic)
+                        except Exception as e:
+                            errors.append(e)
+
+                    def persist_codex():
+                        try:
+                            usage_guard._persist(cfg, "openai-codex", reading_codex)
+                        except Exception as e:
+                            errors.append(e)
+
+                    t1 = threading.Thread(target=persist_anthropic)
+                    t2 = threading.Thread(target=persist_codex)
+                    t1.start()
+                    t2.start()
+                    t1.join()
+                    t2.join()
+
+                # Assert no exceptions occurred
+                self.assertFalse(errors, f"Errors in round {round_num}: {errors}")
+
+                # Assert both accounts are in the final file
+                stored = json.loads(path.read_text(encoding="utf-8"))
+                self.assertIn("anthropic", stored, f"anthropic missing in round {round_num}")
+                self.assertIn("openai-codex", stored, f"openai-codex missing in round {round_num}")
+                self.assertEqual(stored["anthropic"]["weekly"], 10.0 + round_num)
+                self.assertEqual(stored["openai-codex"]["weekly"], 20.0 + round_num)
+
 
 def _hermes_importable():
     try:
