@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -381,19 +382,33 @@ def _delegation_log_path(config: dict):
     return Path(configured).expanduser() if configured else None
 
 
+_DELEGATION_LOG_TAIL_BYTES = 1_000_000
+
+
 def _read_delegation_log(config: dict, limit: int = 500):
-    """(audit lines, latest registration line) from claude-delegation.jsonl; malformed lines skipped."""
+    """(audit lines, latest registration line) from claude-delegation.jsonl; malformed lines skipped.
+
+    Only the tail of the log is read: it is never rotated, so a poll every few
+    seconds that loaded the whole file would get slower forever. Same pattern
+    as the router's own ``_recent_account_load`` in ``__init__.py``.
+    """
     path = _delegation_log_path(config)
     audits, registration = [], None
     if path is None or not path.exists():
         return audits, registration
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-max(limit * 2, limit):]
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _DELEGATION_LOG_TAIL_BYTES))
+            if size > _DELEGATION_LOG_TAIL_BYTES:
+                handle.readline()  # discard the partial line the seek landed in
+            lines = handle.readlines()
     except OSError:
         return audits, registration
-    for raw in lines:
+    for raw in lines[-max(limit * 2, limit):]:
         try:
-            entry = json.loads(raw)
+            entry = json.loads(raw.decode("utf-8"))
         except Exception:
             continue
         if not isinstance(entry, dict):

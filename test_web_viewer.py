@@ -1124,6 +1124,53 @@ class AccountsApiTests(unittest.TestCase):
             self.assertTrue(all(a["session_id"] == "s1" for a in audits))
             self.assertEqual(registration, {"event": "registration", "registered": True, "reason": ""})
 
+    def test_read_delegation_log_only_reads_the_tail(self):
+        """The log is never rotated, so a full read every /api/entries poll would slow down
+        forever. Only the last _DELEGATION_LOG_TAIL_BYTES bytes are ever loaded."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = self._build_config(directory)
+            registration = json.dumps({"event": "registration", "registered": True, "reason": ""})
+            early_audits = [
+                json.dumps({"event": "delegate_claude", "session_id": f"early-{i}",
+                            "turn_id": f"t{i}", "outcome": "ran"})
+                for i in range(50)
+            ]
+            late_audits = [
+                json.dumps({"event": "delegate_claude", "session_id": f"late-{i}",
+                            "turn_id": f"t{i}", "outcome": "ran"})
+                for i in range(5)
+            ]
+            log_path.write_text("\n".join([registration] + early_audits + late_audits), encoding="utf-8")
+
+            with patch.object(web_viewer, "_DELEGATION_LOG_TAIL_BYTES", 400):
+                audits, tail_registration = web_viewer._read_delegation_log(config)
+
+            # Only lines from the tail come back: the early lines (and the registration,
+            # which precedes them) fall outside the 400-byte window.
+            self.assertTrue(audits, "expected at least one audit line from the tail")
+            session_ids = {a["session_id"] for a in audits}
+            self.assertTrue(session_ids.issubset({f"late-{i}" for i in range(5)}))
+            self.assertFalse(session_ids & {f"early-{i}" for i in range(50)})
+            self.assertIsNone(tail_registration)
+            # Every returned line parsed cleanly -- a seek into the middle of a line would
+            # have produced a JSON error that is silently skipped, not a corrupt entry.
+            for audit in audits:
+                self.assertEqual(audit["event"], "delegate_claude")
+
+    def test_read_delegation_log_skips_a_non_utf8_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = self._build_config(directory)
+            good_line = json.dumps({"event": "delegate_claude", "session_id": "s2",
+                                     "turn_id": "t9", "outcome": "ran"}).encode("utf-8")
+            bad_line = b"\xff\xfe not valid utf-8 \x80\x81"
+            log_path.write_bytes(good_line + b"\n" + bad_line + b"\n")
+
+            audits, registration = web_viewer._read_delegation_log(config)
+
+            self.assertEqual(len(audits), 1)
+            self.assertEqual(audits[0]["session_id"], "s2")
+            self.assertIsNone(registration)
+
     def test_usage_refresh_endpoint_reads_through_the_shared_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             config, _, _ = self._build_config(directory)
