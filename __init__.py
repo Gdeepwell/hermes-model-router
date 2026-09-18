@@ -1933,9 +1933,19 @@ def _host_delegate_has_model(request: Any) -> bool:
 
 
 def _dispatch_phrase(target: str) -> str:
-    """How a conductor reaches a target: the wing's tool for Claude, else model:<name>."""
-    tier = claude_wing.TIER_FOR_TARGET.get(target) if claude_wing.is_active() else None
-    return f'delegate_claude(tier="{tier}")' if tier else f"model:{target}"
+    """How a conductor reaches a target: the wing's tool for Claude, else model:<name>.
+
+    While the wing is active, a non-Claude target is no longer phrased as
+    ``model:<name>`` either -- that reads as the same delegate_task 'model'
+    parameter this host does not have. It is named as the goal-prefix route
+    instead; the Claude route through ``delegate_claude`` is unaffected.
+    """
+    if not claude_wing.is_active():
+        return f"model:{target}"
+    tier = claude_wing.TIER_FOR_TARGET.get(target)
+    if tier:
+        return f'delegate_claude(tier="{tier}")'
+    return f"delegate_task (goal prefix [{target}])"
 
 
 def _is_anthropic_shaped(request: Dict[str, Any]) -> bool:
@@ -2168,7 +2178,7 @@ def _model_param_contract(
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
     )
-    if model_param:
+    if model_param or not claude_wing.is_active():
         opening = (
             f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
             "A goal-text prefix only renames the model inside the default provider and cannot reach a "

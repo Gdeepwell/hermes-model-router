@@ -460,6 +460,7 @@ class ShippedConfigTests(unittest.TestCase):
 
 from model_router import (  # noqa: E402
     _claude_target_sentence,
+    _dispatch_phrase,
     _host_delegate_has_model,
     _model_param_contract,
     _preference_sentence,
@@ -494,6 +495,18 @@ class ContractTextTests(unittest.TestCase):
         contract = _contract(_cfg(), active=True, model_param=False)
         self.assertNotIn("Set the delegate_task 'model' parameter", contract)
         self.assertTrue(contract.startswith("Route choice for delegated workers"))
+
+    def test_an_inactive_wing_keeps_todays_opening_even_without_a_model_parameter(self):
+        contract = _contract(_cfg(), active=False, model_param=False)
+        self.assertTrue(contract.startswith("Set the delegate_task 'model' parameter"))
+        self.assertNotIn("Route choice for delegated workers", contract)
+
+    def test_the_dispatch_phrase_names_the_goal_prefix_route_while_active(self):
+        with patch.object(claude_wing, "_ACTIVE", True):
+            self.assertEqual(_dispatch_phrase("terra"), "delegate_task (goal prefix [terra])")
+        with patch.object(claude_wing, "_ACTIVE", False):
+            self.assertEqual(_dispatch_phrase("terra"), "model:terra")
+            self.assertEqual(_dispatch_phrase("opus5"), "model:opus5")
 
     def test_the_default_keeps_todays_opening(self):
         self.assertTrue(_contract(_cfg(), active=False).startswith("Set the delegate_task 'model' parameter"))
