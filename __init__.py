@@ -2942,6 +2942,94 @@ def _force_shadow_delegation_if_eligible(kwargs: Dict[str, Any], cfg: Dict[str, 
     return _prepare_shadow_delegation(kwargs["request"], benchmark_id)
 
 
+_NOTE_TOOL_NAMES = frozenset({"delegate_task", "mcp__delegate_task", "delegate_claude", "mcp__delegate_claude"})
+_WING_AVAILABLE_LINE = (
+    'The Claude wing is available through delegate_claude: tier "haiku" for quick lookups, "sonnet" as '
+    'the default worker, "opus" for hard or consequential work.'
+)
+
+
+def _note_names(kind: str, cfg: Dict[str, Any], state: str, claude_offered: set) -> list:
+    """The kind's preference chain, limited to what can be offered, in advice order."""
+    names = []
+    for name in _preference_list(kind, cfg):
+        if name in claude_wing.TIER_FOR_TARGET:
+            if name in claude_offered and _target_is_offered(name, cfg):
+                names.append(name)
+        elif _is_routable_tier(name, cfg) and _target_is_offered(name, cfg):
+            names.append(name)
+    if state in ("soft", "closed"):
+        # At the soft limit Claude still runs, but it is no longer the first thing to reach for.
+        names = ([n for n in names if n not in claude_wing.TIER_FOR_TARGET]
+                 + [n for n in names if n in claude_wing.TIER_FOR_TARGET])
+    return names
+
+
+def _note_label(name: str, state: str, notes: Dict[str, str], *, as_call: bool) -> str:
+    tier = claude_wing.TIER_FOR_TARGET.get(name)
+    mark = {"soft": " (soft limit)", "closed": " (closed)"}.get(state, "") if tier else ""
+    if not as_call:
+        return f"{name}{mark}{notes.get(name, '')}"
+    call = f'delegate_claude(tier="{tier}")' if tier else f"delegate_task (goal prefix [{name}])"
+    return f"{name} → {call}{mark}{notes.get(name, '')}"
+
+
+def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str, Any]) -> str:
+    """Advice for a Claude parent: which wing and tier, per kind of work.
+
+    With orchestration off, a parent on an external account got no routing advice
+    at all; the preference chains only ever reached a forced conductor. This is
+    that advice, once per turn, and advisory: the parent may overrule it.
+    """
+    if not claude_wing.is_active():
+        return ""
+    if int(kwargs.get("api_call_count", 1) or 1) != 1:
+        return ""
+    if str(kwargs.get("platform", "")).casefold() == "subagent" or ":sa-" in str(kwargs.get("turn_id", "")):
+        return ""
+    if not set(_tool_names(request)) & _NOTE_TOOL_NAMES:
+        return ""
+    text, _index = _last_user_text_and_index(_request_items(request))
+    if not text or _is_delegation_outcome_text(text) or _lifecycle_event_kind(request):
+        return ""
+    try:
+        kind = classify_request(request, api_call_count=1, config=cfg).kind or "default"
+    except Exception:
+        kind = "default"
+    reading = claude_wing.peek_usage(cfg)
+    state = claude_wing.wing_state(cfg, reading)
+    claude_offered = set(_delegation_target_names())
+
+    chain = _note_names(kind, cfg, state, claude_offered)
+    notes = _target_availability(chain, cfg)
+    lines = [f"[ROUTER] This turn classifies as: {kind}."]
+    if chain:
+        lines.append(f"If you delegate {kind} work: "
+                     + " > ".join(_note_label(n, state, notes, as_call=True) for n in chain) + ".")
+    else:
+        lines.append(f"No preference is configured for {kind} work; delegate_task keeps its built-in route.")
+    others = []
+    for other in WORK_KINDS:
+        if other == kind:
+            continue
+        names = _note_names(other, cfg, state, claude_offered)
+        if names:
+            other_notes = _target_availability(names, cfg)
+            others.append(f"{other}: " + " > ".join(_note_label(n, state, other_notes, as_call=False)
+                                                   for n in names))
+    if others:
+        lines.append("Other kinds: " + "; ".join(others) + ".")
+    if not any(name in claude_wing.TIER_FOR_TARGET for k in WORK_KINDS for name in _preference_list(k, cfg)):
+        lines.append(_WING_AVAILABLE_LINE)
+    soft, hard = claude_wing.guard_limits(cfg)
+    if reading is None or reading.weekly is None:
+        lines.append(f"Claude weekly usage: unknown (soft limit {soft:.0f}%, hard {hard:.0f}%).")
+    else:
+        lines.append(f"Claude weekly usage {reading.weekly:.0f}% (soft limit {soft:.0f}%, hard {hard:.0f}%).")
+    lines.append("Advisory: if you route differently, say why in one line.")
+    return "\n\n" + "\n".join(lines) + "\n"
+
+
 def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     """Hermes llm_request middleware entrypoint."""
     cfg = _load_config()
@@ -2997,11 +3085,16 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
             )
             else ""
         )
-        if forced is None and not redispatch:
+        # The forced preflight already carries the full contract; the note is for
+        # the turns it leaves alone.
+        note = _routing_note(request, kwargs, cfg) if forced is None else ""
+        if forced is None and not redispatch and not note:
             return None
         forced = deepcopy(forced if forced is not None else request)
         if redispatch:
             _append_user_instruction(forced, redispatch)
+        if note:
+            _append_user_instruction(forced, note)
         # Same envelope as the normal path, minus any model/provider change: the
         # request carries the added contract, the route stays exactly as it arrived.
         return {

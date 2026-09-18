@@ -568,5 +568,112 @@ class ContractTextTests(unittest.TestCase):
         self.assertNotIn("Set the delegate_task 'model' parameter", text)
 
 
+from model_router import _routing_note, route_llm_request  # noqa: E402
+from model_router.test_external_orchestrator import ACTIONABLE  # noqa: E402
+from model_router.test_model_router import chat_request  # noqa: E402
+
+PREFS = {
+    "design": ["sol", "opus5"], "code": ["terra", "sonnet5"], "explore": ["spark", "luna", "haiku"],
+    "review": ["sonnet5", "opus5", "terra"],
+}
+
+
+def _parent_request(tools=("delegate_task", "delegate_claude")):
+    # The same actionable prompt the external-orchestrator tests use, so the
+    # forced-preflight case below is not skipped by an unrelated gate.
+    request = chat_request(ACTIONABLE)
+    request["model"] = "claude-opus-5"
+    request["tools"] = [{"type": "function", "name": name, "parameters": {"type": "object", "properties": {}}}
+                        for name in tools]
+    return request
+
+
+def _note(kind="code", weekly=40.0, cfg=None, active=True, request=None, **kwargs):
+    reading = None if weekly is None else _reading(weekly)
+    kwargs = {"api_call_count": 1, "turn_id": "t1", "platform": "cli", **kwargs}
+    with patch.object(claude_wing, "_ACTIVE", active), \
+         patch.object(claude_wing, "peek_usage", return_value=reading), \
+         patch("model_router.classify_request", return_value=SimpleNamespace(kind=kind)), \
+         patch("model_router._delegation_target_names", return_value=("haiku", "opus5", "sonnet5")), \
+         patch("model_router._tier_cooldown_remaining", return_value=0.0):
+        return _routing_note(request or _parent_request(), kwargs, cfg or _cfg(preferences=PREFS))
+
+
+class RoutingNoteTests(unittest.TestCase):
+    def test_the_note_recommends_the_kinds_chain_as_calls(self):
+        note = _note()
+        self.assertIn("[ROUTER] This turn classifies as: code.", note)
+        self.assertIn('If you delegate code work: terra → delegate_task (goal prefix [terra]) > '
+                      'sonnet5 → delegate_claude(tier="sonnet").', note)
+        self.assertIn("Other kinds:", note)
+        self.assertIn("review: sonnet5 > opus5 > terra", note)
+        self.assertIn("Claude weekly usage 40% (soft limit 70%, hard 90%).", note)
+        self.assertIn("Advisory: if you route differently, say why in one line.", note)
+
+    def test_the_soft_limit_moves_claude_behind_codex(self):
+        note = _note(kind="review", weekly=75.0)
+        self.assertIn("If you delegate review work: terra → delegate_task", note)
+        self.assertIn('sonnet5 → delegate_claude(tier="sonnet") (soft limit)', note)
+
+    def test_the_hard_limit_marks_claude_closed(self):
+        self.assertIn("(closed)", _note(kind="review", weekly=95.0))
+
+    def test_an_unknown_reading_says_so(self):
+        self.assertIn("Claude weekly usage: unknown", _note(weekly=None))
+
+    def test_no_claude_preference_still_announces_the_wing(self):
+        note = _note(cfg=_cfg(preferences={"code": ["terra"]}))
+        self.assertIn("The Claude wing is available through delegate_claude", note)
+
+    def test_a_kind_without_a_preference_keeps_the_built_in_route(self):
+        self.assertIn("delegate_task keeps its built-in route", _note(kind="chat"))
+
+    def test_the_note_is_only_for_a_root_parents_first_call(self):
+        cases = {
+            "inactive wing": dict(active=False),
+            "subagent": dict(platform="subagent"),
+            "mid-loop": dict(api_call_count=2),
+            "no delegation tool": dict(request=_parent_request(tools=("read_file",))),
+        }
+        for name, overrides in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(_note(**overrides), "")
+
+    def test_the_claude_code_prefix_still_counts_as_a_delegation_tool(self):
+        self.assertIn("[ROUTER]", _note(request=_parent_request(tools=("mcp__delegate_claude",))))
+
+    def test_a_completion_envelope_gets_no_note(self):
+        with patch("model_router._is_delegation_outcome_text", return_value=True):
+            self.assertEqual(_note(), "")
+
+
+class RoutingNoteMiddlewareTests(unittest.TestCase):
+    def _route(self, orchestration):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        cfg = _cfg(preferences=PREFS, enabled=True, provider="openai-codex",
+                   orchestration={"enabled": orchestration, "max_tasks": 2,
+                                  "path": str(Path(directory.name) / "orchestration.jsonl")},
+                   logging={"enabled": False}, shadow={"enabled": False})
+        with patch.object(claude_wing, "_ACTIVE", True), \
+             patch.object(claude_wing, "peek_usage", return_value=_reading(40)), \
+             patch("model_router._load_config", return_value=cfg), \
+             patch("model_router._log_decision"), \
+             patch("model_router._orchestration_event"), \
+             patch("model_router._delegation_target_names", return_value=("haiku", "opus5", "sonnet5")):
+            return route_llm_request(request=_parent_request(), provider="anthropic", model="claude-opus-5",
+                                     api_call_count=1, turn_id="root-turn", platform="cli")
+
+    def test_a_claude_parent_gets_the_note_and_keeps_its_model(self):
+        routed = self._route(orchestration=False)
+        self.assertIsNotNone(routed)
+        self.assertIn("[ROUTER] This turn classifies as", routed["request"]["messages"][-1]["content"])
+        self.assertEqual(routed["request"]["model"], "claude-opus-5")
+
+    def test_a_forced_preflight_carries_the_contract_instead(self):
+        routed = self._route(orchestration=True)
+        self.assertNotIn("[ROUTER] This turn classifies as", json.dumps(routed["request"]))
+
+
 if __name__ == "__main__":
     unittest.main()
