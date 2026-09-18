@@ -431,6 +431,38 @@ def _hermes_importable():
 
 
 @unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
+class UsagePayloadTests(unittest.TestCase):
+    """Anthropic's /api/oauth/usage reports utilization as a percentage (checked live
+    on 2026-09-18: five_hour 5.0, seven_day 13.0). Hermes's own reader scales any
+    value <= 1 by 100, which would read a 1% session as 100% and close the wing."""
+
+    def _fetch(self, payload):
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
+             patch("agent.account_usage._get_json", return_value=payload) as get_json:
+            reading = claude_wing._fetch_reading()
+        return reading, get_json
+
+    def test_utilization_is_taken_as_a_percentage(self):
+        reading, _ = self._fetch({"five_hour": {"utilization": 1.0}, "seven_day": {"utilization": 0.8}})
+        self.assertEqual((reading.weekly, reading.session), (0.8, 1.0))
+
+    def test_the_usage_endpoint_is_asked_with_the_oauth_token(self):
+        _reading_, get_json = self._fetch({"five_hour": {"utilization": 5.0}, "seven_day": {"utilization": 13.0}})
+        url, headers = get_json.call_args.args[:2]
+        self.assertEqual(url, "https://api.anthropic.com/api/oauth/usage")
+        self.assertEqual(headers["Authorization"], "Bearer tok")
+
+    def test_no_windows_is_no_reading(self):
+        self.assertIsNone(self._fetch({})[0])
+
+    def test_no_token_is_no_reading(self):
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value=""), \
+             patch("agent.account_usage._get_json") as get_json:
+            self.assertIsNone(claude_wing._fetch_reading())
+        get_json.assert_not_called()
+
+
+@unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
 class RealHostTests(unittest.TestCase):
     """Against the installed Hermes: the guarantees the wing leans on."""
 

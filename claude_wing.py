@@ -191,23 +191,33 @@ def _cached(cfg: Dict[str, Any]) -> Optional[UsageReading]:
     return _USAGE["reading"]
 
 
+_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+
+
 def _fetch_reading() -> Optional[UsageReading]:
-    """Weekly and 5-hour utilisation from Anthropic's OAuth usage endpoint."""
+    """Weekly and 5-hour utilisation from Anthropic's OAuth usage endpoint.
+
+    Read raw rather than through ``fetch_account_usage``: the endpoint reports
+    utilization as a percentage (checked live 2026-09-18: 5.0 and 13.0), but
+    Hermes's reader scales any value <= 1 by 100 -- a 1% session would read as
+    100% and close the wing. Same request, headers and helper Hermes uses.
+    """
     try:
-        from agent.account_usage import fetch_account_usage
+        from agent.account_usage import _get_json
+        from agent.anthropic_credentials import resolve_anthropic_token
     except Exception:
         return None
-    snapshot = fetch_account_usage("anthropic")
-    if snapshot is None or not getattr(snapshot, "available", False):
+    token = (resolve_anthropic_token() or "").strip()
+    if not token:
         return None
-    weekly = session = None
-    for window in getattr(snapshot, "windows", ()) or ():
-        label = str(getattr(window, "label", ""))
-        used = _num(getattr(window, "used_percent", None))
-        if label == "Current week":
-            weekly = used
-        elif label == "Current session":
-            session = used
+    payload = _get_json(_USAGE_URL, {
+        "Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
+        "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0",
+    }, timeout=15.0)
+    if not isinstance(payload, dict):
+        return None
+    weekly = _num((payload.get("seven_day") or {}).get("utilization"))
+    session = _num((payload.get("five_hour") or {}).get("utilization"))
     if weekly is None and session is None:
         return None
     return UsageReading(weekly, session, time.time())
