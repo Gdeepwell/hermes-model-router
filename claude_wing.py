@@ -109,3 +109,194 @@ def registration_block(cfg: Dict[str, Any]) -> str:
         return "every Claude target is switched off in `callable`"
     ok, why = host_check()
     return "" if ok else why
+
+
+# ---------------------------------------------------------------------------
+# Usage guard
+
+
+@dataclass(frozen=True)
+class UsageReading:
+    weekly: Optional[float]
+    session: Optional[float]
+    fetched_at: float
+
+
+@dataclass(frozen=True)
+class GuardOutcome:
+    tier: str
+    refused: str = ""
+    adjusted: str = ""
+    usage: str = "unknown"
+
+
+_USAGE_LOCK = threading.Lock()
+_USAGE: Dict[str, Any] = {"reading": None, "loaded": False, "failed_at": 0.0, "refreshing": False}
+
+
+def _reset_usage_cache() -> None:
+    with _USAGE_LOCK:
+        _USAGE.update(reading=None, loaded=False, failed_at=0.0, refreshing=False)
+
+
+def _num(value: Any) -> Optional[float]:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def guard_limits(cfg: Dict[str, Any]) -> Tuple[float, float]:
+    guard = wing_config(cfg)["usage_guard"]
+    return float(guard.get("soft_percent", 70)), float(guard.get("hard_percent", 90))
+
+
+def _ttl(cfg: Dict[str, Any]) -> float:
+    return max(1.0, float(wing_config(cfg)["usage_guard"].get("cache_seconds", 300) or 300))
+
+
+def _state_path(cfg: Dict[str, Any]) -> Optional[Path]:
+    configured = str(wing_config(cfg)["usage_guard"].get("state_path") or "").strip()
+    return Path(os.path.expanduser(configured)) if configured else None
+
+
+def _load_persisted(cfg: Dict[str, Any]) -> Optional[UsageReading]:
+    path = _state_path(cfg)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return UsageReading(_num(data.get("weekly")), _num(data.get("session")), float(data["fetched_at"]))
+    except Exception:
+        return None
+
+
+def _persist(cfg: Dict[str, Any], reading: UsageReading) -> None:
+    path = _state_path(cfg)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(
+            {"weekly": reading.weekly, "session": reading.session, "fetched_at": reading.fetched_at}
+        ), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:
+        pass
+
+
+def _cached(cfg: Dict[str, Any]) -> Optional[UsageReading]:
+    """The in-memory reading, seeded once per process from the state file. Call under the lock."""
+    if not _USAGE["loaded"]:
+        _USAGE["reading"] = _load_persisted(cfg)
+        _USAGE["loaded"] = True
+    return _USAGE["reading"]
+
+
+def _fetch_reading() -> Optional[UsageReading]:
+    """Weekly and 5-hour utilisation from Anthropic's OAuth usage endpoint."""
+    try:
+        from agent.account_usage import fetch_account_usage
+    except Exception:
+        return None
+    snapshot = fetch_account_usage("anthropic")
+    if snapshot is None or not getattr(snapshot, "available", False):
+        return None
+    weekly = session = None
+    for window in getattr(snapshot, "windows", ()) or ():
+        label = str(getattr(window, "label", ""))
+        used = _num(getattr(window, "used_percent", None))
+        if label == "Current week":
+            weekly = used
+        elif label == "Current session":
+            session = used
+    if weekly is None and session is None:
+        return None
+    return UsageReading(weekly, session, time.time())
+
+
+def read_usage(cfg: Dict[str, Any], *, now: Optional[float] = None) -> Optional[UsageReading]:
+    """The current reading, fetching at most once per ``cache_seconds``.
+
+    A failed fetch is not retried within the period either: the endpoint being
+    down must not add a 15-second wait to every delegation.
+    """
+    now = time.time() if now is None else now
+    ttl = _ttl(cfg)
+    with _USAGE_LOCK:
+        reading = _cached(cfg)
+        if reading is not None and now - reading.fetched_at < ttl:
+            return reading
+        if now - _USAGE["failed_at"] < ttl:
+            return None
+    try:
+        fresh = _fetch_reading()
+    except Exception:
+        fresh = None
+    with _USAGE_LOCK:
+        if fresh is None:
+            _USAGE["failed_at"] = now
+        else:
+            fresh = replace(fresh, fetched_at=now)
+            _USAGE["reading"], _USAGE["failed_at"] = fresh, 0.0
+    if fresh is None:
+        _logger.warning("claude_wing: Anthropic usage unavailable; the guard fails open for %ds", int(ttl))
+        return None
+    _persist(cfg, fresh)
+    return fresh
+
+
+def _start_refresh(cfg: Dict[str, Any]) -> None:
+    def run() -> None:
+        try:
+            read_usage(cfg)
+        finally:
+            with _USAGE_LOCK:
+                _USAGE["refreshing"] = False
+
+    threading.Thread(target=run, name="claude-wing-usage", daemon=True).start()
+
+
+def peek_usage(cfg: Dict[str, Any]) -> Optional[UsageReading]:
+    """The cached reading, never waiting on the network.
+
+    For the routing note, which runs inside the parent's request middleware: a
+    stale or missing reading starts one background refresh and is returned as is.
+    """
+    now = time.time()
+    ttl = _ttl(cfg)
+    with _USAGE_LOCK:
+        reading = _cached(cfg)
+        stale = reading is None or now - reading.fetched_at >= ttl
+        refresh = stale and not _USAGE["refreshing"] and now - _USAGE["failed_at"] >= ttl
+        if refresh:
+            _USAGE["refreshing"] = True
+    if refresh:
+        _start_refresh(cfg)
+    return reading
+
+
+def wing_state(cfg: Dict[str, Any], reading: Optional[UsageReading]) -> str:
+    if reading is None:
+        return "unknown"
+    soft, hard = guard_limits(cfg)
+    weekly, session = reading.weekly or 0.0, reading.session or 0.0
+    if weekly >= hard or session >= hard:
+        return "closed"
+    return "soft" if weekly >= soft else "open"
+
+
+def apply_guard(tier: str, cfg: Dict[str, Any], reading: Optional[UsageReading]) -> GuardOutcome:
+    """Workers only: the soft limit exists to leave the Opus parent room."""
+    if reading is None:
+        return GuardOutcome(tier)
+    soft, hard = guard_limits(cfg)
+    weekly, session = reading.weekly or 0.0, reading.session or 0.0
+    usage = f"{weekly:.0f}%"
+    if weekly >= hard:
+        return GuardOutcome(tier, refused=f"Claude wing closed: weekly usage {weekly:.0f}% "
+                                          f"(hard limit {hard:.0f}%).", usage=usage)
+    if session >= hard:
+        return GuardOutcome(tier, refused=f"Claude wing closed: 5-hour session usage {session:.0f}% "
+                                          f"(hard limit {hard:.0f}%).", usage=usage)
+    if weekly >= soft and tier == "opus":
+        return GuardOutcome("sonnet", adjusted=f"opus→sonnet (weekly usage {weekly:.0f}%)", usage=usage)
+    return GuardOutcome(tier, usage=usage)

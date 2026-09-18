@@ -101,5 +101,113 @@ class RegistrationBlockTests(unittest.TestCase):
             self.assertEqual(registration_block(_cfg()), "")
 
 
+from model_router.claude_wing import (  # noqa: E402
+    GuardOutcome,
+    UsageReading,
+    apply_guard,
+    peek_usage,
+    read_usage,
+    wing_state,
+)
+
+
+def _reading(weekly, session=10.0, fetched_at=None):
+    return UsageReading(weekly, session, time.time() if fetched_at is None else fetched_at)
+
+
+class GuardTests(unittest.TestCase):
+    def test_below_the_soft_limit_everything_runs_as_asked(self):
+        for tier in ("haiku", "sonnet", "opus"):
+            with self.subTest(tier=tier):
+                outcome = apply_guard(tier, _cfg(), _reading(50))
+                self.assertEqual((outcome.tier, outcome.refused, outcome.adjusted), (tier, "", ""))
+                self.assertEqual(outcome.usage, "50%")
+
+    def test_the_soft_limit_lowers_opus_only(self):
+        outcome = apply_guard("opus", _cfg(), _reading(75))
+        self.assertEqual(outcome.tier, "sonnet")
+        self.assertEqual(outcome.adjusted, "opus→sonnet (weekly usage 75%)")
+        for tier in ("haiku", "sonnet"):
+            with self.subTest(tier=tier):
+                self.assertEqual(apply_guard(tier, _cfg(), _reading(75)).tier, tier)
+
+    def test_the_hard_limit_closes_the_wing(self):
+        outcome = apply_guard("haiku", _cfg(), _reading(95))
+        self.assertIn("Claude wing closed: weekly usage 95%", outcome.refused)
+
+    def test_a_full_session_window_also_closes_it(self):
+        outcome = apply_guard("sonnet", _cfg(), _reading(40, session=92))
+        self.assertIn("5-hour session usage 92%", outcome.refused)
+
+    def test_no_reading_fails_open(self):
+        """A missing reading must not close the wing; Anthropic's own quota error
+        still stops a child, and the router records that as a cooldown."""
+        self.assertEqual(apply_guard("opus", _cfg(), None), GuardOutcome("opus"))
+
+    def test_wing_state(self):
+        self.assertEqual(wing_state(_cfg(), None), "unknown")
+        self.assertEqual(wing_state(_cfg(), _reading(50)), "open")
+        self.assertEqual(wing_state(_cfg(), _reading(75)), "soft")
+        self.assertEqual(wing_state(_cfg(), _reading(90)), "closed")
+
+
+class UsageCacheTests(unittest.TestCase):
+    def setUp(self):
+        claude_wing._reset_usage_cache()
+        self.addCleanup(claude_wing._reset_usage_cache)
+
+    def test_one_fetch_per_cache_period(self):
+        fetch = MagicMock(return_value=_reading(40))
+        with patch.object(claude_wing, "_fetch_reading", fetch):
+            read_usage(_cfg(), now=1000.0)
+            read_usage(_cfg(), now=1010.0)
+            self.assertEqual(fetch.call_count, 1)
+            read_usage(_cfg(), now=1400.0)
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_a_failed_reading_is_not_retried_within_the_period(self):
+        fetch = MagicMock(return_value=None)
+        with patch.object(claude_wing, "_fetch_reading", fetch):
+            self.assertIsNone(read_usage(_cfg(), now=1000.0))
+            self.assertIsNone(read_usage(_cfg(), now=1010.0))
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_a_configured_state_file_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            cfg["claude_wing"]["usage_guard"]["state_path"] = str(Path(directory) / "usage.json")
+            with patch.object(claude_wing, "_fetch_reading", return_value=_reading(61)):
+                read_usage(cfg, now=1000.0)
+            claude_wing._reset_usage_cache()  # a new process
+            fetch = MagicMock()
+            with patch.object(claude_wing, "_fetch_reading", fetch):
+                reading = read_usage(cfg, now=1010.0)
+        self.assertEqual(reading.weekly, 61)
+        fetch.assert_not_called()
+
+    def test_no_state_path_means_no_file(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(claude_wing, "_fetch_reading", return_value=_reading(61)):
+            read_usage(_cfg(), now=1000.0)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_peek_never_fetches_and_starts_one_refresh_when_stale(self):
+        fetch, refresh = MagicMock(), MagicMock()
+        with patch.object(claude_wing, "_fetch_reading", fetch), \
+             patch.object(claude_wing, "_start_refresh", refresh):
+            self.assertIsNone(peek_usage(_cfg()))
+            peek_usage(_cfg())
+        fetch.assert_not_called()
+        self.assertEqual(refresh.call_count, 1)
+
+    def test_peek_returns_a_fresh_reading_without_refreshing(self):
+        refresh = MagicMock()
+        with patch.object(claude_wing, "_fetch_reading", return_value=_reading(40)):
+            read_usage(_cfg())
+        with patch.object(claude_wing, "_start_refresh", refresh):
+            self.assertEqual(peek_usage(_cfg()).weekly, 40)
+        refresh.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
