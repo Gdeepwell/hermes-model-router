@@ -254,9 +254,15 @@ def _router_module():
     """Import the router package from this standalone script, or None.
 
     The dashboard runs as a plain file with its own directory as cwd, so the
-    package only becomes importable once its PARENT is on sys.path. Every call
-    site needs that, which is why it lives here rather than being repeated —
-    an import that skipped it silently returned empty data to the settings page.
+    package only becomes importable once its PARENT is on sys.path -- but that
+    only works when the plugin directory is literally named ``model_router``.
+    The repo is ``hermes-model-router`` and the installed plugin directory is
+    ``model-router`` (hyphenated, after the manifest name), so a normal launch
+    (``~/.hermes/hermes-agent/venv/bin/python
+    ~/.hermes/plugins/model-router/web_viewer.py``) never has a ``model_router``
+    package to find that way, and the first attempt returns None. The fallback
+    loads the package from this script's own directory under the name
+    ``model_router`` regardless of what the directory is actually called.
     """
     try:
         import sys
@@ -268,6 +274,23 @@ def _router_module():
 
         return model_router
     except Exception:
+        pass
+    try:
+        import importlib.util
+        import sys
+
+        here = Path(__file__).resolve().parent
+        spec = importlib.util.spec_from_file_location(
+            "model_router", here / "__init__.py", submodule_search_locations=[str(here)]
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["model_router"] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        sys.modules.pop("model_router", None)
         return None
 
 
@@ -327,19 +350,15 @@ def _router_status() -> dict:
     decision disagree about which tiers are available.
     """
     empty = {"cooldowns": {}, "load": {}, "window_minutes": 0, "routable": []}
+    router = _router_module()
+    if router is None:
+        return empty
     try:
-        import sys
-
-        parent = str(Path(__file__).resolve().parent.parent)
-        if parent not in sys.path:
-            sys.path.insert(0, parent)
-        from model_router import (
-            _load_config,
-            _read_cooldown_state,
-            _recent_account_load,
-            _tier_cooldown_remaining,
-        )
-    except Exception:
+        _load_config = router._load_config
+        _read_cooldown_state = router._read_cooldown_state
+        _recent_account_load = router._recent_account_load
+        _tier_cooldown_remaining = router._tier_cooldown_remaining
+    except AttributeError:
         return empty
     try:
         config = _load_config()

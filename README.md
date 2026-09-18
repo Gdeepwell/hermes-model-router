@@ -436,9 +436,13 @@ enough to pass `retry_call` to execution middleware.
 ### Live Dashboard
 
 ```bash
-python3 ~/.hermes/plugins/model-router/web_viewer.py
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/plugins/model-router/web_viewer.py
 # http://localhost:8765
 ```
+
+Run it with the Hermes venv's own python, not a bare `python3`: Refresh on an
+account card calls into Hermes's `agent.account_usage`, which only that venv
+has installed.
 
 Three tabs: **Model Router**, **Settings**, and an embedded **Hermes Command
 Center**. The interface is available in English and Hungarian.

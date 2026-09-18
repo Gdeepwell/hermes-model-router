@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import time
@@ -532,11 +533,47 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RouterModuleImportTests(unittest.TestCase):
+    """A normal Hermes install has no ``model_router`` package anywhere on
+    sys.path: the repo is ``hermes-model-router`` and the plugin directory is
+    ``model-router`` (hyphenated). _router_module() must still find the router
+    by loading it from its own script directory."""
+
+    def test_router_module_imports_without_a_parent_named_model_router(self):
+        import subprocess
+        import sys
+        import tempfile
+
+        script_dir = str(Path(web_viewer.__file__).resolve().parent)
+        probe = (
+            "import importlib.util, sys\n"
+            f"sys.path.insert(0, {script_dir!r})\n"
+            f"spec = importlib.util.spec_from_file_location('web_viewer', {str(Path(web_viewer.__file__).resolve())!r})\n"
+            "web_viewer = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(web_viewer)\n"
+            "router = web_viewer._router_module()\n"
+            "assert router is not None, 'expected the router to import'\n"
+            "assert hasattr(router, 'usage_guard'), 'expected the router module to carry usage_guard'\n"
+            "print('OK')\n"
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            result = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=cwd,
+                env={"HOME": cwd, "PATH": os.environ.get("PATH", "")},
+                check=True, text=True, capture_output=True,
+            )
+        self.assertEqual(result.stdout.strip(), "OK")
+
+
 class RouterStatusTests(unittest.TestCase):
     def test_router_status_degrades_to_empty_instead_of_failing(self):
         """The dashboard is a standalone script; it must keep serving the log
-        even when the router package cannot be imported."""
-        with patch.dict("sys.modules", {"model_router": None}):
+        even when the router package truly cannot be imported. _router_module()
+        now has its own importlib fallback (see RouterModuleImportTests), so this
+        drives the degrade path through that seam directly rather than via the
+        old sys.modules trick, which the fallback would simply route around."""
+        with patch.object(web_viewer, "_router_module", return_value=None):
             status = web_viewer._router_status()
         self.assertEqual(
             status, {"cooldowns": {}, "load": {}, "window_minutes": 0, "routable": []}
