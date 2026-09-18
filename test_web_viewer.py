@@ -353,7 +353,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34,
-             "opus5": 0, "sonnet5": 0, "qwen": 0},
+             "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0},
         )
         renderer = HTML[HTML.rindex("render=function(){"):]
         self.assertIn("const summary=executionSummary(runData.map(run=>run.scope.calls))", renderer)
@@ -930,3 +930,50 @@ class ConfigPathTests(unittest.TestCase):
         import model_router
 
         self.assertEqual(web_viewer.CONFIG_PATH, model_router._CONFIG_PATH)
+
+
+class HaikuDashboardTests(DashboardProbeMixin, unittest.TestCase):
+    """The Claude wing adds a third Claude tier; the dashboard must show it
+    wherever it shows the other two, or Haiku workers are counted nowhere."""
+
+    def test_haiku_is_styled_like_sonnet5(self):
+        import re
+
+        css = "".join(re.findall(r"<style>(.*?)</style>", HTML, re.S))
+        selectors = {
+            tier: sorted(
+                match.group(1).replace(tier, "<tier>")
+                for match in re.finditer(r"([^{};]*\.%s[^{};]*)\{" % tier, css)
+            )
+            for tier in ("sonnet5", "haiku")
+        }
+        self.assertTrue(selectors["haiku"], "expected haiku to carry tier styling")
+        self.assertEqual(selectors["haiku"], selectors["sonnet5"])
+
+    def test_haiku_is_enumerated_everywhere_sonnet5_is(self):
+        for fragment in ("--haiku:", "<option>haiku</option>", 'class="card haiku"',
+                         ".pill.haiku{color:var(--haiku)}", ".task-tree-marker.haiku{background:var(--haiku)"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, HTML)
+        self.assertEqual(HTML.count("'sonnet5'"), HTML.count("'haiku'"))
+        self.assertEqual(HTML.count("sonnet5:"), HTML.count("haiku:"))
+
+    def test_haiku_has_labels_in_both_languages(self):
+        for key in ("card.haiku", "model.desc.haiku"):
+            with self.subTest(key=key):
+                english, hungarian = self.i18n(key)
+                self.assertTrue(english and hungarian)
+
+    def test_a_haiku_call_is_classified_as_haiku(self):
+        source = self.execution_source()
+        parent = {"children": [{"id": "external", "model": "claude-haiku-4-5-20251001",
+                                "routed_calls": [{"tier": "haiku", "model": "claude-haiku-4-5-20251001",
+                                                  "effort": "external"}], "children": []}]}
+        probe = (source + "\nfunction sessionIdFromTurn(entry){return String(entry?.turn_id||'').split(':')[0]}\n"
+                 "const scope=executionScope([{tier:'terra'}],[]," + json.dumps(parent) + ",'haiku');"
+                 "console.log(JSON.stringify({kinds:scope.nodes.map(executionKind),"
+                 "summary:executionSummary([scope.calls])}));")
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        observed = json.loads(result.stdout)
+        self.assertEqual(observed["kinds"], ["haiku"])
+        self.assertEqual(observed["summary"]["haiku"], 1)
