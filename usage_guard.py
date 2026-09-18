@@ -282,7 +282,13 @@ def peek(account: str, cfg: Dict[str, Any]) -> Optional[Reading]:
         if refresh:
             slot["refreshing"] = True
     if refresh:
-        _start_refresh(account, cfg)
+        try:
+            _start_refresh(account, cfg)
+        except Exception:
+            # Never leave `refreshing` stuck at True: that would permanently
+            # block every future refresh for this account.
+            with _LOCK:
+                _slot(account)["refreshing"] = False
     return reading
 
 

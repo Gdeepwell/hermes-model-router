@@ -184,6 +184,21 @@ class CacheTests(unittest.TestCase):
             self.assertEqual(usage_guard.FETCHERS["anthropic"].call_count, 0)
         self.assertEqual([c.args[0] for c in refresh.call_args_list], ["anthropic", "openai-codex"])
 
+    def test_peek_resets_the_refreshing_flag_when_starting_the_refresh_thread_raises(self):
+        """M13: if _start_refresh itself raises (e.g. the thread fails to
+        start), the account's `refreshing` flag must not be left stuck at
+        True forever -- that would permanently block every future refresh."""
+        with self._fetchers(anthropic=_reading(1)), \
+             patch.object(usage_guard, "_start_refresh", side_effect=RuntimeError("boom")):
+            self.assertIsNone(usage_guard.peek("anthropic", _cfg()))
+            self.assertFalse(usage_guard._slot("anthropic")["refreshing"])
+
+        # And a later peek (with a working _start_refresh) can refresh again.
+        refresh = MagicMock()
+        with self._fetchers(anthropic=_reading(1)), patch.object(usage_guard, "_start_refresh", refresh):
+            usage_guard.peek("anthropic", _cfg())
+        refresh.assert_called_once_with("anthropic", _cfg())
+
     def test_concurrent_persist_does_not_lose_accounts(self):
         """Verify that concurrent _persist calls on different accounts don't lose data."""
         import threading
