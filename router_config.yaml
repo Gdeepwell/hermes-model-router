@@ -172,9 +172,21 @@ claude_delegation:
     sonnet: claude-sonnet-5
     opus: claude-opus-5
   default_tier: sonnet
-  usage_guard:
-    soft_percent: 70
-    hard_percent: 90
-    cache_seconds: 300
-    state_path: ~/.hermes/state/model-router-usage.json
   log_path: ~/.hermes/logs/claude-delegation.jsonl
+
+# Weekly usage guard, the same for every delegation account. From soft_percent the
+# account's heaviest tier steps down (step_down, router target names); from
+# hard_percent weekly or 5-hour usage, delegation to it is closed. The dashboard
+# reads state_path and never polls the usage endpoints itself.
+usage_guard:
+  cache_seconds: 300
+  state_path: ~/.hermes/state/model-router-usage.json
+  accounts:
+    anthropic:
+      soft_percent: 70
+      hard_percent: 90
+      step_down: {opus5: sonnet5}
+    openai-codex:
+      soft_percent: 70
+      hard_percent: 90
+      step_down: {sol: terra}

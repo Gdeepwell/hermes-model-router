@@ -31,7 +31,6 @@ CLAUDE_DELEGATION = {
     "enabled": True,
     "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5"},
     "default_tier": "sonnet",
-    "usage_guard": {"soft_percent": 70, "hard_percent": 90, "cache_seconds": 300},
 }
 
 
@@ -45,22 +44,25 @@ def _cfg(**overrides):
         "peer_groups": {"heavy": ["terra", "opus5", "sonnet5"], "light": ["luna", "spark", "haiku"]},
         "default_model": "terra",
         "claude_delegation": json.loads(json.dumps(CLAUDE_DELEGATION)),
+        "usage_guard": {"cache_seconds": 300, "accounts": {
+            "anthropic": {"soft_percent": 70, "hard_percent": 90, "step_down": {"opus5": "sonnet5"}},
+        }},
     }
     cfg.update(overrides)
     return cfg
 
 
-class WingConfigTests(unittest.TestCase):
+class DelegationConfigTests(unittest.TestCase):
     def test_a_config_without_the_block_leaves_the_wing_off(self):
         """Configuring nothing must change nothing."""
         self.assertFalse(delegation_config({})["enabled"])
         self.assertFalse(delegation_config(None)["enabled"])
 
-    def test_a_partial_guard_keeps_the_other_defaults(self):
-        settings = delegation_config({"claude_delegation": {"enabled": True, "usage_guard": {"soft_percent": 60}}})
-        self.assertEqual(settings["usage_guard"]["soft_percent"], 60)
-        self.assertEqual(settings["usage_guard"]["hard_percent"], 90)
+    def test_a_partial_block_keeps_the_other_defaults(self):
+        settings = delegation_config({"claude_delegation": {"enabled": True, "default_tier": "haiku"}})
+        self.assertEqual(settings["default_tier"], "haiku")
         self.assertEqual(settings["tiers"]["opus"], "claude-opus-5")
+        self.assertNotIn("usage_guard", settings)
 
     def test_names_map_both_ways(self):
         self.assertEqual(TARGET_FOR_TIER, {"haiku": "haiku", "sonnet": "sonnet5", "opus": "opus5"})
@@ -103,112 +105,12 @@ class RegistrationBlockTests(unittest.TestCase):
             self.assertEqual(registration_block(_cfg()), "")
 
 
-from model_router.claude_delegation import (  # noqa: E402
-    GuardOutcome,
-    UsageReading,
-    apply_guard,
-    peek_usage,
-    read_usage,
-    usage_state,
-)
+from model_router import usage_guard  # noqa: E402
+from model_router.usage_guard import GuardOutcome, Reading  # noqa: E402
 
 
 def _reading(weekly, session=10.0, fetched_at=None):
-    return UsageReading(weekly, session, time.time() if fetched_at is None else fetched_at)
-
-
-class GuardTests(unittest.TestCase):
-    def test_below_the_soft_limit_everything_runs_as_asked(self):
-        for tier in ("haiku", "sonnet", "opus"):
-            with self.subTest(tier=tier):
-                outcome = apply_guard(tier, _cfg(), _reading(50))
-                self.assertEqual((outcome.tier, outcome.refused, outcome.adjusted), (tier, "", ""))
-                self.assertEqual(outcome.usage, "50%")
-
-    def test_the_soft_limit_lowers_opus_only(self):
-        outcome = apply_guard("opus", _cfg(), _reading(75))
-        self.assertEqual(outcome.tier, "sonnet")
-        self.assertEqual(outcome.adjusted, "opus→sonnet (weekly usage 75%)")
-        for tier in ("haiku", "sonnet"):
-            with self.subTest(tier=tier):
-                self.assertEqual(apply_guard(tier, _cfg(), _reading(75)).tier, tier)
-
-    def test_the_hard_limit_closes_the_wing(self):
-        outcome = apply_guard("haiku", _cfg(), _reading(95))
-        self.assertIn("Claude delegation closed: weekly usage 95%", outcome.refused)
-
-    def test_a_full_session_window_also_closes_it(self):
-        outcome = apply_guard("sonnet", _cfg(), _reading(40, session=92))
-        self.assertIn("5-hour session usage 92%", outcome.refused)
-
-    def test_no_reading_fails_open(self):
-        """A missing reading must not close the wing; Anthropic's own quota error
-        still stops a child, and the router records that as a cooldown."""
-        self.assertEqual(apply_guard("opus", _cfg(), None), GuardOutcome("opus"))
-
-    def test_usage_state(self):
-        self.assertEqual(usage_state(_cfg(), None), "unknown")
-        self.assertEqual(usage_state(_cfg(), _reading(50)), "open")
-        self.assertEqual(usage_state(_cfg(), _reading(75)), "soft")
-        self.assertEqual(usage_state(_cfg(), _reading(90)), "closed")
-
-
-class UsageCacheTests(unittest.TestCase):
-    def setUp(self):
-        claude_delegation._reset_usage_cache()
-        self.addCleanup(claude_delegation._reset_usage_cache)
-
-    def test_one_fetch_per_cache_period(self):
-        fetch = MagicMock(return_value=_reading(40))
-        with patch.object(claude_delegation, "_fetch_reading", fetch):
-            read_usage(_cfg(), now=1000.0)
-            read_usage(_cfg(), now=1010.0)
-            self.assertEqual(fetch.call_count, 1)
-            read_usage(_cfg(), now=1400.0)
-            self.assertEqual(fetch.call_count, 2)
-
-    def test_a_failed_reading_is_not_retried_within_the_period(self):
-        fetch = MagicMock(return_value=None)
-        with patch.object(claude_delegation, "_fetch_reading", fetch):
-            self.assertIsNone(read_usage(_cfg(), now=1000.0))
-            self.assertIsNone(read_usage(_cfg(), now=1010.0))
-        self.assertEqual(fetch.call_count, 1)
-
-    def test_a_configured_state_file_survives_a_restart(self):
-        with tempfile.TemporaryDirectory() as directory:
-            cfg = _cfg()
-            cfg["claude_delegation"]["usage_guard"]["state_path"] = str(Path(directory) / "usage.json")
-            with patch.object(claude_delegation, "_fetch_reading", return_value=_reading(61)):
-                read_usage(cfg, now=1000.0)
-            claude_delegation._reset_usage_cache()  # a new process
-            fetch = MagicMock()
-            with patch.object(claude_delegation, "_fetch_reading", fetch):
-                reading = read_usage(cfg, now=1010.0)
-        self.assertEqual(reading.weekly, 61)
-        fetch.assert_not_called()
-
-    def test_no_state_path_means_no_file(self):
-        with tempfile.TemporaryDirectory() as directory, \
-             patch.object(claude_delegation, "_fetch_reading", return_value=_reading(61)):
-            read_usage(_cfg(), now=1000.0)
-            self.assertEqual(list(Path(directory).iterdir()), [])
-
-    def test_peek_never_fetches_and_starts_one_refresh_when_stale(self):
-        fetch, refresh = MagicMock(), MagicMock()
-        with patch.object(claude_delegation, "_fetch_reading", fetch), \
-             patch.object(claude_delegation, "_start_refresh", refresh):
-            self.assertIsNone(peek_usage(_cfg()))
-            peek_usage(_cfg())
-        fetch.assert_not_called()
-        self.assertEqual(refresh.call_count, 1)
-
-    def test_peek_returns_a_fresh_reading_without_refreshing(self):
-        refresh = MagicMock()
-        with patch.object(claude_delegation, "_fetch_reading", return_value=_reading(40)):
-            read_usage(_cfg())
-        with patch.object(claude_delegation, "_start_refresh", refresh):
-            self.assertEqual(peek_usage(_cfg()).weekly, 40)
-        refresh.assert_not_called()
+    return Reading(weekly, session, None, None, time.time() if fetched_at is None else fetched_at)
 
 
 from model_router.claude_delegation import build_schema, handle_delegate_claude  # noqa: E402
@@ -241,8 +143,8 @@ class SchemaTests(unittest.TestCase):
 
 class HandlerTests(unittest.TestCase):
     def setUp(self):
-        claude_delegation._reset_usage_cache()
-        self.addCleanup(claude_delegation._reset_usage_cache)
+        usage_guard._reset_cache()
+        self.addCleanup(usage_guard._reset_cache)
 
     def _call(self, args, *, cfg=None, parent=None, usage=40.0, result=None):
         parent = parent if parent is not None else SimpleNamespace(_delegate_depth=0)
@@ -250,7 +152,7 @@ class HandlerTests(unittest.TestCase):
         reading = None if usage is None else _reading(usage)
         with patch("model_router._load_config", return_value=cfg or _cfg()), \
              patch.object(claude_delegation, "_host", host), \
-             patch.object(claude_delegation, "read_usage", return_value=reading):
+             patch.object(usage_guard, "read", return_value=reading):
             raw = handle_delegate_claude(args)
         return json.loads(raw), calls
 
@@ -323,7 +225,7 @@ class HandlerTests(unittest.TestCase):
 
         with patch("model_router._load_config", return_value=_cfg()), \
              patch.object(claude_delegation, "_host", lambda: (boom, lambda: SimpleNamespace(_delegate_depth=0))), \
-             patch.object(claude_delegation, "read_usage", return_value=_reading(10)):
+             patch.object(usage_guard, "read", return_value=_reading(10)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("Cannot resolve delegation provider", payload["error"])
 
@@ -349,6 +251,23 @@ class HandlerTests(unittest.TestCase):
             entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertEqual(entry["outcome"], "error")
         self.assertEqual(entry["message"], "Delegation depth limit reached")
+
+    def test_audit_lines_name_the_calling_session_and_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            parent = SimpleNamespace(_delegate_depth=0, session_id="sess-1", _current_turn_id="turn-9")
+            self._call({"tasks": [{"goal": "g"}]}, cfg=cfg, parent=parent)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual((entry["session_id"], entry["turn_id"]), ("sess-1", "turn-9"))
+
+    def test_switching_it_off_refuses_on_the_next_call(self):
+        cfg = _cfg()
+        cfg["claude_delegation"]["enabled"] = False
+        payload, calls = self._call({"tasks": [{"goal": "g"}]}, cfg=cfg)
+        self.assertEqual(payload["error"], "Claude delegation is switched off in router_config.yaml.")
+        self.assertEqual(calls, [])
 
 
 class RegisterTests(unittest.TestCase):
@@ -400,6 +319,23 @@ class RegisterTests(unittest.TestCase):
             self.assertTrue(claude_delegation.register(ctx, _cfg()))
         self.assertTrue(claude_delegation.is_active())
 
+    def test_registration_is_logged_either_way(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg = _cfg()
+            cfg["claude_delegation"]["log_path"] = str(log)
+            cfg["claude_delegation"]["enabled"] = False
+            claude_delegation.register(MagicMock(), cfg)
+            with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
+                 patch.object(claude_delegation, "_independent_completions", return_value=False), \
+                 patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=True):
+                cfg["claude_delegation"]["enabled"] = True
+                claude_delegation.register(MagicMock(), cfg)
+            lines = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(l["event"], l["registered"]) for l in lines],
+                         [("registration", False), ("registration", True)])
+        self.assertIn("enabled is false", lines[0]["reason"])
+
 
 class SequentialDeadlineExemptionTests(unittest.TestCase):
     def test_a_fake_module_gains_delegate_claude_and_keeps_existing_members(self):
@@ -431,38 +367,6 @@ def _hermes_importable():
 
 
 @unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
-class UsagePayloadTests(unittest.TestCase):
-    """Anthropic's /api/oauth/usage reports utilization as a percentage (checked live
-    on 2026-09-18: five_hour 5.0, seven_day 13.0). Hermes's own reader scales any
-    value <= 1 by 100, which would read a 1% session as 100% and close the wing."""
-
-    def _fetch(self, payload):
-        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
-             patch("agent.account_usage._get_json", return_value=payload) as get_json:
-            reading = claude_delegation._fetch_reading()
-        return reading, get_json
-
-    def test_utilization_is_taken_as_a_percentage(self):
-        reading, _ = self._fetch({"five_hour": {"utilization": 1.0}, "seven_day": {"utilization": 0.8}})
-        self.assertEqual((reading.weekly, reading.session), (0.8, 1.0))
-
-    def test_the_usage_endpoint_is_asked_with_the_oauth_token(self):
-        _reading_, get_json = self._fetch({"five_hour": {"utilization": 5.0}, "seven_day": {"utilization": 13.0}})
-        url, headers = get_json.call_args.args[:2]
-        self.assertEqual(url, "https://api.anthropic.com/api/oauth/usage")
-        self.assertEqual(headers["Authorization"], "Bearer tok")
-
-    def test_no_windows_is_no_reading(self):
-        self.assertIsNone(self._fetch({})[0])
-
-    def test_no_token_is_no_reading(self):
-        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value=""), \
-             patch("agent.account_usage._get_json") as get_json:
-            self.assertIsNone(claude_delegation._fetch_reading())
-        get_json.assert_not_called()
-
-
-@unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
 class RealHostTests(unittest.TestCase):
     """Against the installed Hermes: the guarantees the wing leans on."""
 
@@ -487,7 +391,7 @@ class RealHostTests(unittest.TestCase):
         parent = SimpleNamespace(_delegate_depth=99)
         with patch("model_router._load_config", return_value=_cfg()), \
              patch.object(claude_delegation, "_host", lambda: (claude_delegation._host_delegate_task(), lambda: parent)), \
-             patch.object(claude_delegation, "read_usage", return_value=_reading(10)):
+             patch.object(usage_guard, "read", return_value=_reading(10)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("depth limit", payload["error"].lower())
 
@@ -538,10 +442,17 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertTrue(settings["enabled"])
         self.assertEqual(settings["tiers"], CLAUDE_DELEGATION["tiers"])
         self.assertEqual(settings["default_tier"], "sonnet")
-        self.assertEqual(settings["usage_guard"]["soft_percent"], 70)
-        self.assertEqual(settings["usage_guard"]["hard_percent"], 90)
-        self.assertEqual(settings["usage_guard"]["state_path"], "~/.hermes/state/model-router-usage.json")
+        self.assertNotIn("usage_guard", settings)
         self.assertEqual(settings["log_path"], "~/.hermes/logs/claude-delegation.jsonl")
+
+    def test_the_usage_guard_covers_both_accounts(self):
+        guard = self.cfg["usage_guard"]
+        self.assertEqual(guard["state_path"], "~/.hermes/state/model-router-usage.json")
+        self.assertEqual(guard["accounts"]["anthropic"]["step_down"], {"opus5": "sonnet5"})
+        self.assertEqual(guard["accounts"]["openai-codex"]["step_down"], {"sol": "terra"})
+        for account in ("anthropic", "openai-codex"):
+            self.assertEqual((guard["accounts"][account]["soft_percent"],
+                              guard["accounts"][account]["hard_percent"]), (70, 90))
 
     def test_haiku_is_a_known_claude_target(self):
         self.assertIs(self.cfg["callable"]["haiku"], True)
@@ -725,7 +636,7 @@ def _note(kind="code", weekly=40.0, cfg=None, active=True, request=None, **kwarg
     reading = None if weekly is None else _reading(weekly)
     kwargs = {"api_call_count": 1, "turn_id": "t1", "platform": "cli", **kwargs}
     with patch.object(claude_delegation, "_ACTIVE", active), \
-         patch.object(claude_delegation, "peek_usage", return_value=reading), \
+         patch.object(usage_guard, "peek", side_effect=lambda account, cfg: reading if account == "anthropic" else None), \
          patch("model_router.classify_request", return_value=SimpleNamespace(kind=kind)), \
          patch("model_router._delegation_target_names", return_value=("haiku", "opus5", "sonnet5")), \
          patch("model_router._tier_cooldown_remaining", return_value=0.0):
@@ -798,7 +709,7 @@ class RoutingNoteMiddlewareTests(unittest.TestCase):
                                   "path": str(Path(directory.name) / "orchestration.jsonl")},
                    logging={"enabled": False}, shadow={"enabled": False})
         with patch.object(claude_delegation, "_ACTIVE", True), \
-             patch.object(claude_delegation, "peek_usage", return_value=_reading(40)), \
+             patch.object(usage_guard, "peek", side_effect=lambda account, cfg: _reading(40) if account == "anthropic" else None), \
              patch("model_router._load_config", return_value=cfg), \
              patch("model_router._log_decision"), \
              patch("model_router._orchestration_event"), \

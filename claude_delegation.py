@@ -18,12 +18,13 @@ import json
 import logging
 import os
 import threading
-import time
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
+
+from . import usage_guard
 
 _logger = logging.getLogger("model_router.claude_delegation")
 
@@ -37,7 +38,6 @@ DEFAULTS: Dict[str, Any] = {
     "enabled": False,
     "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5"},
     "default_tier": "sonnet",
-    "usage_guard": {"soft_percent": 70, "hard_percent": 90, "cache_seconds": 300, "state_path": ""},
     "log_path": "",
 }
 
@@ -55,7 +55,7 @@ def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
     merged = deepcopy(DEFAULTS)
     for key, value in raw.items():
-        if key in ("tiers", "usage_guard"):
+        if key in ("tiers",):
             if isinstance(value, dict):
                 merged[key] = {**DEFAULTS[key], **value}
         else:
@@ -109,207 +109,6 @@ def registration_block(cfg: Dict[str, Any]) -> str:
         return "every Claude target is switched off in `callable`"
     ok, why = host_check()
     return "" if ok else why
-
-
-# ---------------------------------------------------------------------------
-# Usage guard
-
-
-@dataclass(frozen=True)
-class UsageReading:
-    weekly: Optional[float]
-    session: Optional[float]
-    fetched_at: float
-
-
-@dataclass(frozen=True)
-class GuardOutcome:
-    tier: str
-    refused: str = ""
-    adjusted: str = ""
-    usage: str = "unknown"
-
-
-_USAGE_LOCK = threading.Lock()
-_USAGE: Dict[str, Any] = {"reading": None, "loaded": False, "failed_at": 0.0, "refreshing": False}
-
-
-def _reset_usage_cache() -> None:
-    with _USAGE_LOCK:
-        _USAGE.update(reading=None, loaded=False, failed_at=0.0, refreshing=False)
-
-
-def _num(value: Any) -> Optional[float]:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-
-
-def guard_limits(cfg: Dict[str, Any]) -> Tuple[float, float]:
-    guard = delegation_config(cfg)["usage_guard"]
-    return float(guard.get("soft_percent", 70)), float(guard.get("hard_percent", 90))
-
-
-def _ttl(cfg: Dict[str, Any]) -> float:
-    return max(1.0, float(delegation_config(cfg)["usage_guard"].get("cache_seconds", 300) or 300))
-
-
-def _state_path(cfg: Dict[str, Any]) -> Optional[Path]:
-    configured = str(delegation_config(cfg)["usage_guard"].get("state_path") or "").strip()
-    return Path(os.path.expanduser(configured)) if configured else None
-
-
-def _load_persisted(cfg: Dict[str, Any]) -> Optional[UsageReading]:
-    path = _state_path(cfg)
-    if path is None:
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return UsageReading(_num(data.get("weekly")), _num(data.get("session")), float(data["fetched_at"]))
-    except Exception:
-        return None
-
-
-def _persist(cfg: Dict[str, Any], reading: UsageReading) -> None:
-    path = _state_path(cfg)
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(
-            {"weekly": reading.weekly, "session": reading.session, "fetched_at": reading.fetched_at}
-        ), encoding="utf-8")
-        os.replace(temporary, path)
-    except Exception:
-        pass
-
-
-def _cached(cfg: Dict[str, Any]) -> Optional[UsageReading]:
-    """The in-memory reading, seeded once per process from the state file. Call under the lock."""
-    if not _USAGE["loaded"]:
-        _USAGE["reading"] = _load_persisted(cfg)
-        _USAGE["loaded"] = True
-    return _USAGE["reading"]
-
-
-_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-
-
-def _fetch_reading() -> Optional[UsageReading]:
-    """Weekly and 5-hour utilisation from Anthropic's OAuth usage endpoint.
-
-    Read raw rather than through ``fetch_account_usage``: the endpoint reports
-    utilization as a percentage (checked live 2026-09-18: 5.0 and 13.0), but
-    Hermes's reader scales any value <= 1 by 100 -- a 1% session would read as
-    100% and close Claude delegation. Same request, headers and helper Hermes uses.
-    """
-    try:
-        from agent.account_usage import _get_json
-        from agent.anthropic_credentials import resolve_anthropic_token
-    except Exception:
-        return None
-    token = (resolve_anthropic_token() or "").strip()
-    if not token:
-        return None
-    payload = _get_json(_USAGE_URL, {
-        "Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
-        "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0",
-    }, timeout=15.0)
-    if not isinstance(payload, dict):
-        return None
-    weekly = _num((payload.get("seven_day") or {}).get("utilization"))
-    session = _num((payload.get("five_hour") or {}).get("utilization"))
-    if weekly is None and session is None:
-        return None
-    return UsageReading(weekly, session, time.time())
-
-
-def read_usage(cfg: Dict[str, Any], *, now: Optional[float] = None) -> Optional[UsageReading]:
-    """The current reading, fetching at most once per ``cache_seconds``.
-
-    A failed fetch is not retried within the period either: the endpoint being
-    down must not add a 15-second wait to every delegation.
-    """
-    now = time.time() if now is None else now
-    ttl = _ttl(cfg)
-    with _USAGE_LOCK:
-        reading = _cached(cfg)
-        if reading is not None and now - reading.fetched_at < ttl:
-            return reading
-        if now - _USAGE["failed_at"] < ttl:
-            return None
-    try:
-        fresh = _fetch_reading()
-    except Exception:
-        fresh = None
-    with _USAGE_LOCK:
-        if fresh is None:
-            _USAGE["failed_at"] = now
-        else:
-            fresh = replace(fresh, fetched_at=now)
-            _USAGE["reading"], _USAGE["failed_at"] = fresh, 0.0
-    if fresh is None:
-        _logger.warning("claude_delegation: Anthropic usage unavailable; the guard fails open for %ds", int(ttl))
-        return None
-    _persist(cfg, fresh)
-    return fresh
-
-
-def _start_refresh(cfg: Dict[str, Any]) -> None:
-    def run() -> None:
-        try:
-            read_usage(cfg)
-        finally:
-            with _USAGE_LOCK:
-                _USAGE["refreshing"] = False
-
-    threading.Thread(target=run, name="claude-delegation-usage", daemon=True).start()
-
-
-def peek_usage(cfg: Dict[str, Any]) -> Optional[UsageReading]:
-    """The cached reading, never waiting on the network.
-
-    For the routing note, which runs inside the parent's request middleware: a
-    stale or missing reading starts one background refresh and is returned as is.
-    """
-    now = time.time()
-    ttl = _ttl(cfg)
-    with _USAGE_LOCK:
-        reading = _cached(cfg)
-        stale = reading is None or now - reading.fetched_at >= ttl
-        refresh = stale and not _USAGE["refreshing"] and now - _USAGE["failed_at"] >= ttl
-        if refresh:
-            _USAGE["refreshing"] = True
-    if refresh:
-        _start_refresh(cfg)
-    return reading
-
-
-def usage_state(cfg: Dict[str, Any], reading: Optional[UsageReading]) -> str:
-    if reading is None:
-        return "unknown"
-    soft, hard = guard_limits(cfg)
-    weekly, session = reading.weekly or 0.0, reading.session or 0.0
-    if weekly >= hard or session >= hard:
-        return "closed"
-    return "soft" if weekly >= soft else "open"
-
-
-def apply_guard(tier: str, cfg: Dict[str, Any], reading: Optional[UsageReading]) -> GuardOutcome:
-    """Workers only: the soft limit exists to leave the Opus parent room."""
-    if reading is None:
-        return GuardOutcome(tier)
-    soft, hard = guard_limits(cfg)
-    weekly, session = reading.weekly or 0.0, reading.session or 0.0
-    usage = f"{weekly:.0f}%"
-    if weekly >= hard:
-        return GuardOutcome(tier, refused=f"Claude delegation closed: weekly usage {weekly:.0f}% "
-                                          f"(hard limit {hard:.0f}%).", usage=usage)
-    if session >= hard:
-        return GuardOutcome(tier, refused=f"Claude delegation closed: 5-hour session usage {session:.0f}% "
-                                          f"(hard limit {hard:.0f}%).", usage=usage)
-    if weekly >= soft and tier == "opus":
-        return GuardOutcome("sonnet", adjusted=f"opus→sonnet (weekly usage {weekly:.0f}%)", usage=usage)
-    return GuardOutcome(tier, usage=usage)
 
 
 # ---------------------------------------------------------------------------
@@ -455,15 +254,28 @@ def _strip_hidden(tasks: Any) -> Any:
     ]
 
 
-def _audit(cfg: Dict[str, Any], requested: str, used: str, outcome: GuardOutcome, result: str,
-           message: str = "") -> None:
+ACCOUNT = "anthropic"
+
+
+def _log(cfg: Dict[str, Any], entry: Dict[str, Any]) -> None:
     configured = str(delegation_config(cfg).get("log_path") or "").strip()
     if not configured:
         return
+    line = {"timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), **entry}
+    try:
+        path = Path(os.path.expanduser(configured))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _AUDIT_LOCK, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(line, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _audit(cfg: Dict[str, Any], parent: Any, requested: str, used: str,
+           outcome: "usage_guard.GuardOutcome", result: str, message: str = "") -> None:
     # No "tier" key on purpose: the router's per-account load counts lines by tier,
     # and the children's own calls are already counted through the middleware.
     entry = {
-        "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "event": TOOL_NAME,
         "tier_requested": requested,
         "tier_used": used,
@@ -472,17 +284,17 @@ def _audit(cfg: Dict[str, Any], requested: str, used: str, outcome: GuardOutcome
         "usage": outcome.usage,
         "outcome": result,
     }
+    session_id = str(getattr(parent, "session_id", "") or "")
+    turn_id = str(getattr(parent, "_current_turn_id", "") or "")
+    if session_id:
+        entry["session_id"] = session_id
+    if turn_id:
+        entry["turn_id"] = turn_id
     if outcome.adjusted:
         entry["adjusted"] = outcome.adjusted
     if message:
         entry["message"] = message
-    try:
-        path = Path(os.path.expanduser(configured))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with _AUDIT_LOCK, path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    _log(cfg, entry)
 
 
 def _raw_error(raw: Any) -> Optional[str]:
@@ -497,7 +309,7 @@ def _raw_error(raw: Any) -> Optional[str]:
     return str(error) if error else None
 
 
-def _annotate(raw: Any, tier: str, outcome: GuardOutcome) -> Any:
+def _annotate(raw: Any, tier: str, outcome: "usage_guard.GuardOutcome") -> Any:
     try:
         payload = json.loads(raw)
     except Exception:
@@ -517,6 +329,8 @@ def _dispatch(args: Dict[str, Any]) -> str:
 
     cfg = _load_config()
     settings = delegation_config(cfg)
+    if not settings.get("enabled"):
+        return _error("Claude delegation is switched off in router_config.yaml.")
     requested = str(args.get("tier") or settings.get("default_tier") or "sonnet").strip().casefold()
     if requested not in TIERS:
         return _error(f"Unknown tier {requested!r}; use one of: {', '.join(TIERS)}.")
@@ -525,17 +339,19 @@ def _dispatch(args: Dict[str, Any]) -> str:
     if parent is None:
         return _error("delegate_claude must be called from an agent turn; no active Hermes parent was found.")
 
-    outcome = apply_guard(requested, cfg, read_usage(cfg))
+    guarded = usage_guard.apply(ACCOUNT, TARGET_FOR_TIER[requested], cfg, usage_guard.read(ACCOUNT, cfg))
+    tier = TIER_FOR_TARGET.get(guarded.tier, requested)
+    outcome = replace(guarded, tier=tier,
+                      adjusted=f"{requested}→{tier} (weekly usage {guarded.usage})" if guarded.adjusted else "")
     if outcome.refused:
         message = f"{outcome.refused} {_pointer(TARGET_FOR_TIER[requested], cfg, claude_ok=False)}"
-        _audit(cfg, requested, requested, outcome, "refused", message)
+        _audit(cfg, parent, requested, requested, outcome, "refused", message)
         return _error(message)
-    tier = outcome.tier
     target = TARGET_FOR_TIER[tier]
     unavailable = _unavailable(target, cfg)
     if unavailable:
         message = f"Claude tier \"{tier}\" ({target}) is {unavailable}. {_pointer(target, cfg, claude_ok=True)}"
-        _audit(cfg, requested, tier, outcome, "refused", message)
+        _audit(cfg, parent, requested, tier, outcome, "refused", message)
         return _error(message)
     model = tier_model(tier, cfg)
     if not model:
@@ -553,9 +369,9 @@ def _dispatch(args: Dict[str, Any]) -> str:
     )
     error_message = _raw_error(raw)
     if error_message is not None:
-        _audit(cfg, requested, tier, outcome, "error", error_message[:300])
+        _audit(cfg, parent, requested, tier, outcome, "error", error_message[:300])
     else:
-        _audit(cfg, requested, tier, outcome, "lowered" if outcome.adjusted else "ran")
+        _audit(cfg, parent, requested, tier, outcome, "lowered" if outcome.adjusted else "ran")
     return _annotate(raw, tier, outcome)
 
 
@@ -607,18 +423,24 @@ def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
     if reason:
         _ACTIVE = False
         _logger.info("claude_delegation: delegate_claude not registered: %s", reason)
+        _log(cfg, {"event": "registration", "registered": False, "reason": reason})
         return False
     try:
         handle = ctx.register_tool(name=TOOL_NAME, toolset="delegation", schema=build_schema(cfg),
                                    handler=handle_delegate_claude, description=_DESCRIPTION, emoji="🪶")
     except Exception as exc:
         _ACTIVE = False
-        _logger.warning("claude_delegation: registering delegate_claude failed: %s", exc)
+        reason = f"registering delegate_claude failed: {exc}"
+        _logger.warning("claude_delegation: %s", reason)
+        _log(cfg, {"event": "registration", "registered": False, "reason": reason})
         return False
     if handle is None:
         _ACTIVE = False
-        _logger.info("claude_delegation: delegate_claude not registered: ctx.register_tool returned None")
+        reason = "ctx.register_tool returned None"
+        _logger.info("claude_delegation: delegate_claude not registered: %s", reason)
+        _log(cfg, {"event": "registration", "registered": False, "reason": reason})
         return False
     _ACTIVE = True
     _exempt_from_sequential_deadline()
+    _log(cfg, {"event": "registration", "registered": True, "reason": ""})
     return True

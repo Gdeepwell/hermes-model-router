@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - Hermes includes PyYAML
     yaml = None
 
 from . import claude_delegation
+from . import usage_guard
 
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
@@ -3012,8 +3013,8 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
         kind = classify_request(request, api_call_count=1, config=cfg).kind or "default"
     except Exception:
         kind = "default"
-    reading = claude_delegation.peek_usage(cfg)
-    state = claude_delegation.usage_state(cfg, reading)
+    reading = usage_guard.peek("anthropic", cfg)
+    state = usage_guard.state("anthropic", cfg, reading)
     claude_offered = set(_delegation_target_names())
 
     chain = _note_names(kind, cfg, state, claude_offered)
@@ -3037,7 +3038,8 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
         lines.append("Other kinds: " + "; ".join(others) + ".")
     if not any(name in claude_delegation.TIER_FOR_TARGET for k in WORK_KINDS for name in _preference_list(k, cfg)):
         lines.append(_CLAUDE_DELEGATION_AVAILABLE_LINE)
-    soft, hard = claude_delegation.guard_limits(cfg)
+    limits = usage_guard.account_limits("anthropic", cfg) or {"soft_percent": 70.0, "hard_percent": 90.0}
+    soft, hard = limits["soft_percent"], limits["hard_percent"]
     if reading is None or reading.weekly is None:
         lines.append(f"Claude weekly usage: unknown (soft limit {soft:.0f}%, hard {hard:.0f}%).")
     else:
