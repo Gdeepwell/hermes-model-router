@@ -1334,7 +1334,17 @@ setWordWrap=function(){const enabled=$('word-wrap').checked;$('log-table').class
 let delegations=[];
 function tierAccount(tier){return (accountsState.tier_accounts||{})[tier]||''}
 function accountLabel(account){return ((accountsState.accounts||{})[account]||{}).label||({'openai-codex':'Codex',anthropic:'Claude','qwen-token':'Qwen'})[account]||account}
-function assignDelegations(runs,audits){const out=new Map(),bySession=new Map();runs.forEach((run,i)=>{const s=sessionIdFromTurn(run.first);if(!bySession.has(s))bySession.set(s,[]);bySession.get(s).push({i,at:Date.parse(run.first.timestamp)})});for(const list of bySession.values())list.sort((a,b)=>a.at-b.at);for(const d of audits){const list=bySession.get(String(d.session_id||''));if(!list)continue;const at=Date.parse(d.timestamp);let owner=null;for(const r of list){if(r.at<=at)owner=r.i}if(owner===null)continue;if(!out.has(owner))out.set(owner,[]);out.get(owner).push(d)}return out}
+function runForTurnId(runs,turnId){
+  // The router log's own turn_id starts with the session id, then the turn
+  // (e.g. "s1:1", with a sub-call sometimes appending ":more" beyond that) --
+  // so a run "has" this turn_id when one of its raw entries is exactly it, or
+  // is a sub-call nested under it.
+  return runs.findIndex(run => (run.rawEntries || []).some(entry => {
+    const t = String(entry.turn_id || '');
+    return t === turnId || t.startsWith(`${turnId}:`);
+  }));
+}
+function assignDelegations(runs,audits){const out=new Map(),bySession=new Map();runs.forEach((run,i)=>{const s=sessionIdFromTurn(run.first);if(!bySession.has(s))bySession.set(s,[]);bySession.get(s).push({i,at:Date.parse(run.first.timestamp)})});for(const list of bySession.values())list.sort((a,b)=>a.at-b.at);for(const d of audits){let owner=null;const turnId=String(d.turn_id||'');if(turnId){const found=runForTurnId(runs,turnId);if(found!==-1)owner=found}if(owner===null){const list=bySession.get(String(d.session_id||''));if(list){const at=Date.parse(d.timestamp);for(const r of list){if(r.at<=at)owner=r.i}}}if(owner===null)continue;if(!out.has(owner))out.set(owner,[]);out.get(owner).push(d)}return out}
 function chip(account,text,marker,title){const s=document.createElement('span');s.className=`delegation-chip ${account}${marker?' marked':''}`;s.textContent=`${accountLabel(account)}: ${text}${marker?' '+marker:''}`;if(title)s.title=title;return s}
 // M5: one hover format for both accounts, built from whichever clause the
 // account already writes -- the router's own "X→Y (weekly N%)" / "(session

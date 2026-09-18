@@ -1626,7 +1626,7 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
     def _source(self):
         names = [
             "executionOwnCalls", "executionRawCall", "executionCalls", "executionKind",
-            "sessionIdFromTurn", "tierAccount", "accountLabel", "assignDelegations",
+            "sessionIdFromTurn", "tierAccount", "accountLabel", "runForTurnId", "assignDelegations",
             "chip", "stepDownHoverText", "delegationChips",
         ]
         return "\n".join(self.javascript_function(name) for name in names)
@@ -1658,6 +1658,35 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
             "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
         ))
         self.assertEqual(json.loads(out), [[0, ["first"]], [1, ["second"]]])
+
+    def test_assignment_prefers_an_exact_turn_id_match_over_session_and_time(self):
+        """M6: the router log's own turn_id is 'session:turn[:suffix]'; an audit
+        carrying a turn_id is assigned to whichever run's rawEntries actually
+        contains that turn (or a sub-call under it), even when the naive
+        session+time rule would have picked the other run."""
+        runs = [
+            {"first": {"turn_id": "s1:1", "timestamp": "2026-01-01T10:00:00Z"},
+             "rawEntries": [{"turn_id": "s1:1"}, {"turn_id": "s1:1:sub"}]},
+            {"first": {"turn_id": "s1:2", "timestamp": "2026-01-01T10:05:00Z"},
+             "rawEntries": [{"turn_id": "s1:2"}]},
+        ]
+        # Timestamp alone would land this on run 1 (it lands after run 1's own
+        # first timestamp), but the turn_id belongs to run 0.
+        audits = [{"session_id": "s1", "turn_id": "s1:1:sub", "timestamp": "2026-01-01T10:06:00Z", "tag": "byturn"}]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const map=assignDelegations(" + json.dumps(runs) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
+        ))
+        self.assertEqual(json.loads(out), [[0, ["byturn"]]])
+
+    def test_assignment_falls_back_to_session_and_time_when_no_run_has_the_turn_id(self):
+        runs = [{"first": {"turn_id": "s1:a", "timestamp": "2026-01-01T10:00:00Z"}, "rawEntries": []}]
+        audits = [{"session_id": "s1", "turn_id": "s1:unrelated", "timestamp": "2026-01-01T10:05:00Z", "tag": "fallback"}]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const map=assignDelegations(" + json.dumps(runs) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
+        ))
+        self.assertEqual(json.loads(out), [[0, ["fallback"]]])
 
     def test_chips_for_both_accounts(self):
         run = {"scope": {"nodes": [
