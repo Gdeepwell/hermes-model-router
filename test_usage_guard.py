@@ -79,6 +79,20 @@ class GuardRuleTests(unittest.TestCase):
                 self.assertEqual(usage_guard.state(account, _cfg(), _reading(75)), "soft")
                 self.assertEqual(usage_guard.state(account, _cfg(), _reading(90)), "closed")
 
+    def test_open_usage_is_reported_and_an_unlisted_tier_is_unaffected(self):
+        """An "open" reading carries the usage string, and a tier absent from
+        ``step_down`` (haiku on anthropic, luna on openai-codex) is never touched,
+        even past the soft limit."""
+        unlisted = {"anthropic": "haiku", "openai-codex": "luna"}
+        for account in ACCOUNTS:
+            with self.subTest(account=account):
+                heavy, _lighter = STEP[account]
+                self.assertEqual(usage_guard.apply(account, heavy, _cfg(), _reading(50)).usage, "50%")
+                tier = unlisted[account]
+                outcome = usage_guard.apply(account, tier, _cfg(), _reading(75))
+                self.assertEqual(outcome.tier, tier)
+                self.assertEqual(outcome.adjusted, "")
+
 
 class CacheTests(unittest.TestCase):
     def setUp(self):
@@ -106,6 +120,32 @@ class CacheTests(unittest.TestCase):
 
     def test_an_account_without_a_fetcher_reads_nothing(self):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0))
+
+    def test_no_state_path_means_no_file(self):
+        with tempfile.TemporaryDirectory() as directory, self._fetchers(anthropic=_reading(61)):
+            usage_guard.read("anthropic", _cfg(), now=1000.0)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_a_configured_state_file_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "usage.json"
+            cfg = _cfg(str(path))
+            with self._fetchers(anthropic=_reading(61)):
+                usage_guard.read("anthropic", cfg, now=1000.0)
+            usage_guard._reset_cache()  # a new process
+            fetch = MagicMock()
+            with patch.dict(usage_guard.FETCHERS, {"anthropic": fetch}):
+                reading = usage_guard.read("anthropic", cfg, now=1010.0)
+        self.assertEqual(reading.weekly, 61)
+        fetch.assert_not_called()
+
+    def test_peek_returns_a_fresh_reading_without_refreshing(self):
+        refresh = MagicMock()
+        with self._fetchers(anthropic=_reading(40)):
+            usage_guard.read("anthropic", _cfg())
+        with patch.object(usage_guard, "_start_refresh", refresh):
+            self.assertEqual(usage_guard.peek("anthropic", _cfg()).weekly, 40)
+        refresh.assert_not_called()
 
     def test_one_state_file_holds_every_account_and_is_read_fresh(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -222,6 +262,19 @@ class FetcherTests(unittest.TestCase):
              patch("agent.account_usage._get_json") as get_json:
             self.assertIsNone(usage_guard.FETCHERS["anthropic"]())
         get_json.assert_not_called()
+
+    def test_anthropic_with_no_windows_reads_nothing(self):
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
+             patch("agent.account_usage._get_json", return_value={}):
+            self.assertIsNone(usage_guard.FETCHERS["anthropic"]())
+
+    def test_the_usage_endpoint_is_asked_with_the_oauth_token(self):
+        payload = {"five_hour": {"utilization": 5.0}, "seven_day": {"utilization": 13.0}}
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
+             patch("agent.account_usage._get_json", return_value=payload) as get_json:
+            usage_guard.FETCHERS["anthropic"]()
+        headers = get_json.call_args.args[1]
+        self.assertEqual(headers["Authorization"], "Bearer tok")
 
     def test_codex_uses_the_weekly_and_session_windows(self):
         reset = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)
