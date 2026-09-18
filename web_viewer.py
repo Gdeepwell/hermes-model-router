@@ -515,6 +515,7 @@ main{max-width:1500px;margin:auto;padding:28px}h1{font-size:26px;margin:0}.sub{c
 label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button{background:#0b111c;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font:inherit}input[type=search]{min-width:260px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{cursor:wait;opacity:.72}.status.refreshing{color:#c4b5fd}.check{display:flex;align-items:center;gap:7px;padding:9px 2px}.check input{accent-color:var(--accent)}
 .card{min-width:135px;flex:1;background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.card .n{font-size:25px;font-weight:750}.card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.luna .n{color:var(--luna)}.spark .n{color:var(--spark)}.terra .n{color:var(--terra)}.sol .n{color:var(--sol)}.opus5 .n{color:var(--opus5)}.sonnet5 .n{color:var(--sonnet5)}.haiku .n{color:var(--haiku)}.qwen .n{color:var(--qwen)}
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:14px;background:rgba(13,18,29,.92)}table{border-collapse:collapse;table-layout:fixed;width:1405px;min-width:100%}th{position:sticky;top:0;background:#161e2c;color:var(--muted);font-size:11px;letter-spacing:.07em;text-align:left;text-transform:uppercase;user-select:none}th,td{padding:11px 13px;border-bottom:1px solid #1e2838;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.prompt-text{min-width:0}.word-wrap .prompt-text{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}.resizer{position:absolute;z-index:2;top:0;right:-4px;width:9px;height:100%;cursor:col-resize;touch-action:none}.resizer::after{content:'';position:absolute;left:4px;top:20%;width:1px;height:60%;background:#3b4a62}.resizer:hover::after,.resizer.dragging::after{width:2px;background:var(--accent)}body.resizing{cursor:col-resize;user-select:none}tbody tr:hover{background:#151d2b}code{color:#b9c5d8}.pill{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:2px 8px;font-size:12px;font-weight:700;margin-right:4px}.pill.luna{color:var(--luna)}.pill.spark{color:var(--spark)}.pill.terra{color:var(--terra)}.pill.sol{color:var(--sol)}.pill.opus5{color:var(--opus5)}.pill.sonnet5{color:var(--sonnet5)}.pill.haiku{color:var(--haiku)}.pill.qwen{color:var(--qwen)}.route{white-space:nowrap}.reason{color:#c2ccdb}.running-agent-pill{display:inline-block;margin-left:8px;padding:2px 7px;border:1px solid #88e36f;border-radius:99px;color:#88e36f;font-size:10px;font-weight:800;letter-spacing:.06em;vertical-align:middle;animation:agentPulse 1.4s ease-in-out infinite}@keyframes agentPulse{50%{box-shadow:0 0 11px rgba(136,227,111,.7)}}.play-indicator{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;margin-left:8px;border-radius:50%;background:#54d66a;color:#07110b;font-size:10px;font-weight:900;vertical-align:middle;box-shadow:0 0 12px rgba(84,214,106,.75);animation:agentPulse 1.4s ease-in-out infinite}.active-router-row{background:rgba(84,214,106,.055)}.calls,.expand{text-align:center}.prompt-toggle{border:0;background:transparent;padding:0;color:var(--accent);font-size:15px;line-height:1}.prompt-toggle:hover{border:0;color:#c4b5fd}.detail>td{padding:10px 13px 14px;background:#0b111c;overflow:visible}.details-table{width:calc(100% - 28px);min-width:0;margin-left:28px;border:1px solid #253044;border-radius:8px;table-layout:fixed}.details-table th{position:static;background:#111927}.details-table th,.details-table td{padding:8px 10px;font-size:12px}.details-table tbody tr:last-child td{border-bottom:0}.status{margin-left:auto;color:var(--muted);padding:9px 4px}.empty{text-align:center;color:#8997ad;padding:40px}.error{color:#ff6b7a} @media(max-width:700px){main{padding:16px}input[type=search]{min-width:180px}.status{width:100%;margin:0}}
+.account-cards{display:grid;gap:14px}.account-card{background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.account-card.anthropic{border-color:var(--opus5)}.account-card.openai-codex{border-color:var(--terra)}.account-card.qwen-token{border-color:var(--qwen)}.account-row{display:grid;grid-template-columns:110px 1fr;gap:10px;padding:8px 0;border-top:1px solid #1e2838}.usage-bar{position:relative;height:10px;border-radius:99px;background:#1e2838;overflow:hidden}.usage-fill{height:100%}.usage-tick{position:absolute;top:0;width:2px;height:100%;background:#8997ad}.state-badge.open{color:#88e36f}.state-badge.soft{color:#ffb454}.state-badge.closed{color:#ff6b7a}.state-badge.unknown{color:#8997ad}.account-card.stale .usage-bar{opacity:.45}
 </style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:0 0 44px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:normal;overflow-wrap:anywhere;max-width:100%}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}.fb-file{display:block;margin-top:6px;color:#ffbe8a;font-size:11px;font-weight:700}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
 </head>
 <body><main>
@@ -531,7 +532,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 </div>
 <div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-5.6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-5.6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card haiku"><div class="n" id="haiku">0</div><div class="k" data-i18n="card.haiku">Claude Haiku 4.5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
 <div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.callable">Modellek hívhatósága</h3><div class="toggle-grid" id="callable-toggles"></div><div class="account-load" id="account-load"></div></div><div class="settings-section"><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.fb.heading">Hermes tartaléklánc</h3><div class="sub"><span data-i18n="settings.fb.sub">Ha az elsődleges fiók nem tud kiszolgálni, ezek jönnek sorban.</span> <b class="fb-file" data-i18n="settings.fb.file">Ez a ~/.hermes/config.yaml fájlt írja, nem a routerét — minden mentés előtt másolat készül róla.</b></div><div class="pref-kinds" id="fb-chains"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
+<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.routing.heading">Útválasztás</h3><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.fb.heading">Hermes tartaléklánc</h3><div class="sub"><span data-i18n="settings.fb.sub">Ha az elsődleges fiók nem tud kiszolgálni, ezek jönnek sorban.</span> <b class="fb-file" data-i18n="settings.fb.file">Ez a ~/.hermes/config.yaml fájlt írja, nem a routerét — minden mentés előtt másolat készül róla.</b></div><div class="pref-kinds" id="fb-chains"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
 <section id="command-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="tab.command">Hermes Command Center</span></h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
 </main>
 <script>
@@ -621,6 +622,32 @@ const I18N = {
     'settings.heading': 'Settings',
     'settings.sub': 'Model callability and default model',
     'settings.callable': 'Model callability',
+    'settings.accounts.heading': 'Accounts',
+    'settings.routing.heading': 'Routing',
+    'account.state.open': 'open',
+    'account.state.soft': 'soft limit',
+    'account.state.closed': 'closed',
+    'account.state.unknown': 'unknown',
+    'account.models': 'Models',
+    'account.usage': 'Usage',
+    'account.usage.week': 'week',
+    'account.usage.session': '5-hour',
+    'account.usage.resets': 'resets',
+    'account.usage.age': 'read {n} ago',
+    'account.usage.none': 'no usage data for this account',
+    'account.usage.refresh': 'Refresh',
+    'account.limits': 'Limits',
+    'account.limits.soft': 'soft',
+    'account.limits.hard': 'hard',
+    'account.limits.stepdown': 'step down',
+    'account.delegation': 'Delegation',
+    'account.delegation.via': 'via {tool}',
+    'account.delegation.always': 'always on (Hermes built-in route)',
+    'account.delegation.default_tier': 'default tier',
+    'account.delegation.live': 'delegate_claude live',
+    'account.delegation.restart': 'restart Hermes to apply',
+    'account.load': 'Load',
+    'account.load.calls': '{n} calls in the last {m} min',
     'settings.cooling': 'cooling down',
     'settings.load.title': 'Recent load per account',
     'settings.load.window': 'last {n} min',
@@ -800,6 +827,32 @@ const I18N = {
     'settings.heading': 'Beállítások',
     'settings.sub': 'Modellek hívhatósága és alapértelmezett modell',
     'settings.callable': 'Modellek hívhatósága',
+    'settings.accounts.heading': 'Fiókok',
+    'settings.routing.heading': 'Útválasztás',
+    'account.state.open': 'nyitva',
+    'account.state.soft': 'lágy korlát',
+    'account.state.closed': 'lezárva',
+    'account.state.unknown': 'ismeretlen',
+    'account.models': 'Modellek',
+    'account.usage': 'Használat',
+    'account.usage.week': 'hét',
+    'account.usage.session': '5 órás',
+    'account.usage.resets': 'nullázódik',
+    'account.usage.age': '{n} ezelőtt olvasva',
+    'account.usage.none': 'ehhez a fiókhoz nincs használati adat',
+    'account.usage.refresh': 'Frissítés',
+    'account.limits': 'Korlátok',
+    'account.limits.soft': 'lágy',
+    'account.limits.hard': 'kemény',
+    'account.limits.stepdown': 'visszalépés',
+    'account.delegation': 'Delegálás',
+    'account.delegation.via': '{tool} eszközzel',
+    'account.delegation.always': 'mindig aktív (Hermes beépített útvonal)',
+    'account.delegation.default_tier': 'alapértelmezett szint',
+    'account.delegation.live': 'delegate_claude aktív',
+    'account.delegation.restart': 'a Hermes újraindítása szükséges',
+    'account.load': 'Terhelés',
+    'account.load.calls': '{n} hívás az utolsó {m} percben',
     'settings.cooling': 'hűl',
     'settings.load.title': 'Fogyás accountonként',
     'settings.load.window': 'utolsó {n} perc',
@@ -945,51 +998,13 @@ async function loadSettings(){
 
 function renderSettings(){
   if(!currentConfig)return;
-  const callable=currentConfig.callable||{};
   const defaultModel=currentConfig.default_model||'terra';
-  const togglesContainer=$('callable-toggles');
-  togglesContainer.innerHTML='';
   const models=['luna','spark','terra','sol','opus5','sonnet5','haiku','qwen'];
   const modelLabels={luna:t('card.luna'),spark:t('card.spark'),terra:t('card.terra'),sol:t('card.sol'),opus5:t('card.opus5'),sonnet5:t('card.sonnet5'),haiku:t('card.haiku'),qwen:t('card.qwen')};
   const modelDescriptions={luna:t('model.desc.luna'),spark:t('model.desc.spark'),terra:t('model.desc.terra'),sol:t('model.desc.sol'),opus5:t('model.desc.opus5'),sonnet5:t('model.desc.sonnet5'),haiku:t('model.desc.haiku'),qwen:t('model.desc.qwen')};
-  for(const model of models){
-    const enabled=callable[model]!==false;
-    const cooling=(currentConfig.cooldowns||{})[model];
-    const item=document.createElement('div');
-    item.className='toggle-item'+(enabled?'':' disabled')+(cooling?' cooling':'');
-    // A cooling tier is enabled but not routable, so the switch alone is
-    // misleading: the pill is what explains why traffic went elsewhere.
-    const pill=cooling
-      ?`<div class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cooling.seconds/60)}m${cooling.reason?' · '+cooling.reason:''}</div>`
-      :'';
-    item.innerHTML=`
-      <div class="toggle-label">
-        <div class="toggle-name">${modelLabels[model]}</div>
-        <div class="toggle-desc">${modelDescriptions[model]}</div>
-        ${pill}
-      </div>
-      <label class="switch">
-        <input type="checkbox" data-model="${model}" ${enabled?'checked':''}>
-        <span class="slider"></span>
-      </label>
-    `;
-    togglesContainer.appendChild(item);
-  }
+  renderAccounts();
   renderPreferences(modelLabels);
   renderFallbackChains();
-  const loadBox=$('account-load');
-  if(loadBox){
-    const load=currentConfig.load||{},accounts=Object.keys(load).sort((a,b)=>load[b]-load[a]||a.localeCompare(b));
-    const known=['openai-codex','qwen-token'],idle=known.filter(a=>!(load[a]>0));
-    const window=t('settings.load.window').replace('{n}',currentConfig.window_minutes||60);
-    if(!accounts.length){
-      loadBox.innerHTML=`<b>${t('settings.load.title')}</b> · ${window}<br>${t('settings.load.empty')}`;
-    }else{
-      const rows=accounts.map(a=>`${a} <b>${load[a]}</b>`).join(' · ');
-      const idleNote=idle.length?`<br><span class="idle">${idle.join(', ')}: ${t('settings.load.idle')}</span>`:'';
-      loadBox.innerHTML=`<b>${t('settings.load.title')}</b> · ${window}<br>${rows}${idleNote}<br>${t('settings.load.counts')}`;
-    }
-  }
   const select=$('default-model-select');
   select.innerHTML='';
   // Only a routable tier can be the orchestrator; a delegation-only target has
@@ -1003,6 +1018,24 @@ function renderSettings(){
     select.appendChild(option);
   }
 }
+function ageText(seconds){if(seconds==null)return '';const m=Math.round(seconds/60);return t('account.usage.age').replace('{n}',m<60?`${m} min`:`${Math.round(m/60)} h`)}
+function resetText(iso){if(!iso)return '';const d=new Date(iso);return Number.isNaN(d.getTime())?'':`${t('account.usage.resets')} ${d.toLocaleString(t('status.locale'),{weekday:'short',hour:'2-digit',minute:'2-digit'})}`}
+function usageRow(labelKey,percent,resetsAt,soft,hard){const known=typeof percent==='number',width=known?Math.min(100,Math.max(0,percent)):0,color=!known?'#8997ad':percent>=hard?'#ff6b7a':percent>=soft?'#ffb454':'#88e36f';return `<div class="usage-line"><span class="usage-label">${t(labelKey)}</span><div class="usage-bar"><div class="usage-fill" style="width:${width}%;background:${color}"></div>${soft?`<span class="usage-tick" style="left:${soft}%"></span>`:''}${hard?`<span class="usage-tick" style="left:${hard}%"></span>`:''}</div><span class="usage-value">${known?Math.round(percent)+'%':'—'}</span><span class="usage-reset">${resetText(resetsAt)}</span></div>`}
+function accountCard(account,info){const callable=currentConfig.callable||{},cooldowns=currentConfig.cooldowns||{},load=(currentConfig.load||{})[account]||0,d=info.delegation||{};
+  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m];return `<label class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span>${t('card.'+m)}</span>${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m</span>`:''}</label>`}).join('');
+  const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button></div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button></div>`):`<div class="usage-none">${t('account.usage.none')}</div>`;
+  const off=info.guard?'':'disabled',step=Object.entries(info.step_down||{}).map(([a,b])=>`${a} → ${b}`).join(', ');
+  const limits=`<label>${t('account.limits.soft')} <input type="number" min="1" max="99" data-limit="soft" data-account="${account}" value="${info.soft_percent??''}" ${off}>%</label> <label>${t('account.limits.hard')} <input type="number" min="2" max="100" data-limit="hard" data-account="${account}" value="${info.hard_percent??''}" ${off}>%</label>${step?` <span class="stepdown">${t('account.limits.stepdown')}: ${step}</span>`:''}`;
+  const delegation=d.tool==='delegate_claude'?`<label class="switch"><input type="checkbox" data-account-toggle="${account}" ${d.enabled?'checked':''}><span class="slider"></span></label> ${t('account.delegation.via').replace('{tool}','delegate_claude')} · ${t('account.delegation.default_tier')} <select data-default-tier="${account}">${(d.tiers||[]).map(x=>`<option value="${x}" ${x===d.default_tier?'selected':''}>${x}</option>`).join('')}</select> ${d.restart_needed?`<span class="restart">${t('account.delegation.restart')}</span>`:(d.registered?`<span class="live">${t('account.delegation.live')}</span>`:'')}`:`${t('account.delegation.via').replace('{tool}',d.tool||'delegate_task')} · ${t('account.delegation.always')}`;
+  const stale=info.usage_age_seconds!=null&&info.usage_age_seconds>600;
+  return `<div class="account-card ${account}${stale?' stale':''}"><div class="account-head"><b>${info.label}</b> <span class="state-badge ${info.state}">${t('account.state.'+info.state)}</span></div>`
+    +`<div class="account-row models"><span>${t('account.models')}</span><div>${models}</div></div>`
+    +`<div class="account-row usage"><span>${t('account.usage')}</span><div>${usage}</div></div>`
+    +`<div class="account-row limits"><span>${t('account.limits')}</span><div>${limits}</div></div>`
+    +`<div class="account-row delegation"><span>${t('account.delegation')}</span><div>${delegation}</div></div>`
+    +`<div class="account-row load"><span>${t('account.load')}</span><div>${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</div></div></div>`}
+function renderAccounts(){const box=$('account-cards');if(!box)return;const accounts=currentConfig.accounts||{};box.innerHTML=Object.entries(accounts).map(([a,info])=>accountCard(a,info)).join('')}
+async function refreshUsage(account){try{const r=await fetch(`/api/usage/refresh?account=${encodeURIComponent(account)}`,{method:'POST'});if(r.ok){const body=await r.json();currentConfig.accounts[account]=body.account;renderAccounts()}}catch(e){}}
 const defaultWidths=[55,110,90,350,90,230,480],widthStore='model-router-column-widths-v3';
 function saveWidths(table,cols){localStorage.setItem(widthStore,JSON.stringify({columns:cols.map(c=>parseFloat(c.style.width)),table:parseFloat(table.style.width)}))}
 function initColumnResize(){const table=$('log-table'),cols=[...table.querySelectorAll('col')],heads=[...table.querySelectorAll('th')];let saved=null;try{saved=JSON.parse(localStorage.getItem(widthStore))}catch(e){}
@@ -1066,14 +1099,13 @@ document.getElementById('pref-kinds').addEventListener('change',(e)=>{
   saveSettings();
 });
 
-document.getElementById('callable-toggles').addEventListener('change',async(e)=>{
-  if(e.target.type!=='checkbox'||!currentConfig)return;
-  const model=e.target.dataset.model;
-  const enabled=e.target.checked;
-  currentConfig.callable[model]=enabled;
-  e.target.closest('.toggle-item').classList.toggle('disabled',!enabled);
-  await saveSettings();
-});
+document.getElementById('account-cards').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
+  if(el.dataset.model){currentConfig.callable[el.dataset.model]=el.checked}
+  else if(el.dataset.accountToggle){currentConfig.accounts[el.dataset.accountToggle].delegation.enabled=el.checked}
+  else if(el.dataset.defaultTier){currentConfig.accounts[el.dataset.defaultTier].delegation.default_tier=el.value}
+  else if(el.dataset.limit){const info=currentConfig.accounts[el.dataset.account];info[el.dataset.limit==='soft'?'soft_percent':'hard_percent']=Number(el.value)}
+  else return;await saveSettings();await loadSettings()});
+document.getElementById('account-cards').addEventListener('click',e=>{const b=e.target.closest('[data-refresh-usage]');if(b)refreshUsage(b.dataset.refreshUsage)});
 document.getElementById('default-model-select').addEventListener('change',async(e)=>{
   if(!currentConfig)return;
   currentConfig.default_model=e.target.value;
@@ -1202,7 +1234,7 @@ async function saveSettings(){
   statusEl.textContent=t('settings.saving');
   statusEl.style.color='#c4b5fd';
   try{
-    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,default_model:currentConfig.default_model,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{}})});
+    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,default_model:currentConfig.default_model,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{enabled:!!currentConfig.accounts.anthropic.delegation.enabled,default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined})});
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
     const result=await response.json();
     if(result.success){

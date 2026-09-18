@@ -1219,3 +1219,146 @@ class AccountsApiTests(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
                     thread.join(timeout=2)
+
+
+class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
+    """Settings shows one account card per account, not a flat toggle list plus a
+    separate load box. Every card has the same five rows: models, usage, limits,
+    delegation, load."""
+
+    CODEX_INFO = {
+        "label": "Codex",
+        "tiers": ["luna", "terra", "sol"],
+        "state": "unknown",
+        "usage": None,
+        "usage_age_seconds": None,
+        "has_usage_source": False,
+        "guard": True,
+        "soft_percent": 70,
+        "hard_percent": 90,
+        "step_down": {"sol": "terra"},
+        "delegation": {"tool": "delegate_task", "always_on": True},
+    }
+
+    CLAUDE_INFO = {
+        "label": "Claude",
+        "tiers": ["haiku", "opus5", "sonnet5"],
+        "state": "open",
+        "usage": {
+            "weekly": 13, "session": 5,
+            "weekly_resets_at": "2026-09-24T16:00:00+00:00",
+            "session_resets_at": None,
+        },
+        "usage_age_seconds": 60,
+        "has_usage_source": True,
+        "guard": True,
+        "soft_percent": 70,
+        "hard_percent": 90,
+        "step_down": {"opus5": "sonnet5"},
+        "delegation": {
+            "tool": "delegate_claude", "enabled": True, "registered": True,
+            "restart_needed": False, "default_tier": "sonnet",
+            "tiers": ["haiku", "sonnet", "opus"],
+        },
+    }
+
+    NO_USAGE_SOURCE_INFO = {
+        "label": "Qwen",
+        "tiers": ["qwen"],
+        "state": "unknown",
+        "usage": None,
+        "usage_age_seconds": None,
+        "has_usage_source": False,
+        "guard": False,
+        "soft_percent": None,
+        "hard_percent": None,
+        "step_down": {},
+        "delegation": {"tool": "delegate_task", "always_on": True},
+    }
+
+    def _account_functions(self):
+        return "\n".join(self.javascript_function(name)
+                          for name in ("ageText", "resetText", "usageRow", "accountCard"))
+
+    def _run(self, script):
+        # 'status.locale' must resolve to a real BCP-47 tag: toLocaleString throws
+        # on the stub's usual echo-the-key behaviour.
+        probe = "const t=k=>k==='status.locale'?'en-US':k;\n" + self._account_functions() + "\n" + script
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout.strip()
+
+    def _card(self, account, info, extra_config=None):
+        config = {"callable": {}, "cooldowns": {}, "load": {"openai-codex": 3, "anthropic": 1},
+                   "window_minutes": 60, "accounts": {account: info}}
+        if extra_config:
+            config.update(extra_config)
+        script = (f"let currentConfig={json.dumps(config)};"
+                  f"console.log(accountCard({json.dumps(account)},currentConfig.accounts[{json.dumps(account)}]));")
+        return self._run(script)
+
+    def test_markup_has_the_new_containers_not_the_old_ones(self):
+        start = HTML.index('id="settings-panel"')
+        end = HTML.index("</section>", start)
+        panel = HTML[start:end]
+        self.assertIn('id="account-cards"', panel)
+        self.assertNotIn('id="callable-toggles"', HTML)
+        self.assertNotIn('id="account-load"', HTML)
+
+    def test_every_card_has_the_same_row_structure(self):
+        import re
+
+        codex_card = self._card("openai-codex", self.CODEX_INFO)
+        claude_card = self._card("anthropic", self.CLAUDE_INFO)
+        expected = ["models", "usage", "limits", "delegation", "load"]
+        self.assertEqual(re.findall(r'class="account-row (\w+)"', codex_card), expected)
+        self.assertEqual(re.findall(r'class="account-row (\w+)"', claude_card), expected)
+
+    def test_claude_card_specifics(self):
+        registered = self._card("anthropic", self.CLAUDE_INFO)
+        self.assertIn('data-account-toggle="anthropic"', registered)
+        self.assertIn('<select data-default-tier', registered)
+        for tier in ("haiku", "sonnet", "opus"):
+            self.assertIn(f'value="{tier}"', registered)
+        self.assertIn("account.delegation.live", registered)
+
+        restart_info = dict(self.CLAUDE_INFO,
+                             delegation=dict(self.CLAUDE_INFO["delegation"], restart_needed=True))
+        restarting = self._card("anthropic", restart_info)
+        self.assertIn("account.delegation.restart", restarting)
+
+    def test_codex_card_specifics(self):
+        codex_card = self._card("openai-codex", self.CODEX_INFO)
+        self.assertIn("account.delegation.always", codex_card)
+        self.assertNotIn("data-account-toggle", codex_card)
+
+    def test_an_account_without_a_usage_source_shows_the_none_message_and_disabled_limits(self):
+        card = self._card("qwen-token", self.NO_USAGE_SOURCE_INFO)
+        self.assertIn("account.usage.none", card)
+        self.assertIn('data-limit="soft" data-account="qwen-token" value="" disabled', card)
+        self.assertIn('data-limit="hard" data-account="qwen-token" value="" disabled', card)
+
+    def test_usage_row_places_soft_and_hard_ticks(self):
+        script = "console.log(usageRow('account.usage.week',55,null,70,90));"
+        row = self._run(script)
+        self.assertIn('style="left:70%"', row)
+        self.assertIn('style="left:90%"', row)
+
+    def test_every_i18n_key_used_by_the_new_code_exists_in_both_languages(self):
+        for key in [
+            "settings.accounts.heading", "account.state.open", "account.state.soft",
+            "account.state.closed", "account.state.unknown", "account.models",
+            "account.usage", "account.usage.week", "account.usage.session",
+            "account.usage.resets", "account.usage.age", "account.usage.none",
+            "account.usage.refresh", "account.limits", "account.limits.soft",
+            "account.limits.hard", "account.limits.stepdown", "account.delegation",
+            "account.delegation.via", "account.delegation.always",
+            "account.delegation.default_tier", "account.delegation.live",
+            "account.delegation.restart", "account.load", "account.load.calls",
+            "settings.routing.heading",
+        ]:
+            self.i18n(key)
+
+    def test_save_payload_includes_usage_limits_and_claude_delegation(self):
+        source = self.javascript_function("saveSettings")
+        self.assertIn("usage_limits:", source)
+        self.assertIn("claude_delegation:", source)
