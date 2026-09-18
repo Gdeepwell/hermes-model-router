@@ -590,6 +590,60 @@ usage_report:
   window_seconds: 3600
 ```
 
+### Claude delegation and the usage guard
+
+Two config blocks, one shared mechanism (`usage_guard.py`), used differently by
+each account.
+
+`claude_delegation:` registers the `delegate_claude` tool, which reaches a
+Claude tier (haiku/sonnet/opus) as a real worker without going through the
+router's own tier map:
+
+```yaml
+claude_delegation:
+  enabled: false        # off by default; flip on to register the tool
+  default_tier: sonnet  # used when a call to delegate_claude names no tier
+  log_path: ""          # JSONL audit log: registration + one line per delegate_claude call
+  tiers:                 # model each short tier name actually starts
+    haiku: claude-haiku-4-5-20251001
+    sonnet: claude-sonnet-5
+    opus: claude-opus-5
+```
+
+Because the tool is registered dynamically, a host that defers tool
+registration until first use (Tool Search) may not offer `delegate_claude`
+immediately after startup; the dashboard's Claude account card shows whether
+registration actually happened (`delegate_claude live`) versus merely
+configured, and flags `restart Hermes to apply` when the two disagree.
+
+`usage_guard:` is the same soft/hard usage guard for every account
+`tier_providers` names, keyed by account (`anthropic`, `openai-codex`, ...),
+not by tier:
+
+```yaml
+usage_guard:
+  cache_seconds: 300   # how long a fetched reading is trusted before refetching
+  state_path: ""       # shared JSON cache across the interactive TUI and the gateway process
+  accounts:
+    anthropic:
+      soft_percent: 70   # at/above this weekly %, the heaviest routed tier steps down
+      hard_percent: 90   # at/above this (weekly OR 5-hour session), delegation to the account closes
+      step_down:
+        opus5: sonnet5
+    openai-codex:
+      soft_percent: 70
+      hard_percent: 90
+      step_down:
+        sol: terra
+```
+
+An account absent from `usage_guard.accounts` is never touched: no reading is
+fetched for it and its state reports `unknown`. Codex is stepped down by the
+router itself (`_usage_step_down`); Claude is stepped down inside
+`delegate_claude`'s own dispatch, since the router never routes a Claude call
+in the first place. Either way the dashboard's account card shows the current
+reading, the configured limits, and — while cooling — the pill's reason.
+
 ### Cooldowns
 
 A tier that just rejected a call for quota is not a candidate for the next one.
@@ -944,6 +998,13 @@ pytest
 ```
 
 ## Version
+
+**1.11.0** — The dashboard imports the router when launched as documented
+(the plugin directory is hyphenated, `model-router`, not `model_router`), a
+switched-off tier keeps its Settings switch, Claude/Codex delegation chips
+share one hover format and are assigned by turn id first, preference-chain
+chips show their account and its state, and `claude_delegation:` /
+`usage_guard:` are documented
 
 **1.10.12** — Three write verbs a read-only evidence goal cannot avoid using — a base commit linked to its hash by "is", a promise to write `[REDACTED]` instead of a secret, and a question about what a module implements — no longer contradict a `[luna]`/`[spark]` label: a receipt-integration evidence report was escalated to Sol for being precise about all three
 
