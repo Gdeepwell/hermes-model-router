@@ -1497,3 +1497,128 @@ class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
         english, hungarian = self.i18n("main.usage.none")
         self.assertEqual(english, "no usage data")
         self.assertEqual(hungarian, "nincs használati adat")
+
+
+class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
+    """Every prompt row gets one chip per delegated worker: Codex children come
+    from routed calls already in the router log, Claude children come from the
+    claude-delegation audit lines that /api/entries returns as `delegations`."""
+
+    ACCOUNTS_STATE = {
+        "accounts": {},
+        "tier_accounts": {
+            "terra": "openai-codex", "sol": "openai-codex",
+            "haiku": "anthropic", "sonnet5": "anthropic", "opus5": "anthropic",
+        },
+    }
+
+    DOM_SHIM = (
+        "global.document={createElement(tag){return {tag,className:'',textContent:'',"
+        "title:'',children:[],append(...els){this.children.push(...els)}};}};"
+    )
+
+    def _source(self):
+        names = [
+            "executionOwnCalls", "executionRawCall", "executionCalls", "executionKind",
+            "sessionIdFromTurn", "tierAccount", "accountLabel", "assignDelegations",
+            "chip", "delegationChips",
+        ]
+        return "\n".join(self.javascript_function(name) for name in names)
+
+    def _run(self, accounts_state, script):
+        probe = (
+            self.DOM_SHIM
+            + f"let accountsState={json.dumps(accounts_state)};"
+            + self._source()
+            + "\n" + script
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout.strip()
+
+    def test_assignment_by_session_and_time(self):
+        """Two runs in the same session get the audit that landed after them but
+        before the next one; an audit in an unrelated session goes nowhere."""
+        runs = [
+            {"first": {"turn_id": "s1:a", "timestamp": "2026-01-01T10:00:00Z"}},
+            {"first": {"turn_id": "s1:b", "timestamp": "2026-01-01T10:05:00Z"}},
+        ]
+        audits = [
+            {"session_id": "s1", "timestamp": "2026-01-01T10:02:00Z", "tag": "first"},
+            {"session_id": "s1", "timestamp": "2026-01-01T10:06:00Z", "tag": "second"},
+            {"session_id": "s2", "timestamp": "2026-01-01T10:03:00Z", "tag": "stray"},
+        ]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const map=assignDelegations(" + json.dumps(runs) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
+        ))
+        self.assertEqual(json.loads(out), [[0, ["first"]], [1, ["second"]]])
+
+    def test_chips_for_both_accounts(self):
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [{"tier": "terra", "model": "terra"}], "children": []},
+            {"kind": None, "routed_calls": [{"tier": "haiku", "model": "haiku"}], "children": []},
+        ]}}
+        audits = [
+            {"tier_used": "haiku", "outcome": "ran"},
+            {"tier_requested": "opus", "tier_used": "sonnet", "outcome": "lowered",
+             "adjusted": "opus→sonnet (weekly usage 74%)"},
+            {"tier_requested": "sonnet", "tier_used": "sonnet", "outcome": "refused",
+             "message": "Claude delegation closed: …"},
+        ]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        chips = json.loads(out)
+        self.assertEqual([c["text"] for c in chips],
+                          ["Codex: terra", "Claude: haiku", "Claude: sonnet ↓", "Claude: sonnet ✕"])
+        self.assertIn("opus→sonnet (weekly usage 74%)", chips[2]["title"])
+        self.assertIn("Claude delegation closed", chips[3]["title"])
+
+    def test_codex_step_down_chip_detects_the_appended_reason_clause(self):
+        """Controller ruling: the router now appends the usage-limit clause onto
+        the original reason rather than starting the reason with it, so the
+        marker must be detected with a regex search, not startsWith."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "terra", "reason": "long work; usage soft limit: sol→terra (weekly 72%)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        self.assertEqual(json.loads(out), [{
+            "text": "Codex: terra ↓",
+            "title": "long work; usage soft limit: sol→terra (weekly 72%)",
+        }])
+
+    def test_codex_hard_limit_reason_also_marks_a_step_down_chip(self):
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "terra", "reason": "usage hard limit: sol→terra (weekly 91%)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        self.assertEqual(json.loads(out), [{
+            "text": "Codex: terra ↓",
+            "title": "usage hard limit: sol→terra (weekly 91%)",
+        }])
+
+    def test_haiku_chip_with_no_audit_log(self):
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [{"tier": "haiku"}], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.textContent)));"
+        ))
+        self.assertEqual(json.loads(out), ["Claude: haiku"])
+
+    def test_delegation_chips_are_wired_into_the_live_run_header(self):
+        renderer = HTML[HTML.rindex("render=function(){"):]
+        self.assertIn("const delegationMap=assignDelegations(runData,delegations)", renderer)
+        self.assertIn("delegationChips(", renderer)
