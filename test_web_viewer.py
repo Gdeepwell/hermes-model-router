@@ -225,7 +225,9 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
                            ('card.opus5', 'Claude Opus 5')]:
             self.assertIn(f'<div class="k" data-i18n="{key}">{label}</div>', cards)
             self.assertEqual(self.i18n(key), (label, label))
-        self.assertIn('<option>luna</option><option>spark</option><option>terra</option><option>sol</option><option>opus5</option><option>qwen</option>', HTML)
+        # Since Task 7 the static #tier select only carries the "all" option;
+        # the per-tier <option>s come from tierFilterOptions(), grouped by
+        # account (see AccountGroupTests).
         self.assertIn("return effort?`${tier} · ${effort}`:tier", HTML)
         self.assertIn("String(raw?.tier||raw?.model||node.model||kind).toUpperCase()", HTML)
         router_run_markup = HTML[HTML.index('<div id="runs"'):HTML.index('<section id="settings-panel"')]
@@ -370,7 +372,9 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_opus5_is_enumerated_colored_and_filterable_in_grouped_and_raw_views(self):
         self.assertIn("--opus5:#d695ff", HTML)
-        self.assertIn("<option>opus5</option>", HTML)
+        # Since Task 7 the static #tier select only carries the "all" option;
+        # the per-tier <option>s come from tierFilterOptions() (see
+        # AccountGroupTests.test_tier_filter_options_are_grouped_by_account_label).
         self.assertIn('class="card opus5"', HTML)
         self.assertIn(".pill.opus5{color:var(--opus5)}", HTML)
         self.assertIn(".task-tree-marker.opus5{background:var(--opus5)", HTML)
@@ -953,12 +957,21 @@ class HaikuDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(selectors["haiku"], selectors["sonnet5"])
 
     def test_haiku_is_enumerated_everywhere_sonnet5_is(self):
-        for fragment in ("--haiku:", "<option>haiku</option>", 'class="card haiku"',
+        for fragment in ("--haiku:", 'class="card haiku"',
                          ".pill.haiku{color:var(--haiku)}", ".task-tree-marker.haiku{background:var(--haiku)"):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, HTML)
         self.assertEqual(HTML.count("'sonnet5'"), HTML.count("'haiku'"))
         self.assertEqual(HTML.count("sonnet5:"), HTML.count("haiku:"))
+
+    def test_haiku_is_offered_by_the_tier_filter(self):
+        # Since Task 7, the static #tier select only has the "all" option; the
+        # per-tier <option>s (haiku included) come from tierFilterOptions(),
+        # grouped by account.
+        source = self.javascript_function("tierFilterOptions")
+        probe = source + "\nconsole.log(tierFilterOptions([{account:'anthropic',label:'Claude',tiers:['haiku','sonnet5','opus5']}]));"
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        self.assertIn("<option>haiku</option>", result.stdout)
 
     def test_haiku_has_labels_in_both_languages(self):
         for key in ("card.haiku", "model.desc.haiku"):
@@ -1362,3 +1375,116 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         source = self.javascript_function("saveSettings")
         self.assertIn("usage_limits:", source)
         self.assertIn("claude_delegation:", source)
+
+
+class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
+    """The main view groups the per-model count cards by account, with a compact
+    weekly usage bar per group, and the #tier filter mirrors the same grouping."""
+
+    TIER_ACCOUNTS = {
+        "luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex",
+        "sol": "openai-codex", "haiku": "anthropic", "sonnet5": "anthropic",
+        "opus5": "anthropic",
+    }
+    ACCOUNTS = {
+        "openai-codex": {"label": "Codex"},
+        "anthropic": {"label": "Claude"},
+    }
+
+    def _group_source(self):
+        start = HTML.index("const ACCOUNT_ORDER=")
+        end = HTML.index("function accountCard(account,info)")
+        return HTML[start:end]
+
+    def _run(self, script, language="en"):
+        probe = self.i18n_runtime(language) + "\n" + self.javascript_function("resetText") + "\n" \
+            + self.javascript_function("ageText") + "\n" + self.javascript_function("usageRow") + "\n" \
+            + self._group_source() + "\n" + script
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout.strip()
+
+    def test_accounts_are_ordered_codex_then_claude_then_others(self):
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(self.ACCOUNTS) + ")));"
+        )
+        groups = json.loads(out)
+        self.assertEqual(
+            [(g["account"], g["tiers"]) for g in groups],
+            [
+                ("openai-codex", ["luna", "spark", "terra", "sol"]),
+                ("anthropic", ["haiku", "sonnet5", "opus5"]),
+            ],
+        )
+
+    def test_an_account_with_no_configured_tiers_is_omitted(self):
+        accounts = dict(self.ACCOUNTS, **{"qwen-token": {"label": "Qwen"}})
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(accounts) + ")));"
+        )
+        groups = json.loads(out)
+        self.assertNotIn("qwen-token", [g["account"] for g in groups])
+
+    def test_claude_group_is_filtered_to_tiers_present_in_tier_accounts(self):
+        tier_accounts = dict(self.TIER_ACCOUNTS)
+        del tier_accounts["opus5"]
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(tier_accounts) + "," + json.dumps(self.ACCOUNTS) + ")));"
+        )
+        groups = {g["account"]: g["tiers"] for g in json.loads(out)}
+        self.assertEqual(groups["anthropic"], ["haiku", "sonnet5"])
+
+    def test_compact_usage_shows_the_weekly_bar_with_ticks_and_state(self):
+        info = {
+            "state": "soft", "has_usage_source": True, "soft_percent": 70, "hard_percent": 90,
+            "usage": {"weekly": 75, "weekly_resets_at": None, "session": 12},
+            "usage_age_seconds": 90,
+        }
+        out = self._run(f"console.log(compactUsage({json.dumps(info)}));")
+        self.assertIn('account-usage soft', out)
+        self.assertIn('style="left:70%"', out)
+        self.assertIn('style="left:90%"', out)
+        self.assertIn('75%', out)
+
+    def test_compact_usage_with_no_usage_source_shows_the_none_message(self):
+        out = self._run(f"console.log(compactUsage({json.dumps({'has_usage_source': False})}));")
+        english, _ = self.i18n("main.usage.none")
+        self.assertIn(english, out)
+
+    def test_tier_filter_options_are_grouped_by_account_label(self):
+        out = self._run(
+            "console.log(tierFilterOptions(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(self.ACCOUNTS) + ")));"
+        )
+        self.assertIn('<optgroup label="Codex">', out)
+        self.assertIn('<optgroup label="Claude">', out)
+        codex_start = out.index('<optgroup label="Codex">')
+        claude_start = out.index('<optgroup label="Claude">')
+        codex_block = out[codex_start:claude_start]
+        claude_block = out[claude_start:]
+        self.assertIn('<option>sol</option>', codex_block)
+        for tier in ("sonnet5", "haiku", "opus5"):
+            with self.subTest(tier=tier):
+                self.assertIn(f'<option>{tier}</option>', claude_block)
+
+    def test_static_markup_still_has_every_tier_count_id(self):
+        cards_start = HTML.index('class="cards"')
+        cards_end = HTML.index('id="account-groups"', cards_start)
+        cards_html = HTML[cards_start:cards_end]
+        for tier in ("luna", "spark", "terra", "sol", "opus5", "sonnet5", "haiku", "qwen"):
+            with self.subTest(tier=tier):
+                self.assertIn(f'id="{tier}"', cards_html)
+
+    def test_static_tier_select_has_only_the_all_option(self):
+        start = HTML.index('<select id="tier">')
+        end = HTML.index('</select>', start)
+        select_html = HTML[start:end]
+        self.assertNotIn('<option>', select_html)
+        self.assertIn('data-i18n="router.tier.all"', select_html)
+
+    def test_main_usage_none_exists_in_both_languages(self):
+        english, hungarian = self.i18n("main.usage.none")
+        self.assertEqual(english, "no usage data")
+        self.assertEqual(hungarian, "nincs használati adat")
