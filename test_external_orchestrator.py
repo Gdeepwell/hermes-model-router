@@ -115,20 +115,35 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
 class ConductorTierTests(unittest.TestCase):
     """The forced conductor must not be pinned to an account that has run out."""
 
-    def test_the_code_chain_outranks_the_configured_default(self):
-        """Measured need: six conductors in a row ran to their iteration cap on the
-        Codex account, spending 36% of a five-hour limit before a leaf did real work.
-        The operator's own order decides where planning happens."""
+    def test_the_code_chain_no_longer_decides_where_planning_happens(self):
+        """`code: [opus5, ...]` is an answer about who writes the code. Read as the
+        conductor's route too, it silently moved every planner onto the Claude
+        subscription: coordination paying external-account prices for a choice the
+        operator made about leaves. One key cannot answer both questions."""
         cfg = {"models": MODELS, "callable": {**CALLABLE, "opus5": True},
-               "default_model": "terra", "preferences": {"code": ["opus5", "terra"]}}
-        self.assertEqual(_conductor_tier(cfg), "opus5")
-
-    def test_an_uncallable_preference_falls_through_to_the_next(self):
-        cfg = {"models": MODELS, "callable": {**CALLABLE, "opus5": False},
                "default_model": "terra", "preferences": {"code": ["opus5", "terra"]}}
         self.assertEqual(_conductor_tier(cfg), "terra")
 
-    def test_without_a_code_chain_the_default_still_wins(self):
+    def test_the_operator_can_still_pin_the_conductor_outright(self):
+        """Moving the planner off a loaded account is the capability the `code`
+        lookup was really serving; it keeps that, on a key that means only this."""
+        cfg = {"models": MODELS, "callable": {**CALLABLE, "opus5": True},
+               "default_model": "terra", "orchestration": {"conductor": "opus5"}}
+        self.assertEqual(_conductor_tier(cfg), "opus5")
+
+    def test_an_uncallable_pin_falls_through_rather_than_failing_the_preflight(self):
+        cfg = {"models": MODELS, "callable": {**CALLABLE, "opus5": False},
+               "default_model": "terra", "orchestration": {"conductor": "opus5"}}
+        self.assertEqual(_conductor_tier(cfg), "terra")
+
+    def test_an_unset_pin_is_not_a_pin(self):
+        for empty in (None, "", "   "):
+            with self.subTest(conductor=empty):
+                cfg = {"models": MODELS, "callable": dict(CALLABLE), "default_model": "terra",
+                       "orchestration": {"conductor": empty}}
+                self.assertEqual(_conductor_tier(cfg), "terra")
+
+    def test_without_a_pin_the_default_still_wins(self):
         cfg = {"models": MODELS, "callable": dict(CALLABLE), "default_model": "terra",
                "preferences": {"design": ["sol"]}}
         self.assertEqual(_conductor_tier(cfg), "terra")

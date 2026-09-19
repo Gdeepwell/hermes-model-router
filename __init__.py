@@ -126,6 +126,10 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "min_chars": 180,
         "max_tasks": 1,
+        # Where the forced conductor runs. Unset means default_model: coordination
+        # follows the account the session is already on rather than borrowing the
+        # answer from a question about leaf routing.
+        "conductor": None,
         # Recovery gate for an active Terra tool loop whose initial preflight
         # was missed (for example, a process that loaded an older plugin).
         "rescue_min_calls": 6,
@@ -2268,6 +2272,77 @@ def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
     return switches.get(name) is True if name in switches else True
 
 
+def _read_only_leaf_tier(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """The tier a bounded read-only evidence leaf may actually be labelled with.
+
+    The conductor contract named Spark unconditionally. With ``callable.spark``
+    switched off Spark is not offered at all, so that sentence pointed the
+    conductor at a tier it cannot spawn and left read-only discovery with no
+    labelled home -- and an unlabelled goal is the one case the design gate
+    still decides from raw keywords.
+    """
+    cfg = cfg if isinstance(cfg, dict) else _load_config()
+    for tier in ("spark", "luna"):
+        if _target_is_offered(tier, cfg):
+            return tier
+    return ""
+
+
+def _read_only_leaf_sentence(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """What the bounded read-only worker is for, named after a tier that exists."""
+    tier = _read_only_leaf_tier(cfg)
+    if not tier:
+        return ""
+    return (
+        f"Use [{tier}] with model:{tier} for bounded low-risk read-only source/component discovery, "
+        "logs, test-case design, isolated patch proposals, or research. Reading and mapping source "
+        "that happens to contain UI is such a leaf, not design work. "
+    )
+
+
+def _read_only_delegation_clause(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Name the read-only worker's route in the conductor's own contract."""
+    tier = _read_only_leaf_tier(cfg)
+    if not tier:
+        return ""
+    return (
+        f"Delegate bounded, self-contained low-risk non-design read-only evidence loops to "
+        f"{tier.capitalize()} with a goal beginning [{tier}] and model:{tier}. "
+    )
+
+
+def _leaf_label_contract(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """The rule that every leaf goal opens with its own tier label.
+
+    Stating the prefix per tier -- "prefix a Spark leaf with [spark]", "design
+    must be prefixed [sol]" -- only ever covered the tiers it named, so a leaf
+    the conductor did not file under one of them went out with no label. That is
+    not neutral: the design gate runs ahead of every label check and is waived
+    only for a labelled worker, so an unlabelled goal is classified from its own
+    words, where one mention of UI, UX, CSS or layout reads as design work and
+    pins the leaf to Sol however read-only it is. Measured on 2026-09-18: two
+    read-only discovery leaves ("identify ... UI components and existing
+    route/UI tests", "the STAFF receipt issuer self-service UI") both opened on
+    Sol from their first call, on the bare word "ui".
+    """
+    cfg = cfg if isinstance(cfg, dict) else _load_config()
+    labels = [
+        f"[{tier}]" for tier in ("luna", "spark", "terra", "sol")
+        if _target_is_offered(tier, cfg)
+    ]
+    if not labels:
+        return ""
+    return (
+        f"Begin every worker goal with that leaf's own tier label in square brackets "
+        f"({', '.join(labels)}), matching the same leaf's model: parameter. This is not optional "
+        "and not only for design or read-only leaves: a goal that starts with no label is "
+        "re-classified from its own text, and there a single mention of UI, UX, CSS, layout or "
+        "styling is read as design work and forces the leaf onto Sol no matter how read-only it "
+        "is -- naming UI files to grep is enough to trigger it. The label is what tells the router "
+        "the tier was already decided by a planner that saw the objective. "
+    )
+
+
 def _model_param_contract(
     orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None, *, model_param: bool = True
 ) -> str:
@@ -2337,6 +2412,11 @@ def _model_param_contract(
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names, cfg)}"
+        # preference_names, not names: this rule is about the account a leaf runs
+        # on, not about spreading load, and `names` drops the conductor's own tier.
+        # With the operator's code chain making opus5 the conductor, that dropped
+        # opus5 -- the one leaf the rule was written from -- out of its own rule.
+        f"{_recon_before_expensive_target_sentence(preference_names, cfg)}"
         f"{_preference_sentence(preference_names, cfg)}"
         f"{_goal_orientation_sentence()}"
         f"{_account_load_sentence(cfg)}"
@@ -2434,7 +2514,10 @@ _GOAL_CONTRACT_CLAUSE = (
     "commit it builds on, what already exists there, which files or modules are in scope, "
     "and how the result is verified. Give it one finishable artefact, not a feature to "
     "implement -- its iteration budget is fixed and cannot be raised per task, so a goal "
-    "with no boundary is spent on orientation before the first edit."
+    "with no boundary is spent on orientation before the first edit. A task on an external "
+    "Claude target (model: opus5 or sonnet5) is the most expensive place in the fleet to "
+    "discover any of this: dispatch a cheap read-only recon task first and carry its findings "
+    "in this task's context, rather than letting the Claude leaf do the reading itself."
 )
 
 
@@ -2527,6 +2610,11 @@ def _peer_group_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
     )
 
 
+# The targets that draw on the Claude subscription. One owner, because two rules
+# now turn on "is this leaf on the expensive account" and they must not drift.
+_EXPENSIVE_TARGETS = frozenset({"opus5", "sonnet5"})
+
+
 def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] = None) -> str:
     """What the Claude targets are for, once they are offered at all.
 
@@ -2540,7 +2628,7 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
     paragraph: the unconditional default beat the hedged preference sentence
     every time, so ``code -> model:opus5`` never once decided a leaf.
     """
-    claude_names = {"opus5", "sonnet5", "haiku"} if claude_delegation.is_active() else {"opus5", "sonnet5"}
+    claude_names = _EXPENSIVE_TARGETS | ({"haiku"} if claude_delegation.is_active() else frozenset())
     claude = [name for name in names if name in claude_names]
     if not claude:
         return ""
@@ -2565,6 +2653,62 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
         + reach
         + ("Use sonnet5 by default and reserve opus5 for consequential or hard work. "
            if both and not operator_chose else "")
+    )
+
+
+def _recon_target_names(names: Iterable[str], cfg: Dict[str, Any]) -> list:
+    """The offered targets a read-only recon leaf should run on, cheapest first.
+
+    The operator's ``explore`` order owns this when it is set; the light peer
+    group answers the same question when it is not. Both are read rather than
+    hardcoded because "cheap" is an account fact, not a property of a name.
+    """
+    offered = [name for name in names if name not in _EXPENSIVE_TARGETS]
+    chain = [name for name in _preference_list("explore", cfg) if name in offered]
+    if chain:
+        return chain[:2]
+    for members in (cfg.get("peer_groups") or {}).values():
+        if not isinstance(members, list) or _EXPENSIVE_TARGETS.intersection(members):
+            continue
+        light = [name for name in members if name in offered]
+        if light:
+            return light[:2]
+    return []
+
+
+def _recon_before_expensive_target_sentence(
+    names: Iterable[str], cfg: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Keep an external Claude leaf off its own orientation.
+
+    A worker on a separate subscription is the most expensive place in the fleet
+    to read a repository, and its iteration budget is the one the host refuses to
+    raise per leaf -- so orientation spent there is spent at the highest price and
+    buys no edit. Measured, on the leaf this rule is written from: sixteen
+    iterations, twenty tool calls, every one of them a read, and a final summary
+    that said "I hit the tool-call iteration limit during the codebase-
+    understanding phase, before writing any tests or implementation."
+
+    Stated as a dispatch order to the conductor rather than as advice to the leaf,
+    because the leaf cannot act on it from inside. It had ``delegate_task`` and the
+    depth to use it; by the time it knew enough to hand the reading away it had
+    already paid for the context it would have been handing away.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    claude = [name for name in names if name in _EXPENSIVE_TARGETS]
+    recon = _recon_target_names(names, cfg)
+    # No cheap target on offer means the reading has nowhere else to go; an
+    # instruction to move it would only cost the leaf a refused dispatch.
+    if not claude or not recon:
+        return ""
+    return (
+        f"{' and '.join(claude)} must not spend a budget on orientation: it is fixed, it cannot "
+        f"be raised per leaf, and reading is the one thing every other target does for less. "
+        f"Dispatch a read-only recon leaf on {' or '.join(recon)} first -- the files and symbols "
+        f"in scope, what already exists there, how the result is verified -- and carry its "
+        f"findings in the `context` of the {' / '.join(claude)} leaf. Send that leaf only once "
+        f"its goal can name what it will change. A goal that begins with discovery is one whose "
+        f"budget is gone before the first edit. "
     )
 
 
@@ -2603,20 +2747,26 @@ def _account_load_sentence(cfg: Dict[str, Any]) -> str:
 def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
     """The tier the forced conductor child should run on.
 
-    ``default_model`` when it can actually be called, otherwise the first callable
-    tier its ``fallbacks`` chain reaches. Pinning the conductor to a configured
-    default is what made an exhausted account fail the whole preflight: the parent
-    had already moved to a working account, and its planner was still being sent
-    to the one that had run out.
+    ``orchestration.conductor`` when the operator has pinned one, else
+    ``default_model``, else the first callable tier its ``fallbacks`` chain
+    reaches. Every step is skipped when its tier cannot be called: pinning the
+    conductor to a configured default is what made an exhausted account fail the
+    whole preflight -- the parent had already moved to a working account, and its
+    planner was still being sent to the one that had run out.
+
+    This used to read ``preferences.code`` on the reasoning that planning and
+    coordination are code work. They are not the same question. ``code`` says
+    where an implementation *leaf* belongs, and the moment an operator answered
+    that with ``[opus5, terra, qwen]`` -- a deliberate choice about who writes the
+    code -- it silently also moved every conductor onto the Claude subscription,
+    where coordination then paid external-account prices for planning. One key
+    answering two unrelated questions cannot be set correctly for both, so the
+    conductor now has its own.
     """
     cfg = cfg or {}
-    # The operator's own order comes first. Planning and coordination are code work,
-    # so the conductor follows the `code` chain when one is set — measured need: six
-    # consecutive conductors ran to their 16-iteration cap on the Codex account and
-    # spent 36% of a five-hour limit before any leaf did real work.
-    for tier in _preference_list("code", cfg):
-        if _is_callable_tier(tier, cfg):
-            return tier
+    pinned = str((cfg.get("orchestration") or {}).get("conductor") or "").strip().casefold()
+    if pinned and _is_callable_tier(pinned, cfg):
+        return pinned
     default = str(cfg.get("default_model", "terra"))
     if _is_callable_tier(default, cfg):
         return default
@@ -2696,10 +2846,11 @@ def _prepare_orchestration_delegation(
         f"{lead}This creates a dedicated {orchestrator_tier} planner and conductor, not a benchmark worker. "
         "Give that conductor the full current objective. It must first inspect any current image itself and Create a structured dispatch plan "
         f"before any implementation. The plan may contain zero to {max_tasks} independent workers; do not invent work merely to fill slots. "
-        f"{orchestrator_tier} chooses the decomposition from the actual task: prefix every Spark leaf goal with [spark] and use it only for bounded low-risk read-only source/component discovery, "
-        "logs, test-case design, isolated patch proposals, or research. Any visual/product/UI/UX/CSS/layout/design-system analysis or implementation is Sol-only and must be prefixed [sol]; prefix a consequential "
-        f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Spark/Sol workers receive a "
-        "self-contained textual scope, never the original image. Spark leaves must be read-only: prohibit edits, commands with side effects, "
+        f"{orchestrator_tier} chooses the decomposition from the actual task. {_leaf_label_contract(cfg)}"
+        f"{_read_only_leaf_sentence(cfg)}"
+        "Any visual/product/UI/UX/CSS/layout/design-system analysis or implementation is Sol-only and must be prefixed [sol]; prefix a consequential "
+        f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Workers receive a "
+        "self-contained textual scope, never the original image. A read-only leaf must stay read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
         f"{_model_param_contract(orchestrator_tier, cfg, model_param=model_param)} "
         "A [sonnet-review] or [opus-review] leaf takes no 'model', because its route is its label; it is read-only "
@@ -2741,7 +2892,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. Delegate only bounded, self-contained low-risk non-design read-only evidence loops to Spark with a goal beginning [spark] and model:spark. Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. Spark receives source discovery, tests, logs and research -- questions with a factual answer. {_model_param_contract(orchestrator_tier, cfg, model_param='model' in properties)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg, model_param='model' in properties)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }

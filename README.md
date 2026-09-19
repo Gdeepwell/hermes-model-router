@@ -1110,6 +1110,8 @@ share one hover format and are assigned by turn id first, preference-chain
 chips show their account and its state, and `claude_delegation:` /
 `usage_guard:` are documented
 
+**1.10.13** — Every leaf goal must open with its own tier label, not only a Spark or Sol one: two read-only source-discovery leaves went out unlabelled and both opened on Sol, vetoed by the design gate on the bare word "ui" in "UI components". The contract also stops naming Spark when `callable.spark` is off, which had left read-only discovery with no labelled tier to use at all
+
 **1.10.12** — Three write verbs a read-only evidence goal cannot avoid using — a base commit linked to its hash by "is", a promise to write `[REDACTED]` instead of a secret, and a question about what a module implements — no longer contradict a `[luna]`/`[spark]` label: a receipt-integration evidence report was escalated to Sol for being precise about all three
 
 **1.10.11** — The conductor's tier is pinned as a `model` on the planner call, not only as a goal prefix: a `[qwen]` conductor was being created on the delegation default and ran 24 calls on the account it was meant to spare
