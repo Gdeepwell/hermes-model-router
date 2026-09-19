@@ -187,6 +187,18 @@ claude_delegation:
 usage_guard:
   cache_seconds: 300
   state_path: ~/.hermes/state/model-router-usage.json
+  # Load balancing, under Claude delegation only: evens out the two accounts'
+  # 5-hour windows. When a kind's first account is at busy_percent or more and the
+  # next account in the same chain is at least margin_percent points freer, that
+  # account goes first. The Opus parent counts on Claude's window, so Claude
+  # usually leads and delegation leans to Codex. Only listed targets move; the
+  # parent never does. window: 5-hour (default) or tighter (weekly or 5-hour);
+  # the weekly window is otherwise left to the soft/hard limits below.
+  balance:
+    enabled: true
+    window: 5-hour
+    busy_percent: 20
+    margin_percent: 10
   accounts:
     anthropic:
       soft_percent: 80

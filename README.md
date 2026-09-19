@@ -682,6 +682,42 @@ router itself (`_usage_step_down`); Claude is stepped down inside
 in the first place. Either way the dashboard's account card shows the current
 reading, the configured limits, and — while cooling — the pill's reason.
 
+#### Load balancing between accounts
+
+The soft/hard limits react to one account reaching a line. `balance` compares
+the two, so a busy account is spared before it hits one. It runs only under
+Claude delegation, after the soft/hard guard has ordered the chain:
+
+```yaml
+usage_guard:
+  balance:
+    enabled: true        # off when the block is absent
+    window: 5-hour       # compare the 5-hour windows (default), or `tighter`: the higher of weekly and 5-hour
+    busy_percent: 20     # the first account's window is at least this
+    margin_percent: 10   # and the next account in the same chain is at least this many points freer
+```
+
+The aim is roughly equal 5-hour usage on both accounts. The Opus parent's own
+calls count on Claude's window, so Claude usually leads and delegation leans to
+Codex; with the numbers above, Claude at 23% and Codex at 12% sends the next
+review to Terra. The weekly window is left to the soft/hard limits: a Claude
+parent keeps Claude's week ahead, and balancing on it would pull every
+Claude-preferred kind to Codex for the rest of the week.
+
+When both hold, the other account's first entry in the kind's chain moves to
+the front: a busier Claude sends `review: [sonnet5, opus5, terra]` to Terra, and a
+busier Codex sends `code: [terra, sonnet5]` to Sonnet. Only targets the chain
+already lists move, so a kind whose chain stays on one account (or has no
+chain) is untouched, and the Opus parent never moves. A reading that is missing,
+or older than twice `cache_seconds`, turns balancing off for that turn.
+
+The switch and both thresholds are also in the dashboard's Workflow section
+while Claude delegation is selected. The routing advice and the forced planning
+call follow the balanced order, and
+say why in one line (`Balanced: review → terra first (Claude 5-hour 86% vs
+Codex 6%)`); the orchestration log's `preflight_forced` event carries the same
+text as `balanced`.
+
 ### Cooldowns
 
 A tier that just rejected a call for quota is not a candidate for the next one.
@@ -1049,6 +1085,12 @@ cd "$RUN" && HOME="$RUN/home" PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
 where pytest is not installed.
 
 ## Version
+
+**1.13.0** — Under Claude delegation, `usage_guard.balance` evens out the two
+accounts' 5-hour windows: when a kind's first account is at 20% or more and the
+next account in the chain is 10 points freer, that account goes first. It is
+switched and tuned from the dashboard's Workflow section. The soft/hard limits
+are unchanged and apply first.
 
 **1.12.0** — `workflow: codex | claude_delegation` switches between the original
 Codex workflow and Claude delegation from one setting, live and without a

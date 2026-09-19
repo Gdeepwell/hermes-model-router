@@ -2643,7 +2643,7 @@ def _prepare_orchestration_delegation(
     cfg: Optional[Dict[str, Any]] = None,
     *,
     force_tools: bool = True,
-    claude_choice: Tuple[str, str] = ("", ""),
+    claude_choice: Tuple[str, str, str] = ("", "", ""),
 ) -> Dict[str, Any]:
     """Force one real Terra-supervised Spark dispatch before parent execution.
 
@@ -2651,15 +2651,15 @@ def _prepare_orchestration_delegation(
     parent must use returned evidence, explicitly accept/reject it, and retain
     integration ownership.
 
-    ``claude_choice`` is (kind, target) when the turn's first choice is a Claude
-    tier. The call then offers delegate_claude next to delegate_task and still
+    ``claude_choice`` is (kind, target, balanced); target is set when the turn's
+    first choice is a Claude tier, and balanced explains a load-balancing reorder. The call then offers delegate_claude next to delegate_task and still
     requires one of them -- forcing delegate_task alone made that preference
     unreachable (a review turn ran on Terra instead of Sonnet, 2026-09-19).
     """
     orchestrator_tier = _conductor_tier(cfg)
 
     routed = deepcopy(request)
-    claude_kind, claude_target = claude_choice
+    claude_kind, claude_target, balanced = claude_choice
     claude_tool, via_bridge = _claude_route_tool(request) if claude_target else (None, False)
     if claude_tool is None:
         claude_target = ""
@@ -2674,8 +2674,10 @@ def _prepare_orchestration_delegation(
         claude_tier = claude_delegation.TIER_FOR_TARGET[claude_target]
         lead = (
             f"Plan ID: {plan_id}. Before any normal tool action, delegate exactly once, by one of two calls. "
-            f"CLAUDE ROUTE (preferred): this turn classifies as {claude_kind}, and its configured first choice is "
-            f"{claude_target}, so give the whole objective to one Claude worker with delegate_claude(tier=\"{claude_tier}\"). "
+            f"CLAUDE ROUTE (preferred): this turn classifies as {claude_kind}, and its "
+            + (f"load-balanced first choice is {claude_target} (Balanced: {balanced}), " if balanced else
+               f"configured first choice is {claude_target}, ")
+            + f"so give the whole objective to one Claude worker with delegate_claude(tier=\"{claude_tier}\"). "
             + ('It is a deferred tool: call it through tool_call with name "delegate_claude" and its arguments '
                '(tier, tasks). ' if via_bridge else "")
             + "Take this route unless the work needs several workers; on it there is no conductor, and you accept "
@@ -2687,6 +2689,7 @@ def _prepare_orchestration_delegation(
         lead = (
             f"Plan ID: {plan_id}. Before any normal tool action, call delegate_task exactly once with role=\"orchestrator\" "
             f"and a goal beginning with [{orchestrator_tier}]. "
+            + (f"Balanced: {balanced}, so this turn's delegation stays off Claude. " if balanced else "")
         )
     instruction = (
         f"\n\n[INTERNAL ORCHESTRATOR PREFLIGHT]\n"
@@ -3015,6 +3018,9 @@ def _force_terra_supervisor_preflight(
                     },
                 )
         return None
+    claude_choice = (
+        _claude_first_choice(kwargs["request"], cfg, decision) if decision.tier != "sol" else ("", "", "")
+    )
     with _SHADOW_LOCK:
         if _orchestration_forced_event(cfg, turn_id):
             return None
@@ -3032,6 +3038,7 @@ def _force_terra_supervisor_preflight(
                 "preflight_bridge_model": "claude-opus-5" if decision.tier == "sol" else None,
                 "max_tasks": min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
                 "parent_prompt_preview": _prompt_preview(kwargs.get("request") or {}),
+                **({"balanced": claude_choice[2]} if claude_choice[2] else {}),
             },
         )
     if decision.tier == "sol":
@@ -3042,7 +3049,7 @@ def _force_terra_supervisor_preflight(
         min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
         cfg=cfg,
         force_tools=_supports_forced_tool_choice(kwargs, decision),
-        claude_choice=_claude_first_choice(kwargs["request"], cfg, decision),
+        claude_choice=claude_choice,
     )
 
 
@@ -3147,6 +3154,42 @@ def _note_names(kind: str, cfg: Dict[str, Any], states: Dict[str, str], claude_o
     return names
 
 
+def _advised_chain(
+    kind: str, cfg: Dict[str, Any], states: Dict[str, str], claude_offered: set, readings: Dict[str, Any]
+) -> Tuple[list, str]:
+    """(chain, reason): the advice chain, load-balanced between accounts under Claude delegation.
+
+    After the soft/hard guard has ordered the chain, compare its first account with
+    the next account the chain lists, on ``window`` (5-hour by default; the
+    parent's share counts on its own account). When the first one is at
+    least ``busy_percent`` and the other is at least ``margin_percent`` points
+    freer, that account's first entry moves to the front. Only listed targets
+    move, the parent never does, and a missing or stale reading changes nothing.
+    ``reason`` is "" unless the order changed.
+    """
+    names = _note_names(kind, cfg, states, claude_offered)
+    policy = usage_guard.balance_config(cfg)
+    if not policy["enabled"] or not claude_delegation.is_active() or len(names) < 2:
+        return names, ""
+    first_account = _account_of(names[0], cfg)
+    other = next((n for n in names if _account_of(n, cfg) not in ("", first_account)), "")
+    if not first_account or not other:
+        return names, ""
+    other_account = _account_of(other, cfg)
+    busy_reading, free_reading = readings.get(first_account), readings.get(other_account)
+    if not (usage_guard.fresh(busy_reading, cfg) and usage_guard.fresh(free_reading, cfg)):
+        return names, ""
+    busy = usage_guard.load(busy_reading, policy["window"])
+    free = usage_guard.load(free_reading, policy["window"])
+    if busy is None or free is None:
+        return names, ""
+    if busy[0] < policy["busy_percent"] or busy[0] - free[0] < policy["margin_percent"]:
+        return names, ""
+    reason = (f"{kind} → {other} first ({usage_guard.account_label(first_account)} {busy[1]} {busy[0]:.0f}% vs "
+              f"{usage_guard.account_label(other_account)} {free[0]:.0f}%)")
+    return [other] + [n for n in names if n != other], reason
+
+
 def _note_label(name: str, notes: Dict[str, str], *, as_call: bool) -> str:
     if not as_call:
         return f"{name}{notes.get(name, '')}"
@@ -3165,25 +3208,30 @@ def _guarded_readings(cfg: Dict[str, Any]) -> Dict[str, Any]:
         return {}
 
 
-def _claude_first_choice(request: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision) -> Tuple[str, str]:
-    """(kind, target) when this turn's first advised choice is a Claude tier, else ("", "").
+def _claude_first_choice(
+    request: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision
+) -> Tuple[str, str, str]:
+    """(kind, claude_target, balanced) for this turn's forced call.
 
-    The same chain the routing note advises from, so the forced call and the note
-    never disagree. An external parent's decision carries no kind, so the turn is
-    classified here the way the note classifies it.
+    ``claude_target`` is set when the first advised choice is a Claude tier;
+    ``balanced`` is the balancing reason when load balancing reordered the chain,
+    whichever way it went. The same chain the routing note advises from, so the
+    forced call and the note never disagree. An external parent's decision
+    carries no kind, so the turn is classified here the way the note classifies it.
     """
     if not claude_delegation.is_active():
-        return "", ""
+        return "", "", ""
     kind = decision.kind if decision.kind in WORK_KINDS else ""
     if not kind:
         try:
             kind = classify_request(request, api_call_count=1, config=cfg).kind or ""
         except Exception:
-            return "", ""
-    states = _account_states(cfg, _guarded_readings(cfg))
-    chain = _note_names(kind, cfg, states, set(_delegation_target_names()))
+            return "", "", ""
+    readings = _guarded_readings(cfg)
+    chain, balanced = _advised_chain(kind, cfg, _account_states(cfg, readings),
+                                     set(_delegation_target_names()), readings)
     first = chain[0] if chain else ""
-    return (kind, first) if first in claude_delegation.TIER_FOR_TARGET else ("", "")
+    return kind, (first if first in claude_delegation.TIER_FOR_TARGET else ""), balanced
 
 
 def _claude_route_tool(request: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], bool]:
@@ -3229,9 +3277,11 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
     states = _account_states(cfg, readings)
     claude_offered = set(_delegation_target_names())
 
-    chain = _note_names(kind, cfg, states, claude_offered)
+    chain, balanced = _advised_chain(kind, cfg, states, claude_offered, readings)
     notes = _target_availability(chain, cfg, states=states)
     lines = [f"[ROUTER] This turn classifies as: {kind}."]
+    if balanced:
+        lines.append(f"Balanced: {balanced}; the busier account is spared, not closed.")
     if chain:
         lines.append(f"If you delegate {kind} work: "
                      + " > ".join(_note_label(n, notes, as_call=True) for n in chain) + ".")
@@ -3241,7 +3291,7 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
     for other in WORK_KINDS:
         if other == kind:
             continue
-        names = _note_names(other, cfg, states, claude_offered)
+        names, _balanced = _advised_chain(other, cfg, states, claude_offered, readings)
         if names:
             other_notes = _target_availability(names, cfg, states=states)
             others.append(f"{other}: " + " > ".join(_note_label(n, other_notes, as_call=False)

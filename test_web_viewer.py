@@ -2278,7 +2278,8 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
     def test_saving_posts_the_workflow_and_no_longer_the_delegation_flag(self):
         source = self.javascript_function("saveSettings")
         self.assertIn("workflow:currentConfig.workflow", source)
-        self.assertNotIn("enabled:!!", source)
+        self.assertIn("claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:", source)
+        self.assertNotIn("delegation.enabled", source)
 
     def test_the_preferences_say_when_the_codex_workflow_has_paused_them(self):
         source = self.javascript_function("renderPreferences")
@@ -2408,3 +2409,75 @@ class HermesParentGuardTests(unittest.TestCase):
                 error = web_viewer._save_default_model("luna", config)
         self.assertIn("read-only", error)
         self.assertEqual(config["default_model"], "terra")
+
+
+class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
+    """The load-balancing on/off switch, inside the Workflow block, Claude delegation only."""
+
+    def test_save_balance_writes_only_the_enabled_flag(self):
+        config = {"usage_guard": {"balance": {"enabled": True, "busy_percent": 55, "margin_percent": 30}}}
+        self.assertIsNone(web_viewer._save_balance({"enabled": False}, config))
+        self.assertEqual(config["usage_guard"]["balance"], {"enabled": False, "busy_percent": 55, "margin_percent": 30})
+
+    def test_save_balance_creates_the_block_when_absent(self):
+        config = {"usage_guard": {"accounts": {}}}
+        self.assertIsNone(web_viewer._save_balance({"enabled": True}, config))
+        self.assertEqual(config["usage_guard"]["balance"], {"enabled": True})
+
+    def test_save_balance_refuses_a_non_boolean(self):
+        config = {}
+        self.assertIn("true or false", web_viewer._save_balance({"enabled": "yes"}, config))
+        self.assertEqual(config, {})
+
+    def test_save_balance_stores_the_thresholds_as_the_file_spells_them(self):
+        config = {"usage_guard": {"balance": {"enabled": True}}}
+        self.assertIsNone(web_viewer._save_balance(
+            {"enabled": True, "busy_percent": 25, "margin_percent": 12.5}, config))
+        balance = config["usage_guard"]["balance"]
+        self.assertEqual((repr(balance["busy_percent"]), repr(balance["margin_percent"])), ("25", "12.5"))
+
+    def test_save_balance_refuses_thresholds_out_of_range(self):
+        for busy, margin in ((-1, 10), (101, 10), (20, 0), (20, 101), ("x", 10)):
+            config = {"usage_guard": {"balance": {"enabled": True}}}
+            self.assertIsNotNone(web_viewer._save_balance(
+                {"enabled": True, "busy_percent": busy, "margin_percent": margin}, config), (busy, margin))
+            self.assertEqual(config["usage_guard"]["balance"], {"enabled": True})
+
+    def test_the_api_serves_the_balance_settings(self):
+        self.assertEqual(web_viewer._balance_status({"usage_guard": {"balance": {"enabled": True}}}),
+                         {"enabled": True, "busy_percent": 20.0, "margin_percent": 10.0, "window": "5-hour"})
+        self.assertFalse(web_viewer._balance_status({})["enabled"])
+
+    def _control(self, workflow, balance):
+        script = (self.javascript_function("workflowControl")
+                  + f"\nconsole.log(workflowControl({json.dumps(workflow)},{json.dumps(balance)}));")
+        return subprocess.run(["node", "-e", self.i18n_runtime() + "\n" + script],
+                              check=True, text=True, capture_output=True).stdout
+
+    def test_the_switch_shows_under_claude_delegation_with_editable_thresholds(self):
+        out = self._control("claude_delegation", {"enabled": True, "busy_percent": 20, "margin_percent": 10,
+                                                  "window": "5-hour"})
+        self.assertRegex(out, r'<label class="switch"><input type="checkbox" data-balance-toggle checked>')
+        self.assertIn('data-balance-field="busy_percent" value="20"', out)
+        self.assertIn('data-balance-field="margin_percent" value="10"', out)
+        self.assertIn("5-hour", out)
+
+    def test_the_switch_is_off_when_balancing_is_off(self):
+        out = self._control("claude_delegation", {"enabled": False, "busy_percent": 20, "margin_percent": 10,
+                                                  "window": "5-hour"})
+        self.assertIn("data-balance-toggle", out)
+        self.assertNotIn("data-balance-toggle checked", out)
+
+    def test_the_codex_workflow_hides_it(self):
+        self.assertNotIn("data-balance-toggle", self._control("codex", {"enabled": True}))
+
+    def test_saving_posts_the_balance_flag_and_thresholds(self):
+        source = self.javascript_function("saveSettings")
+        self.assertIn("balance:", source)
+        self.assertIn("busy_percent:", source)
+        self.assertIn("margin_percent:", source)
+
+    def test_its_i18n_keys_exist_in_both_languages(self):
+        for key in ("settings.balance.label", "settings.balance.desc", "settings.balance.busy",
+                    "settings.balance.margin", "settings.balance.window.5-hour", "settings.balance.window.tighter"):
+            self.i18n(key)

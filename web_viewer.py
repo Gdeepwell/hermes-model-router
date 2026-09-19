@@ -674,6 +674,47 @@ def _assign_in_place(container: dict, key: str, value) -> None:
         container[key] = value
 
 
+def _balance_status(config: dict) -> dict:
+    """``usage_guard.balance`` with the guard's own defaults filled in."""
+    router = _router_module()
+    guard = getattr(router, "usage_guard", None) if router else None
+    if guard is not None:
+        settings = guard.balance_config(config)
+        return {key: settings[key] for key in ("enabled", "busy_percent", "margin_percent", "window")}
+    raw = ((config.get("usage_guard") or {}).get("balance") or {})
+    return {"enabled": raw.get("enabled") is True, "busy_percent": float(raw.get("busy_percent", 20)),
+            "margin_percent": float(raw.get("margin_percent", 10)), "window": str(raw.get("window") or "5-hour")}
+
+
+def _save_balance(raw, config: dict):
+    """Switch load balancing on or off and, when given, set its two thresholds.
+
+    Validated before anything is written, so a bad threshold leaves the block as it was.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("enabled"), bool):
+        return "balance.enabled must be true or false"
+    thresholds = {}
+    for key, low in (("busy_percent", 0.0), ("margin_percent", 1.0)):
+        if key not in raw:
+            continue
+        try:
+            value = float(raw[key])
+        except (TypeError, ValueError):
+            return f"balance.{key} must be a number"
+        if not (low <= value <= 100):
+            return f"balance.{key} must be between {low:.0f} and 100"
+        thresholds[key] = int(value) if value.is_integer() else value
+    guard = config.get("usage_guard")
+    if not isinstance(guard, dict):
+        guard = config["usage_guard"] = {}
+    block = guard.get("balance")
+    if not isinstance(block, dict):
+        block = guard["balance"] = {}
+    block["enabled"] = raw["enabled"]
+    block.update(thresholds)
+    return None
+
+
 def _read_router_config_for_update():
     """(config, dump) for a read-modify-write that keeps the file's comments and layout.
 
@@ -732,7 +773,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 .account-cards{display:grid;gap:14px}.account-card{background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.account-card.anthropic{border-color:var(--opus5)}.account-card.openai-codex{border-color:var(--terra)}.account-card.qwen-token{border-color:var(--qwen)}.account-row{display:grid;grid-template-columns:110px 1fr;gap:10px;padding:8px 0;border-top:1px solid #1e2838}.usage-bar{position:relative;height:10px;border-radius:99px;background:#1e2838;overflow:hidden}.usage-fill{height:100%}.usage-tick{position:absolute;top:0;width:2px;height:100%;background:#8997ad}.state-badge.open{color:#88e36f}.state-badge.soft{color:#ffb454}.state-badge.closed{color:#ff6b7a}.state-badge.unknown{color:#8997ad}.account-card.stale .usage-bar{opacity:.45}
 .account-groups{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}.account-group{flex:1;min-width:280px;border:1px solid var(--border);border-radius:14px;padding:10px}.account-group.anthropic{border-color:var(--opus5)}.account-group.openai-codex{border-color:var(--terra)}.account-group.qwen-token{border-color:var(--qwen)}.account-group-head{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}.account-group-cards{display:flex;gap:8px;flex-wrap:wrap}.account-group-usage{margin-top:8px}.account-usage{font-size:12px}.account-usage.none{color:var(--muted)}.account-usage.stale .usage-bar{opacity:.45}
 .delegation-chips{display:inline-flex;flex-wrap:wrap;gap:4px;margin-left:8px;vertical-align:middle}.delegation-chip{border:1px solid currentColor;border-radius:99px;padding:1px 7px;font-size:11px}.delegation-chip.openai-codex{color:var(--terra)}.delegation-chip.anthropic{color:var(--opus5)}.delegation-chip.qwen-token{color:var(--qwen)}.delegation-chip.marked{font-weight:700}
-</style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:0 0 44px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:normal;overflow-wrap:anywhere;max-width:100%}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip.anthropic{border-color:var(--opus5)}.pref-chip.openai-codex{border-color:var(--terra)}.pref-chip.qwen-token{border-color:var(--qwen)}.chain-account{color:var(--muted);font-weight:600}.chain-account-mark{color:#ffb454;font-weight:700}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}.workflow-options{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden}.workflow-options button{border:0;border-radius:0;background:#0b111c;color:var(--muted)}.workflow-options button+button{border-left:1px solid var(--border)}.workflow-options button.active{background:#241b3d;color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}.workflow-desc{margin-top:10px;color:var(--text)}.pref-kinds.paused .pref-kind{opacity:.5}.pref-paused{padding:8px 10px;border:1px dashed var(--accent);border-radius:8px;color:#c4b5fd;font-size:12px}.fb-file{display:block;margin-top:6px;color:#ffbe8a;font-size:11px;font-weight:700}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
+</style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:0 0 44px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:normal;overflow-wrap:anywhere;max-width:100%}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip.anthropic{border-color:var(--opus5)}.pref-chip.openai-codex{border-color:var(--terra)}.pref-chip.qwen-token{border-color:var(--qwen)}.chain-account{color:var(--muted);font-weight:600}.chain-account-mark{color:#ffb454;font-weight:700}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}.workflow-options{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden}.workflow-options button{border:0;border-radius:0;background:#0b111c;color:var(--muted)}.workflow-options button+button{border-left:1px solid var(--border)}.workflow-options button.active{background:#241b3d;color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}.workflow-desc{margin-top:10px;color:var(--text)}.balance-row{margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.balance-row .pref-note{margin-top:0;flex-basis:100%}.balance-field input{width:64px;padding:5px 7px}.pref-kinds.paused .pref-kind{opacity:.5}.pref-paused{padding:8px 10px;border:1px dashed var(--accent);border-radius:8px;color:#c4b5fd;font-size:12px}.fb-file{display:block;margin-top:6px;color:#ffbe8a;font-size:11px;font-weight:700}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
 </head>
 <body><main>
 <div class="lab-header"><div><div class="lab-kicker" data-i18n="lab.kicker">HERMES · LOCAL OBSERVABILITY</div><div class="lab-title" data-i18n="lab.title">AI Home Lab</div><div class="sub" data-i18n="lab.sub">Modellek, háttéragentek és élő munkafolyamatok egy helyen</div></div><nav class="tabs" aria-label="AI Home Lab nézetek"><button class="tab active" data-tab="router"><span data-i18n="tab.router">Model Router</span></button><button class="tab" data-tab="settings"><span data-i18n="tab.settings">Beállítások</span></button><button class="tab" data-tab="command"><span data-i18n="tab.command">Hermes Command Center</span></button></nav></div>
@@ -846,6 +887,12 @@ const I18N = {
     'settings.workflow.claude': 'Claude delegation',
     'settings.workflow.desc.codex': 'Codex does the work through delegate_task, and Opus stays available as the Hermes parent. No delegate_claude, and the built-in routes apply instead of the preference chains below.',
     'settings.workflow.desc.claude': 'Claude workers run next to Codex through delegate_claude, and the preference chains below decide the route.',
+    'settings.balance.label': 'Load balancing',
+    'settings.balance.busy': 'from',
+    'settings.balance.window.5-hour': '5-hour',
+    'settings.balance.window.tighter': 'tighter (weekly or 5-hour)',
+    'settings.balance.margin': 'gap',
+    'settings.balance.desc': 'Evens out the {window} windows: when the preferred account is at {busy}% or more and the other is at least {margin} points freer, the freer one goes first. The parent counts on its own account. The soft/hard limits still apply.',
     'settings.workflow.live': 'Applies from the next request. New sessions gain or lose delegate_claude without a restart; a session already running is still pointed at the right route.',
     'account.state.open': 'open',
     'account.state.soft': 'soft limit',
@@ -1060,6 +1107,12 @@ const I18N = {
     'settings.workflow.claude': 'Claude-delegálás',
     'settings.workflow.desc.codex': 'A munkát a Codex végzi a delegate_task eszközzel, az Opus pedig Hermes-szülőként elérhető marad. Nincs delegate_claude, és a lenti preferencia-láncok helyett a beépített útvonalak érvényesek.',
     'settings.workflow.desc.claude': 'A Codex mellett Claude-munkások is futnak a delegate_claude eszközzel, és a lenti preferencia-láncok döntik el az útvonalat.',
+    'settings.balance.label': 'Terheléselosztás',
+    'settings.balance.busy': 'ettől',
+    'settings.balance.window.5-hour': '5 órás',
+    'settings.balance.window.tighter': 'szűkebb (heti vagy 5 órás)',
+    'settings.balance.margin': 'különbség',
+    'settings.balance.desc': 'Kiegyenlíti a(z) {window} kereteket: ha a preferált fiók legalább {busy}%-on áll, és a másik legalább {margin} ponttal szabadabb, a szabadabb kerül előre. A szülő a saját fiókját terheli. A soft/hard limitek továbbra is érvényesek.',
     'settings.workflow.live': 'A következő kéréstől érvényes. Az új munkamenetek újraindítás nélkül kapják meg vagy vesztik el a delegate_claude eszközt; egy már futó munkamenetet a router akkor is a helyes útvonalra irányít.',
     'account.state.open': 'nyitva',
     'account.state.soft': 'lágy korlát',
@@ -1237,7 +1290,7 @@ function renderSettings(){
   const models=['luna','spark','terra','sol','opus5','sonnet5','haiku','qwen'];
   const modelLabels={luna:t('card.luna'),spark:t('card.spark'),terra:t('card.terra'),sol:t('card.sol'),opus5:t('card.opus5'),sonnet5:t('card.sonnet5'),haiku:t('card.haiku'),qwen:t('card.qwen')};
   const modelDescriptions={luna:t('model.desc.luna'),spark:t('model.desc.spark'),terra:t('model.desc.terra'),sol:t('model.desc.sol'),opus5:t('model.desc.opus5'),sonnet5:t('model.desc.sonnet5'),haiku:t('model.desc.haiku'),qwen:t('model.desc.qwen')};
-  $('workflow-switch').innerHTML=workflowControl(currentConfig.workflow);
+  $('workflow-switch').innerHTML=workflowControl(currentConfig.workflow,currentConfig.balance);
   renderAccounts();
   renderPreferences(modelLabels);
   renderFallbackChains();
@@ -1290,10 +1343,15 @@ function accountCard(account,info){const callable=currentConfig.callable||{},coo
     +`<div class="account-row limits"><span>${t('account.limits')}</span><div>${limits}</div></div>`
     +`<div class="account-row delegation"><span>${t('account.delegation')}</span><div>${delegation}</div></div>`
     +`<div class="account-row load"><span>${t('account.load')}</span><div>${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</div></div></div>`}
-function workflowControl(workflow){const current=workflow==='codex'?'codex':'claude_delegation';
+function workflowControl(workflow,balance){const current=workflow==='codex'?'codex':'claude_delegation';
   const option=(name,label)=>`<button type="button" data-workflow="${name}"${name===current?' class="active"':''}>${t(label)}</button>`;
   return `<div class="workflow-options">${option('codex','settings.workflow.codex')}${option('claude_delegation','settings.workflow.claude')}</div>`
     +`<div class="workflow-desc">${t(current==='codex'?'settings.workflow.desc.codex':'settings.workflow.desc.claude')}</div>`
+    // Load balancing is a Claude delegation feature: in the Codex workflow there is one account to delegate to.
+    +(current==='claude_delegation'&&balance?`<div class="balance-row"><label class="switch"><input type="checkbox" data-balance-toggle${balance.enabled?' checked':''}><span class="slider"></span></label><b>${t('settings.balance.label')}</b>`
+      +`<label class="balance-field">${t('settings.balance.busy')} <input type="number" min="0" max="100" data-balance-field="busy_percent" value="${balance.busy_percent}">%</label>`
+      +`<label class="balance-field">${t('settings.balance.margin')} <input type="number" min="1" max="100" data-balance-field="margin_percent" value="${balance.margin_percent}"></label>`
+      +`<span class="pref-note">${t('settings.balance.desc').replace('{window}',t('settings.balance.window.'+(balance.window||'5-hour'))).replace('{busy}',balance.busy_percent).replace('{margin}',balance.margin_percent)}</span></div>`:'')
     +`<div class="pref-note">${t('settings.workflow.live')}</div>`}
 function renderAccounts(){const box=$('account-cards');if(!box)return;const accounts=currentConfig.accounts||{};box.innerHTML=Object.entries(accounts).map(([a,info])=>accountCard(a,info)).join('')}
 async function refreshUsage(account){try{const r=await fetch(`/api/usage/refresh?account=${encodeURIComponent(account)}`,{method:'POST'});if(r.ok){const body=await r.json();currentConfig.accounts[account]=body.account;renderAccounts()}}catch(e){}}
@@ -1368,6 +1426,10 @@ document.getElementById('account-cards').addEventListener('change',async(e)=>{if
 document.getElementById('workflow-switch').addEventListener('click',async(e)=>{const b=e.target.closest('[data-workflow]');
   if(!b||!currentConfig||b.dataset.workflow===currentConfig.workflow)return;
   currentConfig.workflow=b.dataset.workflow;await saveSettings();await loadSettings()});
+document.getElementById('workflow-switch').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
+  if(el.matches('[data-balance-toggle]'))currentConfig.balance=Object.assign({},currentConfig.balance,{enabled:el.checked});
+  else if(el.dataset.balanceField)currentConfig.balance=Object.assign({},currentConfig.balance,{[el.dataset.balanceField]:Number(el.value)});
+  else return;await saveSettings();await loadSettings()});
 document.getElementById('account-cards').addEventListener('click',e=>{const b=e.target.closest('[data-refresh-usage]');if(b)refreshUsage(b.dataset.refreshUsage)});
 document.getElementById('default-model-select').addEventListener('change',async(e)=>{
   if(!currentConfig)return;
@@ -1514,7 +1576,7 @@ async function saveSettings(){
   statusEl.textContent=t('settings.saving');
   statusEl.style.color='#c4b5fd';
   try{
-    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,default_model:currentConfig.default_model,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined})});
+    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined})});
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
     const result=await response.json();
     if(result.success){
@@ -1748,6 +1810,15 @@ class Handler(BaseHTTPRequestHandler):
                             "application/json",
                         )
                         return
+                if "balance" in data:
+                    error = _save_balance(data["balance"], config)
+                    if error:
+                        self._send(
+                            400,
+                            json.dumps({"error": error, "success": False}).encode("utf-8"),
+                            "application/json",
+                        )
+                        return
                 # After claude_delegation, so the switch wins over a stale enabled flag.
                 if "workflow" in data:
                     error = _save_workflow(data["workflow"], config)
@@ -1859,6 +1930,7 @@ class Handler(BaseHTTPRequestHandler):
                 response = {
                     "callable": config.get("callable", {}),
                     "workflow": _workflow_name(config),
+                    "balance": _balance_status(config),
                     "default_model": config.get("default_model", "terra"),
                     "preferences": config.get("preferences") or {},
                     "work_kinds": work_kinds,

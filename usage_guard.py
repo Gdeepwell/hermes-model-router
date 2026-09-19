@@ -6,6 +6,10 @@ its heaviest tier steps down (``step_down``), and from ``hard_percent`` weekly o
 5-hour usage delegation to it is closed. An account that is not configured under
 ``usage_guard.accounts`` is never touched.
 
+``usage_guard.balance`` compares two accounts instead of one against its limits:
+the router uses ``load``/``fresh``/``balance_config`` to put the freer account
+first when the preferred one is busy (see ``_advised_chain`` in the router).
+
 Nothing here imports the router, so both the router and the standalone
 dashboard can use it.
 """
@@ -26,6 +30,11 @@ _logger = logging.getLogger("model_router.usage_guard")
 
 ACCOUNT_LABELS: Dict[str, str] = {"openai-codex": "Codex", "anthropic": "Claude", "qwen-token": "Qwen"}
 DEFAULTS: Dict[str, Any] = {"cache_seconds": 300, "state_path": "", "accounts": {}}
+BALANCE_DEFAULTS: Dict[str, Any] = {"enabled": False, "busy_percent": 20.0, "margin_percent": 10.0,
+                                    "window": "5-hour"}
+# 5-hour: compare the 5-hour windows only, and leave the weekly one to the soft/hard
+# limits (a Claude parent keeps Claude's week ahead anyway). tighter: max of both.
+BALANCE_WINDOWS = ("5-hour", "tighter")
 
 
 def account_label(account: str) -> str:
@@ -58,6 +67,22 @@ def guarded(account: str, cfg: Optional[Dict[str, Any]]) -> bool:
     return account_limits(account, cfg) is not None
 
 
+def balance_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """``usage_guard.balance`` with defaults; off unless configured on."""
+    raw = guard_config(cfg).get("balance")
+    merged = dict(BALANCE_DEFAULTS)
+    if isinstance(raw, dict):
+        merged["enabled"] = raw.get("enabled", False) is True
+        for key in ("busy_percent", "margin_percent"):
+            try:
+                merged[key] = float(raw.get(key, merged[key]))
+            except (TypeError, ValueError):
+                pass
+        if raw.get("window") in BALANCE_WINDOWS:
+            merged["window"] = raw["window"]
+    return merged
+
+
 @dataclass(frozen=True)
 class Reading:
     weekly: Optional[float]
@@ -73,6 +98,28 @@ class GuardOutcome:
     refused: str = ""
     adjusted: str = ""
     usage: str = "unknown"
+
+
+def load(reading: Optional["Reading"], window: str = "tighter") -> Optional[tuple]:
+    """(percent, window name) an account is compared by, or None when it is unknown.
+
+    ``tighter`` is the higher of the weekly and 5-hour windows; ``5-hour`` is that
+    window alone.
+    """
+    if reading is None:
+        return None
+    candidates = ((reading.session, "5-hour"),) if window == "5-hour" else (
+        (reading.weekly, "weekly"), (reading.session, "5-hour"))
+    windows = [(value, name) for value, name in candidates if value is not None]
+    return max(windows, key=lambda window: window[0]) if windows else None
+
+
+def fresh(reading: Optional["Reading"], cfg: Dict[str, Any], now: Optional[float] = None) -> bool:
+    """Whether a reading is recent enough to steer by: under twice ``cache_seconds``,
+    the same line the dashboard greys a card out at."""
+    if reading is None:
+        return False
+    return (time.time() if now is None else now) - reading.fetched_at < 2 * _ttl(cfg)
 
 
 def _num(value: Any) -> Optional[float]:
