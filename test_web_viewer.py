@@ -1,8 +1,11 @@
 import json
+import os
 import tempfile
 import threading
+import time
 import subprocess
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -223,7 +226,9 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
                            ('card.opus5', 'Claude Opus 5')]:
             self.assertIn(f'<div class="k" data-i18n="{key}">{label}</div>', cards)
             self.assertEqual(self.i18n(key), (label, label))
-        self.assertIn('<option>luna</option><option>spark</option><option>terra</option><option>sol</option><option>opus5</option><option>qwen</option>', HTML)
+        # Since Task 7 the static #tier select only carries the "all" option;
+        # the per-tier <option>s come from tierFilterOptions(), grouped by
+        # account (see AccountGroupTests).
         self.assertIn("return effort?`${tier} · ${effort}`:tier", HTML)
         self.assertIn("String(raw?.tier||raw?.model||node.model||kind).toUpperCase()", HTML)
         router_run_markup = HTML[HTML.index('<div id="runs"'):HTML.index('<section id="settings-panel"')]
@@ -353,7 +358,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34,
-             "opus5": 0, "sonnet5": 0, "qwen": 0},
+             "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0},
         )
         renderer = HTML[HTML.rindex("render=function(){"):]
         self.assertIn("const summary=executionSummary(runData.map(run=>run.scope.calls))", renderer)
@@ -368,7 +373,9 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_opus5_is_enumerated_colored_and_filterable_in_grouped_and_raw_views(self):
         self.assertIn("--opus5:#d695ff", HTML)
-        self.assertIn("<option>opus5</option>", HTML)
+        # Since Task 7 the static #tier select only carries the "all" option;
+        # the per-tier <option>s come from tierFilterOptions() (see
+        # AccountGroupTests.test_tier_filter_options_are_grouped_by_account_label).
         self.assertIn('class="card opus5"', HTML)
         self.assertIn(".pill.opus5{color:var(--opus5)}", HTML)
         self.assertIn(".task-tree-marker.opus5{background:var(--opus5)", HTML)
@@ -526,11 +533,47 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class RouterModuleImportTests(unittest.TestCase):
+    """A normal Hermes install has no ``model_router`` package anywhere on
+    sys.path: the repo is ``hermes-model-router`` and the plugin directory is
+    ``model-router`` (hyphenated). _router_module() must still find the router
+    by loading it from its own script directory."""
+
+    def test_router_module_imports_without_a_parent_named_model_router(self):
+        import subprocess
+        import sys
+        import tempfile
+
+        script_dir = str(Path(web_viewer.__file__).resolve().parent)
+        probe = (
+            "import importlib.util, sys\n"
+            f"sys.path.insert(0, {script_dir!r})\n"
+            f"spec = importlib.util.spec_from_file_location('web_viewer', {str(Path(web_viewer.__file__).resolve())!r})\n"
+            "web_viewer = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(web_viewer)\n"
+            "router = web_viewer._router_module()\n"
+            "assert router is not None, 'expected the router to import'\n"
+            "assert hasattr(router, 'usage_guard'), 'expected the router module to carry usage_guard'\n"
+            "print('OK')\n"
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            result = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=cwd,
+                env={"HOME": cwd, "PATH": os.environ.get("PATH", "")},
+                check=True, text=True, capture_output=True,
+            )
+        self.assertEqual(result.stdout.strip(), "OK")
+
+
 class RouterStatusTests(unittest.TestCase):
     def test_router_status_degrades_to_empty_instead_of_failing(self):
         """The dashboard is a standalone script; it must keep serving the log
-        even when the router package cannot be imported."""
-        with patch.dict("sys.modules", {"model_router": None}):
+        even when the router package truly cannot be imported. _router_module()
+        now has its own importlib fallback (see RouterModuleImportTests), so this
+        drives the degrade path through that seam directly rather than via the
+        old sys.modules trick, which the fallback would simply route around."""
+        with patch.object(web_viewer, "_router_module", return_value=None):
             status = web_viewer._router_status()
         self.assertEqual(
             status, {"cooldowns": {}, "load": {}, "window_minutes": 0, "routable": []}
@@ -630,12 +673,13 @@ class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
         )
 
     def _render(self, config, language="en"):
-        source = self.javascript_function("renderPreferences")
+        source = self.javascript_function("chainChipAccount") + "\n" + self.javascript_function("renderPreferences")
         labels = {m: m.upper() for m in
                   ("luna", "spark", "terra", "sol", "opus5", "sonnet5", "qwen")}
         probe = (
             self.i18n_runtime(language)
-            + "let html='';const box={set innerHTML(v){html=v;},appendChild(el){html+=el.outerHTML||el.textContent;}};"
+            + "let html='';const box={set innerHTML(v){html=v;},appendChild(el){html+=el.outerHTML||el.textContent;},"
+            "classList:{toggle(){}}};"
             "function $(id){return id==='pref-kinds'?box:null;}"
             "let currentConfig=" + json.dumps(config) + ";"
             "document={createElement:()=>({className:'',set innerHTML(v){this._h=v;},"
@@ -645,6 +689,51 @@ class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
         )
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         return result.stdout
+
+    def _chain_chip_account(self, model, config):
+        source = self.javascript_function("chainChipAccount")
+        probe = self.i18n_runtime() + "let currentConfig=" + json.dumps(config) + ";" + source \
+            + f"\nconsole.log(JSON.stringify(chainChipAccount({json.dumps(model)})));"
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return json.loads(result.stdout)
+
+    def test_chain_chip_account_carries_class_label_and_state_mark(self):
+        config = {
+            "tier_accounts": {"opus5": "anthropic"},
+            "accounts": {"anthropic": {"label": "Claude", "state": "soft"}},
+        }
+        self.assertEqual(
+            self._chain_chip_account("opus5", config),
+            {"account": "anthropic", "label": "Claude", "mark": "soft limit"},
+        )
+
+    def test_chain_chip_account_has_no_mark_when_the_account_is_open(self):
+        config = {
+            "tier_accounts": {"terra": "openai-codex"},
+            "accounts": {"openai-codex": {"label": "Codex", "state": "open"}},
+        }
+        self.assertEqual(
+            self._chain_chip_account("terra", config),
+            {"account": "openai-codex", "label": "Codex", "mark": ""},
+        )
+
+    def test_chain_chip_account_is_null_for_a_model_with_no_known_account(self):
+        self.assertIsNone(self._chain_chip_account("terra", {"tier_accounts": {}, "accounts": {}}))
+
+    def test_preference_chips_carry_the_account_class_label_and_closed_mark(self):
+        html = self._render({
+            "work_kinds": ["design"], "preferences": {"design": ["opus5"]},
+            "routable": ["opus5"], "callable": {"opus5": True},
+            "tier_accounts": {"opus5": "anthropic"},
+            "accounts": {"anthropic": {"label": "Claude", "state": "closed"}},
+        })
+        chip_start = html.index('<span class="pref-chip')
+        chip_end = html.index('</span>', html.rindex('data-act="del"', chip_start))
+        chip = html[chip_start:chip_end]
+        self.assertIn(' anthropic', chip.split('>')[0])
+        self.assertIn('Claude', chip)
+        english, _ = self.i18n('account.state.closed')
+        self.assertIn(english, chip)
 
     def test_a_delegation_only_target_is_marked_apart_from_a_routed_one(self):
         """A purple chip means "handed to the conductor", not "routed here"."""
@@ -770,6 +859,129 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         for text in (english, hungarian):
             self.assertIn("~/.hermes/config.yaml", text)
 
+    def test_options_include_every_router_model_and_a_claude_tier(self):
+        """Restricting the picker to Hermes delegation targets alone rejected the
+        operator's own orchestrator chain, which named this router's own account
+        (openai-codex/gpt-5.6-sol) -- never a Hermes delegation target in the
+        first place."""
+        router_cfg = {
+            "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+            "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
+            "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5"}},
+        }
+        with patch.object(web_viewer, "_read_hermes_config", return_value={}):
+            options = web_viewer._fallback_chain_options(router_cfg)
+        self.assertIn({"key": "sol", "provider": "openai-codex", "model": "gpt-5.6-sol"}, options)
+        self.assertIn({"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"}, options)
+
+    def test_options_still_include_the_hermes_delegation_targets(self):
+        router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
+        with patch.object(web_viewer, "_read_hermes_config",
+                          return_value={"delegation": {"targets": {
+                              "qwen": {"provider": "qwen-token", "model": "qwen3.7-plus"}}}}):
+            options = web_viewer._fallback_chain_options(router_cfg)
+        self.assertIn({"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"}, options)
+
+    def test_a_route_already_in_the_saved_chain_can_never_fail_a_save(self):
+        """Measured live 2026-09-18: every settings save 400'd and reverted every
+        toggle, because the operator's real orchestrator chain named a route
+        (openai-codex/gpt-5.6-sol) the old picker never offered. Whatever is
+        already saved must always be re-acceptable, even if the picker's own
+        options do not (any longer, or yet) include it."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text(
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "delegation:\n  targets:\n"
+                "    opus5:\n      provider: anthropic\n      model: claude-opus-5\n"
+                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
+                encoding="utf-8")
+            router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]}, router_cfg)
+            self.assertIsNone(error)
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["fallback_providers"][0]["model"], "gpt-5.6-sol")
+
+    def test_an_unknown_route_outside_the_saved_chain_is_still_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text(
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "delegation:\n  targets: {}\n",
+                encoding="utf-8")
+            router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [{"provider": "evil", "model": "x"}]}, router_cfg)
+            self.assertIsNotNone(error)
+            self.assertIn("Unknown route", error)
+
+    def test_the_operators_live_payload_saves_instead_of_reverting(self):
+        """End-to-end reproduction of the live failure: a real POST /api/config
+        with the operator's exact settings-page payload must now return 200 and
+        actually write the callable change, instead of 400ing and leaving the
+        page to reload the old config over every toggle."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "router_config.yaml"
+            router_cfg = {
+                "callable": {"terra": True, "sol": True},
+                "default_model": "terra",
+                "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+                "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
+                "preferences": {},
+                "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5"}},
+            }
+            with open(config_path, "w", encoding="utf-8") as f:
+                web_viewer.yaml.dump(router_cfg, f)
+
+            hermes_path = Path(directory) / "hermes-config.yaml"
+            hermes_path.write_text(
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "delegation:\n  targets:\n"
+                "    opus5:\n      provider: anthropic\n      model: claude-opus-5\n"
+                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
+                encoding="utf-8")
+
+            payload = json.dumps({
+                "callable": {"terra": True, "sol": False},
+                "default_model": "terra",
+                "preferences": {},
+                "hermes_fallback": {"orchestrator": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]},
+                "usage_limits": {},
+            }).encode("utf-8")
+
+            with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+                 patch.object(web_viewer, "HERMES_CONFIG_PATH", hermes_path):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/config",
+                        data=payload, method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request) as response:
+                        status = response.status
+                        body = json.load(response)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+            self.assertEqual(status, 200)
+            self.assertTrue(body.get("success"))
+            # Saves land in the git-ignored local file, over the shipped one.
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+            self.assertEqual(written["callable"]["sol"], False)
+
 
 class CooldownPillLayoutTests(DashboardProbeMixin, unittest.TestCase):
     """A long cooldown reason must stay inside its card.
@@ -816,3 +1028,1467 @@ class SettingsLabelTests(DashboardProbeMixin, unittest.TestCase):
         english, hungarian = self.i18n("settings.prefs.sub")
         self.assertIn("does not change the model Hermes starts on", english)
         self.assertIn("indulási modelljét nem", hungarian)
+
+
+class DefaultModelSaveTests(unittest.TestCase):
+    """Saving the Settings tab must not move the model Hermes starts on.
+
+    The page posts ``default_model`` on every save -- a callable toggle, a
+    preference chain, a fallback edit -- so an unrelated save used to rewrite
+    Hermes's own ``model.default`` back onto this provider's tier. One click
+    undid a Claude-parent setup, and the write left no restore point.
+    """
+
+    CONFIG = {
+        "models": {"luna": "gpt-5.6-luna", "terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+        "callable": {"luna": True, "terra": True, "sol": False, "opus5": True},
+        "fallbacks": {"sol": "terra"},
+        "tier_providers": {
+            "luna": "openai-codex", "terra": "openai-codex",
+            "sol": "openai-codex", "opus5": "anthropic",
+        },
+        "default_model": "terra",
+    }
+    HERMES = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+    HERMES_CODEX = "model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n"
+
+    def _config(self):
+        import copy
+
+        return copy.deepcopy(self.CONFIG)
+
+    def _hermes_file(self, directory, content=None):
+        target = Path(directory) / "config.yaml"
+        target.write_text(self.HERMES if content is None else content, encoding="utf-8")
+        return target
+
+    def test_saving_without_changing_the_default_model_leaves_hermes_alone(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("terra", config)
+            self.assertIsNone(error)
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
+
+    def test_changing_the_default_model_writes_it_through_with_a_restore_point(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory, self.HERMES_CODEX)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("luna", config)
+            self.assertIsNone(error)
+            self.assertEqual(config["default_model"], "luna")
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["model"]["default"], "gpt-5.6-luna")
+            self.assertEqual(written["model"]["provider"], "openai-codex")
+            self.assertEqual(written["model"]["api_mode"], "codex_responses")
+            backups = list(Path(directory).glob("config.yaml.bak-router-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn("gpt-5.6-terra", backups[0].read_text(encoding="utf-8"))
+
+    def test_a_disabled_tier_still_resolves_through_the_fallback_chain(self):
+        config = self._config()
+        config["default_model"] = "luna"
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory, self.HERMES_CODEX)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("sol", config)
+            self.assertIsNone(error)
+            self.assertEqual(config["default_model"], "terra")
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["model"]["default"], "gpt-5.6-terra")
+
+    def test_a_parent_on_another_account_is_never_moved(self):
+        """Measured live 2026-09-18: switching Qwen off moved default_model qwen->terra,
+        and the save wrote gpt-5.6-terra into Hermes's model block -- the Opus parent
+        was gone at the next Hermes start. The router's default tier is its own
+        setting; a parent the router doesn't serve is set in Hermes's config only."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("luna", config)
+            self.assertIsNone(error)
+            self.assertEqual(config["default_model"], "luna")
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
+
+    def test_a_chain_with_no_enabled_tier_is_refused(self):
+        config = self._config()
+        config["callable"]["terra"] = False
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("sol", config)
+            self.assertIn("No enabled fallback", error)
+            self.assertEqual(config["default_model"], "terra")
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+
+    def test_a_delegation_target_is_refused_rather_than_blanking_the_model(self):
+        """opus5 has no entry in `models`, so the old code wrote model.default: ''
+        and the router's own _decision would raise KeyError on the tier."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                error = web_viewer._save_default_model("opus5", config)
+            self.assertIsNotNone(error)
+            self.assertIn("opus5", error)
+            self.assertEqual(config["default_model"], "terra")
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+
+
+class ConfigPathTests(unittest.TestCase):
+    """The dashboard must read the config file the router actually loads.
+
+    The path was hardcoded to ~/.hermes/plugins/model_router/, but `hermes
+    plugins install` creates model-router (the manifest name), so on a normal
+    install the dashboard read nothing and every save raised.
+    """
+
+    def test_the_dashboard_reads_the_file_beside_it(self):
+        self.assertEqual(
+            web_viewer.CONFIG_PATH,
+            Path(web_viewer.__file__).resolve().parent / "router_config.yaml",
+        )
+
+    def test_the_dashboard_and_the_router_agree_on_one_file(self):
+        import model_router
+
+        self.assertEqual(web_viewer.CONFIG_PATH, model_router._CONFIG_PATH)
+
+
+class HaikuDashboardTests(DashboardProbeMixin, unittest.TestCase):
+    """Claude delegation adds a third Claude tier; the dashboard must show it
+    wherever it shows the other two, or Haiku workers are counted nowhere."""
+
+    def test_haiku_is_styled_like_sonnet5(self):
+        import re
+
+        css = "".join(re.findall(r"<style>(.*?)</style>", HTML, re.S))
+        selectors = {
+            tier: sorted(
+                match.group(1).replace(tier, "<tier>")
+                for match in re.finditer(r"([^{};]*\.%s[^{};]*)\{" % tier, css)
+            )
+            for tier in ("sonnet5", "haiku")
+        }
+        self.assertTrue(selectors["haiku"], "expected haiku to carry tier styling")
+        self.assertEqual(selectors["haiku"], selectors["sonnet5"])
+
+    def test_haiku_is_enumerated_everywhere_sonnet5_is(self):
+        for fragment in ("--haiku:", 'class="card haiku"',
+                         ".pill.haiku{color:var(--haiku)}", ".task-tree-marker.haiku{background:var(--haiku)"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, HTML)
+        self.assertEqual(HTML.count("'sonnet5'"), HTML.count("'haiku'"))
+        self.assertEqual(HTML.count("sonnet5:"), HTML.count("haiku:"))
+
+    def test_haiku_is_offered_by_the_tier_filter(self):
+        # Since Task 7, the static #tier select only has the "all" option; the
+        # per-tier <option>s (haiku included) come from tierFilterOptions(),
+        # grouped by account.
+        source = self.javascript_function("tierFilterOptions")
+        probe = source + "\nconsole.log(tierFilterOptions([{account:'anthropic',label:'Claude',tiers:['haiku','sonnet5','opus5']}]));"
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        self.assertIn("<option>haiku</option>", result.stdout)
+
+    def test_haiku_has_labels_in_both_languages(self):
+        for key in ("card.haiku", "model.desc.haiku"):
+            with self.subTest(key=key):
+                english, hungarian = self.i18n(key)
+                self.assertTrue(english and hungarian)
+
+    def test_a_haiku_call_is_classified_as_haiku(self):
+        source = self.execution_source()
+        parent = {"children": [{"id": "external", "model": "claude-haiku-4-5-20251001",
+                                "routed_calls": [{"tier": "haiku", "model": "claude-haiku-4-5-20251001",
+                                                  "effort": "external"}], "children": []}]}
+        probe = (source + "\nfunction sessionIdFromTurn(entry){return String(entry?.turn_id||'').split(':')[0]}\n"
+                 "const scope=executionScope([{tier:'terra'}],[]," + json.dumps(parent) + ",'haiku');"
+                 "console.log(JSON.stringify({kinds:scope.nodes.map(executionKind),"
+                 "summary:executionSummary([scope.calls])}));")
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        observed = json.loads(result.stdout)
+        self.assertEqual(observed["kinds"], ["haiku"])
+        self.assertEqual(observed["summary"]["haiku"], 1)
+
+
+class AccountsApiTests(unittest.TestCase):
+    """The dashboard's per-account view: usage, guard limits, and delegation state,
+    the same shape for every account the router can delegate to."""
+
+    def _build_config(self, directory):
+        state_path = Path(directory) / "usage-state.json"
+        log_path = Path(directory) / "claude-delegation.jsonl"
+        fetched_at = time.time() - 60
+        state_path.write_text(json.dumps({
+            "anthropic": {
+                "weekly": 13, "session": 5,
+                "weekly_resets_at": "2026-09-24T16:00:00+00:00",
+                "session_resets_at": None,
+                "fetched_at": fetched_at,
+            },
+        }), encoding="utf-8")
+        log_path.write_text("\n".join([
+            json.dumps({"event": "registration", "registered": True, "reason": ""}),
+            json.dumps({"event": "delegate_claude", "session_id": "s1", "turn_id": "t1", "outcome": "ran"}),
+            json.dumps({"event": "delegate_claude", "session_id": "s1", "turn_id": "t2", "outcome": "refused"}),
+        ]), encoding="utf-8")
+        config = {
+            "callable": {
+                "luna": True, "terra": True, "sol": True,
+                "haiku": True, "sonnet5": True, "opus5": True,
+                # qwen deliberately has no entry at all here (not even False):
+                # a tier with a `callable` key, on or off, still gets a card and
+                # a switch (see test_a_switched_off_tier_still_appears_with_its_switch);
+                # only a tier the config never mentions is truly absent.
+            },
+            "tier_providers": {
+                "luna": "openai-codex", "terra": "openai-codex", "sol": "openai-codex",
+                "haiku": "anthropic", "sonnet5": "anthropic", "opus5": "anthropic",
+                "qwen": "qwen-token",
+            },
+            "usage_guard": {
+                "state_path": str(state_path),
+                "accounts": {
+                    "anthropic": {"soft_percent": 70, "hard_percent": 90, "step_down": {"opus5": "sonnet5"}},
+                    "openai-codex": {"soft_percent": 70, "hard_percent": 90, "step_down": {"sol": "terra"}},
+                },
+            },
+            "claude_delegation": {
+                "enabled": True,
+                "default_tier": "sonnet",
+                "log_path": str(log_path),
+            },
+        }
+        return config, state_path, log_path
+
+    def setUp(self):
+        import model_router
+
+        self.model_router = model_router
+        model_router.usage_guard._reset_cache()
+
+    def tearDown(self):
+        self.model_router.usage_guard._reset_cache()
+
+    def test_accounts_status_covers_every_account_with_a_callable_tier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+
+        # Qwen has no callable tier, so it is absent entirely.
+        self.assertEqual(set(accounts.keys()), {"openai-codex", "anthropic"})
+
+        claude = accounts["anthropic"]
+        self.assertEqual(claude["label"], "Claude")
+        self.assertEqual(claude["state"], "open")
+        self.assertEqual(claude["usage"]["weekly"], 13)
+        self.assertTrue(50 <= claude["usage_age_seconds"] <= 120)
+        self.assertIs(claude["guard"], True)
+        self.assertEqual(claude["soft_percent"], 70)
+        self.assertEqual(claude["delegation"], {
+            "tool": "delegate_claude",
+            "enabled": True,
+            "registered": True,
+            "workflow": "claude_delegation",
+            "restart_needed": False,
+            "default_tier": "sonnet",
+            "tiers": list(self.model_router.claude_delegation.TIERS),
+        })
+
+        codex = accounts["openai-codex"]
+        self.assertIsNone(codex["usage"])
+        self.assertEqual(codex["state"], "unknown")
+        self.assertEqual(codex["delegation"], {"tool": "delegate_task", "always_on": True})
+
+    def test_a_switched_off_tier_still_appears_with_its_switch(self):
+        """The shipped config ships spark:false. Dropping it from `tiers` when it
+        is off meant the switch that would turn it back on vanished with it."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            config["callable"]["spark"] = False
+            config["tier_providers"]["spark"] = "openai-codex"
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+        self.assertIn("spark", accounts["openai-codex"]["tiers"])
+
+    def test_an_account_with_every_tier_switched_off_still_gets_a_card(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            for tier in ("haiku", "sonnet5", "opus5"):
+                config["callable"][tier] = False
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+        self.assertIn("anthropic", accounts)
+        self.assertEqual(set(accounts["anthropic"]["tiers"]), {"haiku", "sonnet5", "opus5"})
+
+    def test_accounts_status_serves_cache_seconds_for_staleness(self):
+        """M10: the dashboard greys out a card at 2x cache_seconds, so that
+        value has to travel with the account, not be assumed client-side."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            config["usage_guard"]["cache_seconds"] = 120
+            with patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                accounts = web_viewer._accounts_status(config)
+        self.assertEqual(accounts["anthropic"]["cache_seconds"], 120)
+        self.assertEqual(accounts["openai-codex"]["cache_seconds"], 120)
+
+    def test_accounts_status_never_fetches_usage(self):
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            anthropic_fetcher = MagicMock()
+            codex_fetcher = MagicMock()
+            with patch.dict(self.model_router.usage_guard.FETCHERS,
+                             {"anthropic": anthropic_fetcher, "openai-codex": codex_fetcher}), \
+                 patch.object(web_viewer, "_router_module", return_value=self.model_router):
+                web_viewer._accounts_status(config)
+            anthropic_fetcher.assert_not_called()
+            codex_fetcher.assert_not_called()
+
+    def test_save_usage_limits_updates_and_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+
+            error = web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 60, "hard_percent": 85}}, config
+            )
+            self.assertIsNone(error)
+            self.assertEqual(config["usage_guard"]["accounts"]["anthropic"]["soft_percent"], 60)
+            self.assertEqual(config["usage_guard"]["accounts"]["anthropic"]["hard_percent"], 85)
+
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 90, "hard_percent": 85}}, config))
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 10, "hard_percent": 150}}, config))
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"anthropic": {"soft_percent": 0, "hard_percent": 90}}, config))
+            self.assertIsNotNone(web_viewer._save_usage_limits(
+                {"nope": {"soft_percent": 10, "hard_percent": 90}}, config))
+
+    def test_whole_percentages_are_saved_as_integers(self):
+        config = {"usage_guard": {"accounts": {"anthropic": {"soft_percent": 70, "hard_percent": 90}}}}
+        self.assertIsNone(web_viewer._save_usage_limits({"anthropic": {"soft_percent": 80, "hard_percent": 92.5}}, config))
+        limits = config["usage_guard"]["accounts"]["anthropic"]
+        self.assertEqual((repr(limits["soft_percent"]), repr(limits["hard_percent"])), ("80", "92.5"))
+
+    def test_an_empty_usage_limits_payload_touches_nothing(self):
+        """M9: setdefault()-ing usage_guard/accounts even for an empty payload
+        added an empty `usage_guard: {accounts: {}}` block to a config that
+        never had one."""
+        config = {"callable": {}, "tier_providers": {}}
+        error = web_viewer._save_usage_limits({}, config)
+        self.assertIsNone(error)
+        self.assertNotIn("usage_guard", config)
+
+    def test_save_claude_delegation_updates_and_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+
+            error = web_viewer._save_claude_delegation(
+                {"enabled": False, "default_tier": "haiku"}, config
+            )
+            self.assertIsNone(error)
+            self.assertEqual(config["claude_delegation"]["enabled"], False)
+            self.assertEqual(config["claude_delegation"]["default_tier"], "haiku")
+
+            self.assertIsNotNone(web_viewer._save_claude_delegation({"default_tier": "gpt"}, config))
+            self.assertIsNotNone(web_viewer._save_claude_delegation({"enabled": "yes"}, config))
+
+    def test_read_delegation_log_separates_audits_from_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            audits, registration = web_viewer._read_delegation_log(config)
+            self.assertEqual(len(audits), 2)
+            self.assertEqual({a["outcome"] for a in audits}, {"ran", "refused"})
+            self.assertTrue(all(a["session_id"] == "s1" for a in audits))
+            self.assertEqual(registration, {"event": "registration", "registered": True, "reason": ""})
+
+    def test_read_delegation_log_only_reads_the_tail(self):
+        """The log is never rotated, so a full read every /api/entries poll would slow down
+        forever. Only the last _DELEGATION_LOG_TAIL_BYTES bytes are ever loaded."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = self._build_config(directory)
+            registration = json.dumps({"event": "registration", "registered": True, "reason": ""})
+            early_audits = [
+                json.dumps({"event": "delegate_claude", "session_id": f"early-{i}",
+                            "turn_id": f"t{i}", "outcome": "ran"})
+                for i in range(50)
+            ]
+            late_audits = [
+                json.dumps({"event": "delegate_claude", "session_id": f"late-{i}",
+                            "turn_id": f"t{i}", "outcome": "ran"})
+                for i in range(5)
+            ]
+            log_path.write_text("\n".join([registration] + early_audits + late_audits), encoding="utf-8")
+
+            with patch.object(web_viewer, "_DELEGATION_LOG_TAIL_BYTES", 400):
+                audits, tail_registration = web_viewer._read_delegation_log(config)
+
+            # Only lines from the tail come back: the early lines (and the registration,
+            # which precedes them) fall outside the 400-byte window.
+            self.assertTrue(audits, "expected at least one audit line from the tail")
+            session_ids = {a["session_id"] for a in audits}
+            self.assertTrue(session_ids.issubset({f"late-{i}" for i in range(5)}))
+            self.assertFalse(session_ids & {f"early-{i}" for i in range(50)})
+            self.assertIsNone(tail_registration)
+            # Every returned line parsed cleanly -- a seek into the middle of a line would
+            # have produced a JSON error that is silently skipped, not a corrupt entry.
+            for audit in audits:
+                self.assertEqual(audit["event"], "delegate_claude")
+
+    def test_read_delegation_log_skips_a_non_utf8_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = self._build_config(directory)
+            good_line = json.dumps({"event": "delegate_claude", "session_id": "s2",
+                                     "turn_id": "t9", "outcome": "ran"}).encode("utf-8")
+            bad_line = b"\xff\xfe not valid utf-8 \x80\x81"
+            log_path.write_bytes(good_line + b"\n" + bad_line + b"\n")
+
+            audits, registration = web_viewer._read_delegation_log(config)
+
+            self.assertEqual(len(audits), 1)
+            self.assertEqual(audits[0]["session_id"], "s2")
+            self.assertIsNone(registration)
+
+    def test_registration_is_found_within_the_tail_regardless_of_the_audit_limit(self):
+        """M7: the old code additionally windowed the already-tail-restricted
+        lines down to `limit*2`, so a registration line older than that second
+        window (but still well within the tail bytes) was missed even though
+        it was right there in what got read."""
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = self._build_config(directory)
+            registration = json.dumps({"event": "registration", "registered": True, "reason": ""})
+            audits = [
+                json.dumps({"event": "delegate_claude", "session_id": f"s{i}",
+                            "turn_id": f"t{i}", "outcome": "ran"})
+                for i in range(10)
+            ]
+            log_path.write_text("\n".join([registration] + audits), encoding="utf-8")
+
+            _audits, found = web_viewer._read_delegation_log(config, limit=2)
+
+            self.assertEqual(found, {"event": "registration", "registered": True, "reason": ""})
+            self.assertEqual(len(_audits), 2)
+
+    def test_usage_refresh_endpoint_reads_through_the_shared_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, _ = self._build_config(directory)
+            config_path = Path(directory) / "router_config.yaml"
+            with open(config_path, "w", encoding="utf-8") as f:
+                web_viewer.yaml.dump(config, f)
+
+            reading = self.model_router.usage_guard.Reading(
+                weekly=20.0, session=4.0,
+                weekly_resets_at="2026-09-25T00:00:00+00:00", session_resets_at=None,
+                fetched_at=time.time(),
+            )
+
+            def fake_read(account, cfg):
+                # Mimics the real read()'s cache side effect, without a network call.
+                self.model_router.usage_guard._slot(account)["reading"] = reading
+                return reading
+
+            with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+                 patch.object(self.model_router.usage_guard, "read", side_effect=fake_read) as mocked_read:
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=anthropic",
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(request) as response:
+                        status = response.status
+                        payload = json.load(response)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(payload["account"]["usage"]["weekly"], 20.0)
+                    mocked_read.assert_called_once()
+
+                    bad_request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=nope",
+                        method="POST",
+                    )
+                    try:
+                        urllib.request.urlopen(bad_request)
+                        self.fail("expected HTTPError for unknown account")
+                    except urllib.error.HTTPError as exc:
+                        self.assertEqual(exc.code, 400)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+
+class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
+    """Settings shows one account card per account, not a flat toggle list plus a
+    separate load box. Every card has the same five rows: models, usage, limits,
+    delegation, load."""
+
+    CODEX_INFO = {
+        "label": "Codex",
+        "tiers": ["luna", "terra", "sol"],
+        "state": "unknown",
+        "usage": None,
+        "usage_age_seconds": None,
+        "has_usage_source": False,
+        "guard": True,
+        "soft_percent": 70,
+        "hard_percent": 90,
+        "step_down": {"sol": "terra"},
+        "delegation": {"tool": "delegate_task", "always_on": True},
+    }
+
+    CLAUDE_INFO = {
+        "label": "Claude",
+        "tiers": ["haiku", "opus5", "sonnet5"],
+        "state": "open",
+        "usage": {
+            "weekly": 13, "session": 5,
+            "weekly_resets_at": "2026-09-24T16:00:00+00:00",
+            "session_resets_at": None,
+        },
+        "usage_age_seconds": 60,
+        "has_usage_source": True,
+        "guard": True,
+        "soft_percent": 70,
+        "hard_percent": 90,
+        "step_down": {"opus5": "sonnet5"},
+        "delegation": {
+            "tool": "delegate_claude", "enabled": True, "registered": True,
+            "restart_needed": False, "default_tier": "sonnet",
+            "tiers": ["haiku", "sonnet", "opus"],
+        },
+    }
+
+    NO_USAGE_SOURCE_INFO = {
+        "label": "Qwen",
+        "tiers": ["qwen"],
+        "state": "unknown",
+        "usage": None,
+        "usage_age_seconds": None,
+        "has_usage_source": False,
+        "guard": False,
+        "soft_percent": None,
+        "hard_percent": None,
+        "step_down": {},
+        "delegation": {"tool": "delegate_task", "always_on": True},
+    }
+
+    def _account_functions(self):
+        return "\n".join(self.javascript_function(name)
+                          for name in ("ageText", "resetText", "usageRow", "accountCard"))
+
+    def _run(self, script):
+        # 'status.locale' must resolve to a real BCP-47 tag: toLocaleString throws
+        # on the stub's usual echo-the-key behaviour.
+        probe = "const t=k=>k==='status.locale'?'en-US':k;\n" + self._account_functions() + "\n" + script
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout.strip()
+
+    def _card(self, account, info, extra_config=None):
+        config = {"callable": {}, "cooldowns": {}, "load": {"openai-codex": 3, "anthropic": 1},
+                   "window_minutes": 60, "accounts": {account: info}}
+        if extra_config:
+            config.update(extra_config)
+        script = (f"let currentConfig={json.dumps(config)};"
+                  f"console.log(accountCard({json.dumps(account)},currentConfig.accounts[{json.dumps(account)}]));")
+        return self._run(script)
+
+    def test_markup_has_the_new_containers_not_the_old_ones(self):
+        start = HTML.index('id="settings-panel"')
+        end = HTML.index("</section>", start)
+        panel = HTML[start:end]
+        self.assertIn('id="account-cards"', panel)
+        self.assertNotIn('id="callable-toggles"', HTML)
+        self.assertNotIn('id="account-load"', HTML)
+
+    def test_every_card_has_the_same_row_structure(self):
+        import re
+
+        codex_card = self._card("openai-codex", self.CODEX_INFO)
+        claude_card = self._card("anthropic", self.CLAUDE_INFO)
+        expected = ["models", "usage", "limits", "delegation", "load"]
+        self.assertEqual(re.findall(r'class="account-row (\w+)"', codex_card), expected)
+        self.assertEqual(re.findall(r'class="account-row (\w+)"', claude_card), expected)
+
+    def test_claude_card_specifics(self):
+        registered = self._card("anthropic", self.CLAUDE_INFO)
+        # The Workflow switch owns delegate_claude being on; the card only reports it.
+        self.assertNotIn("data-account-toggle", registered)
+        self.assertIn("account.delegation.via", registered)
+        self.assertIn('<select data-default-tier', registered)
+        for tier in ("haiku", "sonnet", "opus"):
+            self.assertIn(f'value="{tier}"', registered)
+        self.assertIn("account.delegation.live", registered)
+
+        restart_info = dict(self.CLAUDE_INFO,
+                             delegation=dict(self.CLAUDE_INFO["delegation"], restart_needed=True))
+        restarting = self._card("anthropic", restart_info)
+        self.assertIn("account.delegation.restart", restarting)
+
+    def test_the_live_and_restart_badge_lives_in_the_card_header_not_the_delegation_row(self):
+        """M7: it used to sit inside the Delegation row; the card header (next
+        to the state badge) is where the other at-a-glance status lives."""
+        registered = self._card("anthropic", self.CLAUDE_INFO)
+        head_start = registered.index('class="account-head"')
+        head_end = registered.index('</div>', head_start)
+        head = registered[head_start:head_end]
+        self.assertIn("account.delegation.live", head)
+
+        delegation_row_start = registered.index('class="account-row delegation"')
+        delegation_row_end = registered.index('</div></div>', delegation_row_start)
+        delegation_row = registered[delegation_row_start:delegation_row_end]
+        self.assertNotIn("account.delegation.live", delegation_row)
+
+        restart_info = dict(self.CLAUDE_INFO,
+                             delegation=dict(self.CLAUDE_INFO["delegation"], restart_needed=True))
+        restarting = self._card("anthropic", restart_info)
+        restart_head_start = restarting.index('class="account-head"')
+        restart_head_end = restarting.index('</div>', restart_head_start)
+        self.assertIn("account.delegation.restart", restarting[restart_head_start:restart_head_end])
+
+    def test_codex_card_specifics(self):
+        codex_card = self._card("openai-codex", self.CODEX_INFO)
+        self.assertIn("account.delegation.always", codex_card)
+        self.assertNotIn("data-account-toggle", codex_card)
+
+    def test_an_account_without_a_usage_source_shows_the_none_message_and_disabled_limits(self):
+        card = self._card("qwen-token", self.NO_USAGE_SOURCE_INFO)
+        self.assertIn("account.usage.none", card)
+        self.assertIn('data-limit="soft" data-account="qwen-token" value="" disabled', card)
+        self.assertIn('data-limit="hard" data-account="qwen-token" value="" disabled', card)
+
+    def test_cooldown_pill_shows_its_reason(self):
+        """M10: the old UI showed why a tier is cooling, not just for how long."""
+        config = {
+            "callable": {}, "cooldowns": {"luna": {"seconds": 120, "reason": "3 failures within 60s"}},
+            "load": {}, "window_minutes": 60, "accounts": {"openai-codex": self.CODEX_INFO},
+        }
+        script = (f"let currentConfig={json.dumps(config)};"
+                  f"console.log(accountCard('openai-codex',currentConfig.accounts['openai-codex']));")
+        out = self._run(script)
+        self.assertIn("3 failures within 60s", out)
+
+    def test_a_card_greys_out_at_twice_the_cache_seconds_not_a_fixed_ten_minutes(self):
+        """M10: staleness used to be a hardcoded 600s; it now follows 2x
+        whatever cache_seconds the accounts payload actually served."""
+        fresh_info = dict(self.CLAUDE_INFO, usage_age_seconds=250, cache_seconds=200)
+        stale_info = dict(self.CLAUDE_INFO, usage_age_seconds=250, cache_seconds=100)
+        self.assertNotIn(' stale', self._card("anthropic", fresh_info))
+        self.assertIn(' stale', self._card("anthropic", stale_info))
+
+    def test_usage_row_places_soft_and_hard_ticks(self):
+        script = "console.log(usageRow('account.usage.week',55,null,70,90));"
+        row = self._run(script)
+        self.assertIn('style="left:70%"', row)
+        self.assertIn('style="left:90%"', row)
+
+    def test_every_i18n_key_used_by_the_new_code_exists_in_both_languages(self):
+        for key in [
+            "settings.accounts.heading", "account.state.open", "account.state.soft",
+            "account.state.closed", "account.state.unknown", "account.models",
+            "account.usage", "account.usage.week", "account.usage.session",
+            "account.usage.resets", "account.usage.age", "account.usage.none",
+            "account.usage.refresh", "account.limits", "account.limits.soft",
+            "account.limits.hard", "account.limits.stepdown", "account.delegation",
+            "account.delegation.via", "account.delegation.always",
+            "account.delegation.default_tier", "account.delegation.live",
+            "account.delegation.restart", "account.load", "account.load.calls",
+            "settings.routing.heading",
+        ]:
+            self.i18n(key)
+
+    def test_save_payload_includes_usage_limits_and_claude_delegation(self):
+        source = self.javascript_function("saveSettings")
+        self.assertIn("usage_limits:", source)
+        self.assertIn("claude_delegation:", source)
+
+    def test_every_model_control_is_the_same_slider_toggle_as_the_delegation_switch(self):
+        """Live check finding: a model on/off switch must look like the Claude
+        delegation switch -- a slider, not a bare checkbox -- while keeping the
+        data-model attribute the change listener relies on."""
+        import re
+
+        card = self._card("anthropic", self.CLAUDE_INFO)
+        for tier in self.CLAUDE_INFO["tiers"]:
+            match = re.search(
+                r'<label class="switch"><input type="checkbox" data-model="' + tier
+                + r'"[^>]*><span class="slider"></span></label>',
+                card,
+            )
+            self.assertIsNotNone(match, f"{tier} is not rendered as a switch/slider control")
+
+
+class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
+    """The main view groups the per-model count cards by account, with a compact
+    weekly usage bar per group, and the #tier filter mirrors the same grouping."""
+
+    TIER_ACCOUNTS = {
+        "luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex",
+        "sol": "openai-codex", "haiku": "anthropic", "sonnet5": "anthropic",
+        "opus5": "anthropic", "qwen": "qwen-token",
+    }
+    ACCOUNTS = {
+        "openai-codex": {"label": "Codex"},
+        "anthropic": {"label": "Claude"},
+        "qwen-token": {"label": "Qwen"},
+    }
+
+    def _group_source(self):
+        start = HTML.index("const ACCOUNT_ORDER=")
+        end = HTML.index("function accountCard(account,info)")
+        return HTML[start:end]
+
+    def _run(self, script, language="en"):
+        probe = self.i18n_runtime(language) + "\n" + self.javascript_function("resetText") + "\n" \
+            + self.javascript_function("ageText") + "\n" + self.javascript_function("usageRow") + "\n" \
+            + self._group_source() + "\n" + script
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout.strip()
+
+    def test_accounts_are_ordered_codex_then_claude_then_others(self):
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(self.ACCOUNTS) + ")));"
+        )
+        groups = json.loads(out)
+        self.assertEqual(
+            [(g["account"], g["tiers"]) for g in groups],
+            [
+                ("openai-codex", ["luna", "spark", "terra", "sol"]),
+                ("anthropic", ["haiku", "sonnet5", "opus5"]),
+                ("qwen-token", ["qwen"]),
+            ],
+        )
+
+    def test_an_account_with_no_configured_tiers_is_omitted(self):
+        accounts = dict(self.ACCOUNTS, **{"unused-account": {"label": "Unused"}})
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(accounts) + ")));"
+        )
+        groups = json.loads(out)
+        self.assertNotIn("unused-account", [g["account"] for g in groups])
+
+    def test_claude_group_is_filtered_to_tiers_present_in_tier_accounts(self):
+        tier_accounts = dict(self.TIER_ACCOUNTS)
+        del tier_accounts["opus5"]
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(tier_accounts) + "," + json.dumps(self.ACCOUNTS) + ")));"
+        )
+        groups = {g["account"]: g["tiers"] for g in json.loads(out)}
+        self.assertEqual(groups["anthropic"], ["haiku", "sonnet5"])
+
+    def test_compact_usage_shows_the_weekly_bar_with_ticks_and_state(self):
+        info = {
+            "state": "soft", "has_usage_source": True, "soft_percent": 70, "hard_percent": 90,
+            "usage": {"weekly": 75, "weekly_resets_at": None, "session": 12},
+            "usage_age_seconds": 90,
+        }
+        out = self._run(f"console.log(compactUsage({json.dumps(info)}));")
+        self.assertIn('account-usage soft', out)
+        self.assertIn('style="left:70%"', out)
+        self.assertIn('style="left:90%"', out)
+        self.assertIn('75%', out)
+
+    def test_compact_usage_color_follows_state_not_weekly_percent(self):
+        """M10: an account can be `closed` on its session window while its
+        weekly percent alone would still read green; the compact bar must
+        show the account's actual state, not recompute a color from weekly."""
+        info = {
+            "state": "closed", "has_usage_source": True, "soft_percent": 70, "hard_percent": 90,
+            "usage": {"weekly": 10, "weekly_resets_at": None, "session": 95},
+            "usage_age_seconds": 30,
+        }
+        out = self._run(f"console.log(compactUsage({json.dumps(info)}));")
+        self.assertIn("background:#ff6b7a", out)
+
+    def test_compact_usage_with_no_usage_source_shows_the_none_message(self):
+        out = self._run(f"console.log(compactUsage({json.dumps({'has_usage_source': False})}));")
+        english, _ = self.i18n("main.usage.none")
+        self.assertIn(english, out)
+
+    def test_tier_filter_options_are_grouped_by_account_label(self):
+        out = self._run(
+            "console.log(tierFilterOptions(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(self.ACCOUNTS) + ")));"
+        )
+        self.assertIn('<optgroup label="Codex">', out)
+        self.assertIn('<optgroup label="Claude">', out)
+        self.assertIn('<optgroup label="Qwen">', out)
+        codex_start = out.index('<optgroup label="Codex">')
+        claude_start = out.index('<optgroup label="Claude">')
+        qwen_start = out.index('<optgroup label="Qwen">')
+        self.assertLess(claude_start, qwen_start, "Qwen must come after Claude")
+        codex_block = out[codex_start:claude_start]
+        claude_block = out[claude_start:qwen_start]
+        qwen_block = out[qwen_start:]
+        for tier in ("luna", "spark", "terra", "sol"):
+            with self.subTest(tier=tier):
+                self.assertIn(f'<option>{tier}</option>', codex_block)
+        for tier in ("sonnet5", "haiku", "opus5"):
+            with self.subTest(tier=tier):
+                self.assertIn(f'<option>{tier}</option>', claude_block)
+        self.assertIn('<option>qwen</option>', qwen_block)
+
+    def test_static_markup_still_has_every_tier_count_id(self):
+        cards_start = HTML.index('class="cards"')
+        cards_end = HTML.index('id="account-groups"', cards_start)
+        cards_html = HTML[cards_start:cards_end]
+        for tier in ("luna", "spark", "terra", "sol", "opus5", "sonnet5", "haiku", "qwen"):
+            with self.subTest(tier=tier):
+                self.assertIn(f'id="{tier}"', cards_html)
+
+    def test_static_tier_select_has_only_the_all_option(self):
+        start = HTML.index('<select id="tier">')
+        end = HTML.index('</select>', start)
+        select_html = HTML[start:end]
+        self.assertNotIn('<option>', select_html)
+        self.assertIn('data-i18n="router.tier.all"', select_html)
+
+    def test_main_usage_none_exists_in_both_languages(self):
+        english, hungarian = self.i18n("main.usage.none")
+        self.assertEqual(english, "no usage data")
+        self.assertEqual(hungarian, "nincs használati adat")
+
+
+class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
+    """Every prompt row gets one chip per delegated worker: Codex children come
+    from routed calls already in the router log, Claude children come from the
+    claude-delegation audit lines that /api/entries returns as `delegations`."""
+
+    ACCOUNTS_STATE = {
+        "accounts": {},
+        "tier_accounts": {
+            "terra": "openai-codex", "sol": "openai-codex",
+            "haiku": "anthropic", "sonnet5": "anthropic", "opus5": "anthropic",
+        },
+    }
+
+    DOM_SHIM = (
+        "global.document={createElement(tag){return {tag,className:'',textContent:'',"
+        "title:'',children:[],append(...els){this.children.push(...els)}};}};"
+    )
+
+    def _source(self):
+        names = [
+            "executionOwnCalls", "executionRawCall", "executionCalls", "executionKind",
+            "sessionIdFromTurn", "tierAccount", "accountLabel", "runForTurnId", "assignDelegations",
+            "chip", "stepDownHoverText", "delegationChips",
+        ]
+        return "\n".join(self.javascript_function(name) for name in names)
+
+    def _run(self, accounts_state, script):
+        probe = (
+            self.DOM_SHIM
+            + f"let accountsState={json.dumps(accounts_state)};"
+            + self._source()
+            + "\n" + script
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        return result.stdout.strip()
+
+    def test_assignment_by_session_and_time(self):
+        """Two runs in the same session get the audit that landed after them but
+        before the next one; an audit in an unrelated session goes nowhere."""
+        runs = [
+            {"first": {"turn_id": "s1:a", "timestamp": "2026-01-01T10:00:00Z"}},
+            {"first": {"turn_id": "s1:b", "timestamp": "2026-01-01T10:05:00Z"}},
+        ]
+        audits = [
+            {"session_id": "s1", "timestamp": "2026-01-01T10:02:00Z", "tag": "first"},
+            {"session_id": "s1", "timestamp": "2026-01-01T10:06:00Z", "tag": "second"},
+            {"session_id": "s2", "timestamp": "2026-01-01T10:03:00Z", "tag": "stray"},
+        ]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const map=assignDelegations(" + json.dumps(runs) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
+        ))
+        self.assertEqual(json.loads(out), [[0, ["first"]], [1, ["second"]]])
+
+    def test_assignment_prefers_an_exact_turn_id_match_over_session_and_time(self):
+        """M6: the router log's own turn_id is 'session:turn[:suffix]'; an audit
+        carrying a turn_id is assigned to whichever run's rawEntries actually
+        contains that turn (or a sub-call under it), even when the naive
+        session+time rule would have picked the other run."""
+        runs = [
+            {"first": {"turn_id": "s1:1", "timestamp": "2026-01-01T10:00:00Z"},
+             "rawEntries": [{"turn_id": "s1:1"}, {"turn_id": "s1:1:sub"}]},
+            {"first": {"turn_id": "s1:2", "timestamp": "2026-01-01T10:05:00Z"},
+             "rawEntries": [{"turn_id": "s1:2"}]},
+        ]
+        # Timestamp alone would land this on run 1 (it lands after run 1's own
+        # first timestamp), but the turn_id belongs to run 0.
+        audits = [{"session_id": "s1", "turn_id": "s1:1:sub", "timestamp": "2026-01-01T10:06:00Z", "tag": "byturn"}]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const map=assignDelegations(" + json.dumps(runs) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
+        ))
+        self.assertEqual(json.loads(out), [[0, ["byturn"]]])
+
+    def test_assignment_falls_back_to_session_and_time_when_no_run_has_the_turn_id(self):
+        runs = [{"first": {"turn_id": "s1:a", "timestamp": "2026-01-01T10:00:00Z"}, "rawEntries": []}]
+        audits = [{"session_id": "s1", "turn_id": "s1:unrelated", "timestamp": "2026-01-01T10:05:00Z", "tag": "fallback"}]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const map=assignDelegations(" + json.dumps(runs) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify([...map.entries()].map(([k,v])=>[k,v.map(a=>a.tag)])));"
+        ))
+        self.assertEqual(json.loads(out), [[0, ["fallback"]]])
+
+    def test_chips_for_both_accounts(self):
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [{"tier": "terra", "model": "terra"}], "children": []},
+            {"kind": None, "routed_calls": [{"tier": "haiku", "model": "haiku"}], "children": []},
+        ]}}
+        audits = [
+            {"tier_used": "haiku", "outcome": "ran"},
+            {"tier_requested": "opus", "tier_used": "sonnet", "outcome": "lowered",
+             "adjusted": "opus→sonnet (weekly usage 74%)"},
+            {"tier_requested": "sonnet", "tier_used": "sonnet", "outcome": "refused",
+             "message": "Claude delegation closed: …"},
+        ]
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + "," + json.dumps(audits) + ");"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        chips = json.loads(out)
+        self.assertEqual([c["text"] for c in chips],
+                          ["Codex: terra", "Claude: haiku", "Claude: sonnet ↓", "Claude: sonnet ✕"])
+        # M5: one hover format for both accounts -- "<from>→<to>, weekly N%".
+        self.assertEqual(chips[2]["title"], "opus→sonnet, weekly 74%")
+        # Refused/error chips keep their original message untouched.
+        self.assertIn("Claude delegation closed", chips[3]["title"])
+
+    def test_codex_step_down_chip_detects_the_appended_reason_clause(self):
+        """Controller ruling: the router now appends the usage-limit clause onto
+        the original reason rather than starting the reason with it, so the
+        marker must be detected with a regex search, not startsWith."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "terra", "reason": "long work; usage soft limit: sol→terra (weekly 72%)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        self.assertEqual(json.loads(out), [{
+            "text": "Codex: terra ↓",
+            "title": "sol→terra, weekly 72%",
+        }])
+
+    def test_codex_hard_limit_reason_also_marks_a_step_down_chip(self):
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "terra", "reason": "usage hard limit: sol→terra (weekly 91%)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        self.assertEqual(json.loads(out), [{
+            "text": "Codex: terra ↓",
+            "title": "sol→terra, weekly 91%",
+        }])
+
+    def test_codex_hard_limit_session_window_reason_reformats_too(self):
+        """M10 makes the router name the session window when that is what
+        actually triggered the hard limit; the same hover formatter must
+        handle that clause too."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "terra", "reason": "usage hard limit: sol→terra (session 95%)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.title)));"
+        ))
+        self.assertEqual(json.loads(out), ["sol→terra, session 95%"])
+
+    def test_a_skipped_step_down_never_marks_the_chip(self):
+        """I3: the router also writes this clause when the target itself is
+        unavailable ('...skipped (terra unavailable)'); that must never be
+        read as a real step-down."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [
+                {"tier": "sol", "reason": "usage soft limit: sol→terra skipped (terra unavailable)"}
+            ], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.textContent)));"
+        ))
+        self.assertEqual(json.loads(out), ["Codex: sol"])
+
+    def test_claude_fallback_chip_with_no_audit_shows_the_tier_name_not_the_target(self):
+        """No audits means the entry has to be read off the routed node itself,
+        whose tier field is a router target name (sonnet5/opus5); the chip must
+        still say the short tier name (sonnet/opus) the Settings tier selector
+        and the audit log both use."""
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [{"tier": "sonnet5"}], "children": []},
+            {"kind": None, "routed_calls": [{"tier": "opus5"}], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.textContent)));"
+        ))
+        self.assertEqual(json.loads(out), ["Claude: sonnet", "Claude: opus"])
+
+    def test_haiku_chip_with_no_audit_log(self):
+        run = {"scope": {"nodes": [
+            {"kind": None, "routed_calls": [{"tier": "haiku"}], "children": []},
+        ]}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>c.textContent)));"
+        ))
+        self.assertEqual(json.loads(out), ["Claude: haiku"])
+
+    def test_delegation_chips_are_appended_to_the_routes_cell_not_the_header(self):
+        """.router-run-header is a CSS grid with a fixed number of column tracks
+        (redefined at the 1120px and 700px breakpoints, plus .no-details) — an
+        extra header child auto-places onto a stray grid cell instead of
+        flowing inline. The chips must attach to the existing router-run-routes
+        cell instead, after its route pills."""
+        renderer = HTML[HTML.rindex("render=function(){"):]
+        self.assertIn("const delegationMap=assignDelegations(runData,delegations)", renderer)
+        routes_start = renderer.index(
+            "const routes=document.createElement('span');routes.className='router-run-routes';"
+        )
+        header_append = renderer.index(
+            "header.append(dateEl,timeEl,prompt,stateEl,total,routes,workers);"
+        )
+        between = renderer[routes_start:header_append]
+        self.assertIn("routes.append(delegationChips(", between)
+        self.assertNotIn("header.append(delegationChips(", renderer)
+
+    def test_delegation_chips_are_a_descendant_of_the_routes_cell_at_runtime(self):
+        """Node probe over the live renderer's actual header-building statements
+        (not a reimplementation): builds the same header/routes elements the
+        real code builds and asserts the chips box lands inside routes.children,
+        never directly in header.children."""
+        renderer = HTML[HTML.rindex("render=function(){"):]
+        start = renderer.index("const routes=document.createElement")
+        end = renderer.index("if(hasDetails)header.addEventListener")
+        segment = renderer[start:end]
+        probe = (
+            self.DOM_SHIM
+            + "const header={children:[],append(...els){this.children.push(...els)}};"
+            + "const dateEl='dateEl',timeEl='timeEl',prompt='prompt',stateEl='stateEl',total='total';"
+            + "const t=k=>k;const accountingCalls=[];const workerCalls=0;"
+            + "function appendRoutePills(el,calls){el.append('PILL')}"
+            + "function delegationChips(record,audits){const b=document.createElement('span');b.className='delegation-chips';return b}"
+            + "const record={id:'r'},delegationMap=new Map([[0,['audit']]]),runIndex=0;"
+            + segment
+            + "console.log(JSON.stringify({"
+            + "routesHasChip:routes.children.some(c=>c&&c.className==='delegation-chips'),"
+            + "headerHasChip:header.children.some(c=>c&&c.className==='delegation-chips'),"
+            + "headerHasRoutes:header.children.includes(routes)}));"
+        )
+        result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
+        observed = json.loads(result.stdout)
+        self.assertTrue(observed["routesHasChip"])
+        self.assertFalse(observed["headerHasChip"])
+        self.assertTrue(observed["headerHasRoutes"])
+
+
+class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
+    """One switch between Claude delegation and the original Codex workflow.
+
+    It writes ``workflow`` and keeps ``claude_delegation.enabled`` in step, saves
+    without stripping the file's comments, and replaces the per-card delegation
+    toggle so there is only one control for one state.
+    """
+
+    ROUTER_YAML = (
+        "# Router settings -- this comment must survive a dashboard save.\n"
+        "enabled: true\n"
+        "callable:\n"
+        "  terra: true\n"
+        "  opus5: true\n"
+        "preferences:\n"
+        "  review: [sonnet5, opus5, terra]  # Claude-tuned chain\n"
+        "claude_delegation:\n"
+        "  enabled: true\n"
+        "  default_tier: sonnet\n"
+    )
+
+    def test_save_workflow_keeps_the_delegation_flag_in_step(self):
+        config = {"claude_delegation": {"enabled": True, "default_tier": "opus"}}
+        self.assertIsNone(web_viewer._save_workflow("codex", config))
+        self.assertEqual(config["workflow"], "codex")
+        self.assertEqual(config["claude_delegation"], {"enabled": False, "default_tier": "opus"})
+        self.assertIsNone(web_viewer._save_workflow("claude_delegation", config))
+        self.assertEqual(config["workflow"], "claude_delegation")
+        self.assertTrue(config["claude_delegation"]["enabled"])
+
+    def test_save_workflow_refuses_an_unknown_name_and_touches_nothing(self):
+        config = {"claude_delegation": {"enabled": True}}
+        self.assertIn("Unknown workflow", web_viewer._save_workflow("gemini", config))
+        self.assertEqual(config, {"claude_delegation": {"enabled": True}})
+
+    def _serve(self, directory, calls):
+        # Saves go to router_config.local.yaml; an empty shipped file under it keeps
+        # every key an override, so the whole ROUTER_YAML round-trips there.
+        config_path = Path(directory) / "router_config.yaml"
+        config_path.write_text("{}\n", encoding="utf-8")
+        local_path = config_path.with_name("router_config.local.yaml")
+        local_path.write_text(self.ROUTER_YAML, encoding="utf-8")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        results = []
+        try:
+            with patch.object(web_viewer, "CONFIG_PATH", config_path):
+                for method, body in calls:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/config",
+                        data=None if body is None else json.dumps(body).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}, method=method)
+                    try:
+                        with urllib.request.urlopen(request) as response:
+                            results.append((response.status, json.load(response)))
+                    except urllib.error.HTTPError as error:
+                        results.append((error.code, json.load(error)))
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+        return local_path.read_text(encoding="utf-8"), results
+
+    def test_a_workflow_save_round_trips_and_keeps_the_files_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, results = self._serve(directory, [("POST", {"workflow": "codex"}), ("GET", None)])
+        self.assertEqual(results[0], (200, {"success": True}))
+        self.assertEqual(results[1][1]["workflow"], "codex")
+        self.assertIn("# Router settings -- this comment must survive a dashboard save.", text)
+        self.assertIn("# Claude-tuned chain", text)
+        self.assertIn("workflow: codex", text)
+        self.assertIn("review: [sonnet5, opus5, terra]", text, "the chain is kept for switching back")
+        import yaml
+        loaded = yaml.safe_load(text)
+        self.assertFalse(loaded["claude_delegation"]["enabled"])
+
+    def test_a_full_page_save_keeps_the_comments_and_flow_lists(self):
+        """Measured live 2026-09-19: the page posts callable and preferences on every
+        save, and replacing those blocks wholesale dropped every comment attached to
+        them -- including the ones above the next key -- and turned [a, b] into
+        block lists. They are updated in place instead."""
+        yaml_text = (
+            "callable:\n"
+            "  terra: true\n"
+            "  sol: true\n"
+            "  sonnet5: true\n"
+            "  # opus note: on since 2026-09-09\n"
+            "  opus5: true\n"
+            "  qwen: true\n"
+            "# Preferred models per kind of work\n"
+            "preferences:\n"
+            "  design:    [sol, opus5]\n"
+            "  review:    [sonnet5, opus5, terra]\n"
+            "#  chat:      [luna, spark]\n"
+            "\n"
+            "claude_delegation:\n"
+            "  enabled: true\n"
+            "  default_tier: sonnet\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self.ROUTER_YAML, original = yaml_text, self.ROUTER_YAML
+            try:
+                text, results = self._serve(directory, [("POST", {
+                    "workflow": "codex",
+                    "callable": {"terra": True, "sol": True, "sonnet5": True, "opus5": True, "qwen": False},
+                    "preferences": {"design": ["sol", "opus5"], "review": ["opus5", "terra"]},
+                })])
+            finally:
+                self.ROUTER_YAML = original
+        self.assertEqual(results[0][0], 200)
+        for comment in ("# opus note: on since 2026-09-09", "# Preferred models per kind of work",
+                        "#  chat:      [luna, spark]"):
+            self.assertIn(comment, text)
+        self.assertIn("qwen: false", text)
+        self.assertRegex(text, r"design: +\[sol, opus5\]")
+        self.assertRegex(text, r"review: +\[opus5, terra\]")
+
+    def test_the_workflow_wins_over_a_stale_delegation_flag_in_the_same_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, _ = self._serve(directory, [("POST", {
+                "workflow": "codex", "claude_delegation": {"enabled": True, "default_tier": "haiku"}})])
+        import yaml
+        loaded = yaml.safe_load(text)
+        self.assertEqual(loaded["claude_delegation"], {"enabled": False, "default_tier": "haiku"})
+
+    def test_an_unknown_workflow_is_a_400_and_the_file_is_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, results = self._serve(directory, [("POST", {"workflow": "gemini"})])
+        self.assertEqual(results[0][0], 400)
+        self.assertEqual(text, self.ROUTER_YAML)
+
+    def _status(self, workflow, registered):
+        import model_router
+
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = AccountsApiTests()._build_config(directory)
+            log_path.write_text(json.dumps({"event": "registration", "registered": registered}), encoding="utf-8")
+            config["workflow"] = workflow
+            config["claude_delegation"]["enabled"] = workflow == "claude_delegation"
+            model_router.usage_guard._reset_cache()
+            try:
+                return web_viewer._accounts_status(config)["anthropic"]["delegation"]
+            finally:
+                model_router.usage_guard._reset_cache()
+
+    def test_the_codex_workflow_shows_delegation_off_and_never_asks_for_a_restart(self):
+        delegation = self._status("codex", registered=True)
+        self.assertEqual((delegation["enabled"], delegation["restart_needed"], delegation["workflow"]),
+                         (False, False, "codex"))
+
+    def test_claude_delegation_without_a_registered_tool_asks_for_a_restart(self):
+        delegation = self._status("claude_delegation", registered=False)
+        self.assertEqual((delegation["enabled"], delegation["restart_needed"]), (True, True))
+
+    def _node(self, script):
+        probe = self.i18n_runtime() + "\n" + script
+        return subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True).stdout.strip()
+
+    def test_the_switch_sits_first_in_settings_and_marks_the_active_workflow(self):
+        start = HTML.index('id="settings-panel"')
+        panel = HTML[start:HTML.index("</section>", start)]
+        self.assertLess(panel.index('id="workflow-switch"'), panel.index('id="account-cards"'))
+        out = self._node(self.javascript_function("workflowControl") + "\nconsole.log(workflowControl('codex'));")
+        self.assertIn('data-workflow="codex" class="active"', out)
+        self.assertIn('data-workflow="claude_delegation"', out)
+        self.assertNotIn('data-workflow="claude_delegation" class="active"', out)
+        self.assertIn("Codex does the work", out)
+
+    def test_the_claude_card_no_longer_carries_its_own_toggle(self):
+        card_tests = AccountCardTests()
+        off = dict(AccountCardTests.CLAUDE_INFO, delegation=dict(
+            AccountCardTests.CLAUDE_INFO["delegation"], enabled=False, workflow="codex"))
+        card = card_tests._card("anthropic", off)
+        self.assertNotIn("data-account-toggle", card)
+        self.assertIn("account.delegation.off", card)
+        self.assertNotIn("account.delegation.live", card, "registered but switched off is not live")
+        self.assertIn("<select data-default-tier", card_tests._card("anthropic", AccountCardTests.CLAUDE_INFO))
+
+    def test_saving_posts_the_workflow_and_no_longer_the_delegation_flag(self):
+        source = self.javascript_function("saveSettings")
+        self.assertIn("workflow:currentConfig.workflow", source)
+        self.assertIn("claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:", source)
+        self.assertNotIn("delegation.enabled", source)
+
+    def test_the_preferences_say_when_the_codex_workflow_has_paused_them(self):
+        source = self.javascript_function("renderPreferences")
+        self.assertIn("settings.prefs.paused", source)
+
+    def test_every_new_i18n_key_exists_in_both_languages(self):
+        for key in ("settings.workflow.heading", "settings.workflow.codex", "settings.workflow.claude",
+                    "settings.workflow.desc.codex", "settings.workflow.desc.claude", "settings.workflow.live",
+                    "settings.prefs.paused", "account.delegation.off"):
+            self.i18n(key)
+
+
+class HermesParentGuardTests(unittest.TestCase):
+    """Terra's review of 992d706.
+
+    1. Whether Hermes's parent is the router's own was decided by model name alone,
+       so the same model name served by a different provider counted as the router's.
+       Name and provider must both match a router tier.
+    2. The guard and the write read ~/.hermes/config.yaml separately, so a change
+       between the two could be overwritten. One read per save, and a write refuses
+       when the file changed since that read.
+    """
+
+    CONFIG = {
+        "models": {"terra": "gpt-5.6-terra", "luna": "gpt-5.6-luna", "qwen": "qwen3.7-plus"},
+        "callable": {"terra": True, "luna": True, "qwen": True},
+        "tier_providers": {"terra": "openai-codex", "luna": "openai-codex", "qwen": "qwen-token"},
+        "default_model": "terra",
+    }
+
+    def _config(self):
+        import copy
+
+        return copy.deepcopy(self.CONFIG)
+
+    def _hermes(self, directory, default, provider):
+        target = Path(directory) / "config.yaml"
+        target.write_text(f"model:\n  default: {default}\n  provider: {provider}\n", encoding="utf-8")
+        return target
+
+    def test_a_router_model_name_on_another_provider_is_not_the_routers_parent(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openrouter")
+            before = target.read_text(encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_default_model("luna", config))
+            self.assertEqual(target.read_text(encoding="utf-8"), before)
+        self.assertEqual(config["default_model"], "luna")
+
+    def test_a_parent_on_its_own_tiers_provider_still_follows_the_default(self):
+        """A Qwen parent on qwen-token is one the router put there (default_model: qwen
+        writes exactly that), so it still follows the router's default tier."""
+        config = self._config()
+        config["default_model"] = "qwen"
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "qwen3.7-plus", "qwen-token")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_default_model("terra", config))
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+        self.assertEqual((written["model"]["default"], written["model"]["provider"]),
+                         ("gpt-5.6-terra", "openai-codex"))
+
+    def test_a_parent_with_no_provider_is_judged_by_its_name(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text("model:\n  default: gpt-5.6-terra\n", encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_default_model("luna", config))
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+        self.assertEqual(written["model"]["default"], "gpt-5.6-luna")
+
+    def test_a_default_model_save_reads_the_hermes_config_once(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
+            real = web_viewer._read_hermes_config
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_read_hermes_config", side_effect=real) as reads:
+                self.assertIsNone(web_viewer._save_default_model("luna", config))
+        self.assertEqual(reads.call_count, 1)
+
+    def _changing_read(self, target, change):
+        real = web_viewer._read_hermes_config
+
+        def read():
+            snapshot = real()
+            target.write_text(change, encoding="utf-8")
+            import os
+            os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1_000_000))
+            return snapshot
+        return read
+
+    def test_a_hermes_config_changed_mid_save_is_not_overwritten(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
+            concurrent = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_read_hermes_config", side_effect=self._changing_read(target, concurrent)):
+                error = web_viewer._save_default_model("luna", config)
+            self.assertIn("changed", error)
+            self.assertEqual(target.read_text(encoding="utf-8"), concurrent)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
+        self.assertEqual(config["default_model"], "terra", "a refused save stores nothing")
+
+    def test_a_fallback_chain_save_refuses_the_same_way(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "claude-opus-5", "anthropic")
+            concurrent = "model:\n  default: claude-opus-5\n  provider: anthropic\nfallback_providers: []\n"
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_read_hermes_config", side_effect=self._changing_read(target, concurrent)), \
+                 patch.object(web_viewer, "_hermes_chain", return_value=[]):
+                error = web_viewer._save_hermes_fallback({"orchestrator": []}, self._config())
+            self.assertIn("changed", error)
+            self.assertEqual(target.read_text(encoding="utf-8"), concurrent)
+
+    def test_a_failed_hermes_write_fails_the_save_and_stores_nothing(self):
+        """Codex review of 992d706: the write error was swallowed, the router saved the
+        new default and answered success while Hermes stayed on the old parent."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_write_hermes_config", side_effect=PermissionError("read-only")):
+                error = web_viewer._save_default_model("luna", config)
+        self.assertIn("read-only", error)
+        self.assertEqual(config["default_model"], "terra")
+
+
+class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
+    """The load-balancing on/off switch, inside the Workflow block, Claude delegation only."""
+
+    def test_save_balance_writes_only_the_enabled_flag(self):
+        config = {"usage_guard": {"balance": {"enabled": True, "busy_percent": 55, "margin_percent": 30}}}
+        self.assertIsNone(web_viewer._save_balance({"enabled": False}, config))
+        self.assertEqual(config["usage_guard"]["balance"], {"enabled": False, "busy_percent": 55, "margin_percent": 30})
+
+    def test_save_balance_creates_the_block_when_absent(self):
+        config = {"usage_guard": {"accounts": {}}}
+        self.assertIsNone(web_viewer._save_balance({"enabled": True}, config))
+        self.assertEqual(config["usage_guard"]["balance"], {"enabled": True})
+
+    def test_save_balance_refuses_a_non_boolean(self):
+        config = {}
+        self.assertIn("true or false", web_viewer._save_balance({"enabled": "yes"}, config))
+        self.assertEqual(config, {})
+
+    def test_save_balance_stores_the_thresholds_as_the_file_spells_them(self):
+        config = {"usage_guard": {"balance": {"enabled": True}}}
+        self.assertIsNone(web_viewer._save_balance(
+            {"enabled": True, "busy_percent": 25, "margin_percent": 12.5}, config))
+        balance = config["usage_guard"]["balance"]
+        self.assertEqual((repr(balance["busy_percent"]), repr(balance["margin_percent"])), ("25", "12.5"))
+
+    def test_save_balance_refuses_thresholds_out_of_range(self):
+        for busy, margin in ((-1, 10), (101, 10), (20, 0), (20, 101), ("x", 10)):
+            config = {"usage_guard": {"balance": {"enabled": True}}}
+            self.assertIsNotNone(web_viewer._save_balance(
+                {"enabled": True, "busy_percent": busy, "margin_percent": margin}, config), (busy, margin))
+            self.assertEqual(config["usage_guard"]["balance"], {"enabled": True})
+
+    def test_the_api_serves_the_balance_settings(self):
+        self.assertEqual(web_viewer._balance_status({"usage_guard": {"balance": {"enabled": True}}}),
+                         {"enabled": True, "busy_percent": 20.0, "margin_percent": 10.0, "window": "5-hour"})
+        self.assertFalse(web_viewer._balance_status({})["enabled"])
+
+    def _control(self, workflow, balance):
+        script = (self.javascript_function("workflowControl")
+                  + f"\nconsole.log(workflowControl({json.dumps(workflow)},{json.dumps(balance)}));")
+        return subprocess.run(["node", "-e", self.i18n_runtime() + "\n" + script],
+                              check=True, text=True, capture_output=True).stdout
+
+    def test_the_switch_shows_under_claude_delegation_with_editable_thresholds(self):
+        out = self._control("claude_delegation", {"enabled": True, "busy_percent": 20, "margin_percent": 10,
+                                                  "window": "5-hour"})
+        self.assertRegex(out, r'<label class="switch"><input type="checkbox" data-balance-toggle checked>')
+        self.assertIn('data-balance-field="busy_percent" value="20"', out)
+        self.assertIn('data-balance-field="margin_percent" value="10"', out)
+        self.assertIn("5-hour", out)
+
+    def test_each_threshold_sits_on_one_line_with_its_label_and_unit(self):
+        """The global `label{display:grid}` stacked "from", the box and "%" vertically,
+        so the two fields sat at different heights (seen on the dashboard)."""
+        self.assertIn(".balance-row .balance-field{display:inline-flex;align-items:center", HTML)
+
+    def test_the_switch_is_off_when_balancing_is_off(self):
+        out = self._control("claude_delegation", {"enabled": False, "busy_percent": 20, "margin_percent": 10,
+                                                  "window": "5-hour"})
+        self.assertIn("data-balance-toggle", out)
+        self.assertNotIn("data-balance-toggle checked", out)
+
+    def test_the_codex_workflow_hides_it(self):
+        self.assertNotIn("data-balance-toggle", self._control("codex", {"enabled": True}))
+
+    def test_saving_posts_the_balance_flag_and_thresholds(self):
+        source = self.javascript_function("saveSettings")
+        self.assertIn("balance:", source)
+        self.assertIn("busy_percent:", source)
+        self.assertIn("margin_percent:", source)
+
+    def test_its_i18n_keys_exist_in_both_languages(self):
+        for key in ("settings.balance.label", "settings.balance.desc", "settings.balance.busy",
+                    "settings.balance.margin", "settings.balance.window.5-hour", "settings.balance.window.tighter"):
+            self.i18n(key)

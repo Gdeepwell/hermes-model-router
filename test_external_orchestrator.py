@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from model_router import _conductor_tier, route_llm_request
+from model_router import _conductor_tier, claude_delegation, route_llm_request
 from model_router.test_model_router import CALLABLE, MODELS, chat_request
 
 ACTIONABLE = (
@@ -35,8 +35,8 @@ def _cfg(temp_dir, **overrides):
     return cfg
 
 
-def _delegating_request(model="claude-sonnet-5", tool_name="delegate_task"):
-    request = chat_request(ACTIONABLE)
+def _delegating_request(model="claude-sonnet-5", tool_name="delegate_task", text=ACTIONABLE):
+    request = chat_request(text)
     # The body carries the model actually in use, as it does in a real call.
     request["model"] = model
     request["tools"] = [{
@@ -65,6 +65,24 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
         self.assertIsNotNone(routed, "the mcp__-prefixed tool was not recognised")
         schema = routed["request"]["tools"][0]["parameters"]
         self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
+
+    def test_the_forced_choice_names_the_tool_as_the_request_names_it(self):
+        """Measured live on 2026-09-18: the preflight forced tool_choice
+        {"name": "delegate_task"} on a Claude parent whose tool was mcp__delegate_task.
+        Anthropic answered 400 "Tool 'delegate_task' not found in provided tools" and the
+        turn fell back off Opus. The forced name must be the one actually offered."""
+        request = _delegating_request("claude-opus-5", "mcp__delegate_task")
+        request["tools"] = [{"name": "mcp__delegate_task",
+                             "input_schema": request["tools"][0]["parameters"]}]
+        with tempfile.TemporaryDirectory() as d, \
+             patch("model_router._load_config", return_value=_cfg(d)), \
+             patch("model_router._log_decision"), \
+             patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")):
+            routed = route_llm_request(request=request, provider="anthropic", model="claude-opus-5",
+                                       api_call_count=1, turn_id="external-parent-turn")
+        self.assertIsNotNone(routed)
+        self.assertEqual(routed["request"]["tool_choice"], {"type": "tool", "name": "mcp__delegate_task"})
+        self.assertEqual([tool["name"] for tool in routed["request"]["tools"]], ["mcp__delegate_task"])
 
     def test_a_request_with_no_delegate_tool_is_still_skipped(self):
         with tempfile.TemporaryDirectory() as d:
@@ -152,6 +170,46 @@ class ConductorTierTests(unittest.TestCase):
     def test_nothing_callable_degrades_to_the_configured_default(self):
         cfg = {"models": MODELS, "callable": {t: False for t in MODELS}, "default_model": "terra"}
         self.assertEqual(_conductor_tier(cfg), "terra")
+
+
+class ExplicitDelegationMentionTests(unittest.TestCase):
+    """Operator ruling 2026-09-18: a user turn that explicitly names delegate_claude
+    or delegate_task must not be forced through the delegate_task planning preflight
+    -- the routing note (advisory only) still applies on that same call."""
+
+    def _route(self, text, tool_name="delegate_task"):
+        request = _delegating_request("claude-sonnet-5", tool_name, text=text)
+        # A live session with Claude delegation carries delegate_claude next to
+        # delegate_task, and the router offers it only then.
+        request["tools"].append({"type": "function", "name": "delegate_claude",
+                                 "parameters": {"type": "object", "properties": {}}})
+        with tempfile.TemporaryDirectory() as d, \
+             patch("model_router._load_config", return_value=_cfg(
+                 d, claude_delegation={"enabled": True}, callable={**CALLABLE, "haiku": True})), \
+             patch("model_router._log_decision"), \
+             patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")), \
+             patch.object(claude_delegation, "_ACTIVE", True):
+            return route_llm_request(
+                request=request, provider="anthropic", model="claude-sonnet-5",
+                api_call_count=1, turn_id="external-parent-turn", platform="cli")
+
+    def test_an_explicit_delegate_claude_mention_skips_the_forced_preflight(self):
+        routed = self._route('Call delegate_claude with tier "haiku" to check the changelog.')
+        self.assertIsNotNone(routed, "the routing note should still apply")
+        schema = routed["request"]["tools"][0]["parameters"]
+        self.assertNotIn("enum", schema["properties"].get("role", {}),
+                         "the forced planner contract must not have been applied")
+
+    def test_the_routing_note_still_applies_on_the_skipped_call(self):
+        routed = self._route('Call delegate_claude with tier "haiku" to check the changelog.')
+        self.assertIn("[ROUTER] This turn classifies as", routed["request"]["messages"][-1]["content"])
+
+    def test_a_normal_actionable_message_still_gets_the_preflight(self):
+        """Confirms the new gate is scoped to an explicit mention, not a blanket skip."""
+        routed = ExternalParentOrchestrationTests()._route("claude-sonnet-5", _cfg(tempfile.mkdtemp()))
+        self.assertIsNotNone(routed)
+        schema = routed["request"]["tools"][0]["parameters"]
+        self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
 
 
 class ContractTruthfulnessTests(unittest.TestCase):

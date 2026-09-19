@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,10 @@ try:
 except ImportError:  # pragma: no cover - Hermes includes PyYAML
     yaml = None
 
+from . import claude_delegation
+from . import usage_guard
+
+_logger = logging.getLogger("model_router")
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _CONFIG_PATH = _PLUGIN_DIR / "router_config.yaml"
@@ -535,14 +540,114 @@ def _require_callable(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDeci
     return resolved
 
 
+def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecision:
+    """At an account's soft or hard limit, step its heaviest routed tier down.
+
+    Codex is the only account this router routes itself, so this is the Codex
+    counterpart of delegate_claude's opus→sonnet. Never touches a mandatory
+    decision, never moves work onto an unavailable tier, and never lets a
+    malformed usage_guard block disable routing -- any failure here fails open
+    and leaves the decision exactly as it arrived.
+    """
+    if decision.mandatory:
+        return decision
+    try:
+        account = _account_of(decision.tier, cfg)
+        if not account or not usage_guard.guarded(account, cfg):
+            return decision
+        reading = usage_guard.peek(account, cfg)
+        outcome = usage_guard.apply(account, decision.tier, cfg, reading)
+        if outcome.adjusted:
+            label, target = "soft", outcome.tier
+            window_reason = f"weekly {outcome.usage}"
+        elif outcome.refused:
+            # The hard limit refuses the call outright rather than naming a
+            # step-down target, so the target comes from the same step_down
+            # map the soft limit uses -- delegation to the account is closed
+            # either way, and a configured step-down tier is the one route
+            # left that does not depend on it.
+            limits = usage_guard.account_limits(account, cfg) or {}
+            target = (limits.get("step_down") or {}).get(decision.tier)
+            if not target:
+                return decision
+            label = "hard"
+            # M10: the hard limit can trigger on either window; name whichever
+            # one actually did rather than always claiming "weekly".
+            hard_percent = limits.get("hard_percent", 90.0)
+            session_value = reading.session if reading is not None else None
+            if session_value is not None and session_value >= hard_percent:
+                window_reason = f"session {session_value:.0f}%"
+            else:
+                window_reason = f"weekly {outcome.usage}"
+        else:
+            return decision
+        if not _is_routable_tier(target, cfg) or not _is_callable_tier(target, cfg):
+            return replace(decision, reason=f"{decision.reason}; usage {label} limit: "
+                                            f"{decision.tier}→{target} skipped ({target} unavailable)")
+        step_reason = f"usage {label} limit: {decision.tier}→{target} ({window_reason})"
+        stepped = _decision(target, f"{decision.reason}; {step_reason}", cfg)
+        return replace(stepped, kind=decision.kind)
+    except Exception:
+        _logger.warning("_usage_step_down failed; routing continues without a step-down", exc_info=True)
+        return decision
+
+
+WORKFLOWS: Tuple[str, ...] = ("claude_delegation", "codex")
+
+
+def workflow_name(cfg: Optional[Dict[str, Any]]) -> str:
+    """The configured workflow; anything absent or unrecognised is ``claude_delegation``,
+    which leaves the rest of the file exactly as written."""
+    raw = str((cfg or {}).get("workflow") or "").strip().casefold()
+    return raw if raw in WORKFLOWS else "claude_delegation"
+
+
+def _apply_workflow(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """``workflow: codex`` is master's behaviour: no Claude delegation, built-in routes.
+
+    Applied at load time so every reader agrees. The file keeps the Claude-tuned
+    preferences and the claude_delegation block, so switching back restores them.
+    """
+    if workflow_name(cfg) != "codex":
+        return cfg
+    cfg["workflow"] = "codex"
+    cfg["preferences"] = {}
+    block = cfg.get("claude_delegation")
+    cfg["claude_delegation"] = {**(block if isinstance(block, dict) else {}), "enabled": False}
+    return cfg
+
+
+def _local_config_path() -> Path:
+    """The operator's own settings: git-ignored, beside the shipped router_config.yaml."""
+    return _CONFIG_PATH.with_name("router_config.local.yaml")
+
+
+def _local_overrides() -> Dict[str, Any]:
+    """router_config.local.yaml as a mapping; {} when absent or unreadable.
+
+    A broken local file must not take the shipped settings down with it, so it is
+    skipped with a warning rather than failing the whole load.
+    """
+    path = _local_config_path()
+    if not path.exists():
+        return {}
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        _logger.warning("router_config.local.yaml ignored: %s", exc)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _load_config() -> Dict[str, Any]:
+    """Built-in defaults, then the shipped router_config.yaml, then router_config.local.yaml."""
     if not _CONFIG_PATH.exists() or yaml is None:
         return _deep_merge({}, _DEFAULT_CONFIG)
     try:
         loaded = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
             return _deep_merge({}, _DEFAULT_CONFIG)
-        return _deep_merge(_DEFAULT_CONFIG, loaded)
+        return _apply_workflow(_deep_merge(_deep_merge(_DEFAULT_CONFIG, loaded), _local_overrides()))
     except Exception:
         return _deep_merge({}, _DEFAULT_CONFIG)
 
@@ -1257,7 +1362,7 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
         label = (goal[:120] + "…") if len(goal) > 120 else (goal or "the stopped leaf")
         target = _next_available_entry(kind, cfg)
         if target:
-            lines.append(f"- {label}\n  {kind} work -> re-dispatch with model:{target}")
+            lines.append(f"- {label}\n  {kind} work -> re-dispatch with {_dispatch_phrase(target)}")
             continue
         waiting = _earliest_free_entry(kind, cfg)
         if waiting:
@@ -1277,8 +1382,10 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
         "valid. Sending the same goal to the same target again will fail the same way while "
         "it is cooling.\n"
         + "\n".join(lines)
-        + "\nRe-dispatch each one with the model: parameter named above and tell the retry to "
-        "continue from what the stopped worker already committed in its worktree instead of "
+        + ("\nRe-dispatch each one with the call named above and tell the retry to "
+           if claude_delegation.is_active() else
+           "\nRe-dispatch each one with the model: parameter named above and tell the retry to ")
+        + "continue from what the stopped worker already committed in its worktree instead of "
         "starting over. Do not re-plan or narrow the goal: only the account changed.\n"
     )
 
@@ -1425,8 +1532,11 @@ def classify_request(
 # like mutating work. Measured: goal alone reads read-only, goal + contract does not,
 # on the word "apply" from the contract. Stripped before classification only; the
 # preview and the log still show what was actually sent.
+_ROUTE_CHOICE_OPENING = "Route choice for delegated workers"
 _ROUTER_CONTRACT_MARKERS = (
     "Set the delegate_task 'model' parameter",
+    _ROUTE_CHOICE_OPENING,
+    "[ROUTER] This turn classifies as",
     "planning conductor.",
     "[INTERNAL ORCHESTRATOR PREFLIGHT]",
 )
@@ -1913,6 +2023,38 @@ def _tool_schema_slot(tool: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     return tool, "parameters"
 
 
+def _host_delegate_has_model(request: Any) -> bool:
+    """Whether this host's delegate_task really takes a ``model`` argument.
+
+    Hermes v0.21.3 has none. Telling a conductor to set one sends every
+    cross-account leaf to the default route while it believes otherwise.
+    """
+    if not isinstance(request, dict):
+        return False
+    tool = _find_delegate_tool(request)
+    if tool is None:
+        return False
+    owner, key = _tool_schema_slot(tool)
+    schema = owner.get(key)
+    return isinstance(schema, dict) and "model" in (schema.get("properties") or {})
+
+
+def _dispatch_phrase(target: str) -> str:
+    """How a conductor reaches a target: the delegate_claude tool for Claude, else model:<name>.
+
+    While Claude delegation is active, a non-Claude target is no longer phrased as
+    ``model:<name>`` either -- that reads as the same delegate_task 'model'
+    parameter this host does not have. It is named as the goal-prefix route
+    instead; the Claude route through ``delegate_claude`` is unaffected.
+    """
+    if not claude_delegation.is_active():
+        return f"model:{target}"
+    tier = claude_delegation.TIER_FOR_TARGET.get(target)
+    if tier:
+        return f'delegate_claude(tier="{tier}")'
+    return f"delegate_task (goal prefix [{target}])"
+
+
 def _is_anthropic_shaped(request: Dict[str, Any]) -> bool:
     """True when the request already carries the Anthropic Messages shape."""
     if not isinstance(request.get("messages"), list):
@@ -1944,7 +2086,7 @@ def _supports_forced_tool_choice(kwargs: Dict[str, Any], decision: RouteDecision
 _HERMES_CONFIG_PATH = Path(os.path.expanduser("~/.hermes/config.yaml"))
 
 
-def _delegation_target_names() -> Tuple[str, ...]:
+def _hermes_delegation_target_names() -> Tuple[str, ...]:
     """Targets the host will actually accept in ``delegate_task(model=...)``.
 
     Read from Hermes's own ``delegation.targets`` rather than this plugin's
@@ -1964,6 +2106,20 @@ def _delegation_target_names() -> Tuple[str, ...]:
         ))
     except Exception:
         return ()
+
+
+def _delegation_target_names() -> Tuple[str, ...]:
+    """Every delegation target the conductor may be offered.
+
+    Hermes's ``delegation.targets`` plus, while ``delegate_claude`` is registered,
+    Claude delegation's targets. It reaches them through its own tool rather
+    than ``delegate_task(model=...)``, so they need no entry in Hermes's config --
+    and without this, ``haiku`` could never appear in a recommendation.
+    """
+    names = set(_hermes_delegation_target_names())
+    if claude_delegation.is_active():
+        names |= set(claude_delegation.target_names(_load_config()))
+    return tuple(sorted(names))
 
 
 def _recent_account_load(cfg: Dict[str, Any], window_seconds: int) -> Dict[str, int]:
@@ -2019,7 +2175,47 @@ def _peers_for(name: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
     return ()
 
 
-def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str, str]:
+def _account_of(name: str, cfg: Dict[str, Any]) -> str:
+    return str((cfg.get("tier_providers") or {}).get(name) or "")
+
+
+def _account_states(cfg: Dict[str, Any], readings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """State per guarded account, from the non-blocking cached reading.
+
+    Fails open: a malformed ``usage_guard`` block (a bad percent, a broken
+    accounts map, ...) must not take routing down with it, so any exception
+    here is swallowed and reported as "no guarded accounts" instead.
+    """
+    try:
+        accounts = (usage_guard.guard_config(cfg).get("accounts") or {})
+        return {
+            account: usage_guard.state(
+                account, cfg, readings[account] if readings is not None else usage_guard.peek(account, cfg)
+            )
+            for account in accounts if usage_guard.guarded(account, cfg)
+        }
+    except Exception:
+        _logger.warning("_account_states failed; reporting no guarded accounts", exc_info=True)
+        return {}
+
+
+def _account_mark(name: str, cfg: Dict[str, Any], states: Dict[str, str]) -> str:
+    try:
+        account = _account_of(name, cfg)
+        state = states.get(account)
+        if state == "soft":
+            return f" [{usage_guard.account_label(account)} soft limit]"
+        if state == "closed":
+            return f" [{usage_guard.account_label(account)} closed]"
+        return ""
+    except Exception:
+        _logger.warning("_account_mark failed for %r; no mark added", name, exc_info=True)
+        return ""
+
+
+def _target_availability(
+    names: Iterable[str], cfg: Dict[str, Any], states: Optional[Dict[str, str]] = None
+) -> Dict[str, str]:
     """Per-target cooldown note, empty when the target is available.
 
     Cooling targets are annotated rather than dropped. LiteLLM excludes a
@@ -2030,18 +2226,19 @@ def _target_availability(names: Iterable[str], cfg: Dict[str, Any]) -> Dict[str,
     lets the conductor wait or narrow the objective instead.
     """
     offered = set(names)
+    states = _account_states(cfg) if states is None else states
     notes = {}
     for name in names:
         remaining = _tier_cooldown_remaining(name, cfg)
         if not remaining:
-            notes[name] = ""
+            notes[name] = _account_mark(name, cfg, states)
             continue
         alive = [
             peer for peer in _peers_for(name, cfg)
             if peer in offered and not _tier_cooldown_remaining(peer, cfg)
         ]
         instead = f"; use {' or '.join(alive)} instead" if alive else ""
-        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min{instead}]"
+        notes[name] = f" [unavailable for another {int(remaining // 60) + 1} min{instead}]" + _account_mark(name, cfg, states)
     return notes
 
 
@@ -2078,6 +2275,8 @@ def _external_target_for_model(model: str) -> Optional[str]:
     for name, spec in _delegation_targets_detail().items():
         if spec.get("model") == model:
             return name
+    if claude_delegation.is_active():
+        return claude_delegation.target_for_model(model, _load_config())
     return None
 
 
@@ -2167,7 +2366,9 @@ def _leaf_label_contract(cfg: Optional[Dict[str, Any]] = None) -> str:
     )
 
 
-def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None) -> str:
+def _model_param_contract(
+    orchestrator_tier: str, cfg: Optional[Dict[str, Any]] = None, *, model_param: bool = True
+) -> str:
     """The sentence that makes route choice expressible instead of implied.
 
     A ``[sol]``/``[spark]`` goal prefix is only a model rename inside the
@@ -2196,19 +2397,41 @@ def _model_param_contract(orchestrator_tier: str, cfg: Optional[Dict[str, Any]] 
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
     )
-    return (
-        f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
-        "A goal-text prefix only renames the model inside the default provider and cannot reach a "
-        "target on a separate account, so a leaf intended for one must carry model:<name>. "
+    if model_param or not claude_delegation.is_active():
+        opening = (
+            f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
+            "A goal-text prefix only renames the model inside the default provider and cannot reach a "
+            "target on a separate account, so a leaf intended for one must carry model:<name>. "
+        )
+    else:
+        opening = (
+            f"{_ROUTE_CHOICE_OPENING}{scope}: this host's delegate_task has no model parameter, so a "
+            "goal-text prefix picks a tier inside the default provider and cannot reach a target on a "
+            "separate account. "
+        )
+    if claude_delegation.is_active():
+        claude_rule = (
+            "Concretely: [opus5] and [sonnet5] are not labels, and neither is a model parameter. A goal "
+            "beginning with one is not routed to Claude; the prefix is inert, the goal is classified on its "
+            "remaining text, and the leaf runs on this provider -- so it is stopped at its first call and "
+            "returned for re-dispatch. Claude targets are reached only by calling delegate_claude with tier "
+            "\"haiku\", \"sonnet\" or \"opus\". "
+        ) + _DEFERRED_DELEGATION_HINT
+    else:
         # The general rule was already here and lost anyway, seven goals running.
         # It shares a paragraph with [spark]/[sol], which *are* prefixes, so
         # [opus5] is the obvious blend of the two mechanisms -- and it silently
         # became a Sol leaf. Naming the mistake beats restating the rule.
-        "Concretely: [opus5] and [sonnet5] are not labels. A goal beginning with one is not "
-        "routed to Claude; the prefix is inert, the goal is classified on its remaining text, "
-        "and the leaf runs on this provider -- so it is stopped at its first call and returned "
-        "for re-dispatch. Name those targets only in the model parameter. Prefer "
-        "spreading genuinely independent leaves across different targets so separate accounts and "
+        claude_rule = (
+            "Concretely: [opus5] and [sonnet5] are not labels. A goal beginning with one is not "
+            "routed to Claude; the prefix is inert, the goal is classified on its remaining text, "
+            "and the leaf runs on this provider -- so it is stopped at its first call and returned "
+            "for re-dispatch. Name those targets only in the model parameter. "
+        )
+    return (
+        opening
+        + claude_rule
+        + "Prefer spreading genuinely independent leaves across different targets so separate accounts and "
         "quotas absorb the work in parallel; never split work merely to use more targets. "
         f"{_peer_group_sentence(names, cfg)}"
         f"{_claude_target_sentence(names, cfg)}"
@@ -2256,13 +2479,20 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
         chains.append(f"{kind}: " + " > ".join(name + notes.get(name, "") for name in chain))
     if not chains:
         return ""
+    decides = (
+        "and it decides which call carries the leaf: a Claude target goes through delegate_claude with its "
+        "tier, any other target through delegate_task. "
+        if claude_delegation.is_active() else
+        "and it decides the leaf's model: parameter. "
+    )
     return (
         "The operator's target order per kind of work, highest priority first -- "
         + "; ".join(chains)
         + ". A leaf of one of these kinds must take the first target in that kind's order, "
         "and when an entry is marked unavailable must move to the next entry in the same "
         "order rather than choosing freely. This is the operator's configuration, not a "
-        "suggestion, and it decides the leaf's model: parameter. "
+        "suggestion, "
+        + decides
     )
 
 
@@ -2421,10 +2651,11 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
     paragraph: the unconditional default beat the hedged preference sentence
     every time, so ``code -> model:opus5`` never once decided a leaf.
     """
-    claude = [name for name in names if name in _EXPENSIVE_TARGETS]
+    claude_names = _EXPENSIVE_TARGETS | ({"haiku"} if claude_delegation.is_active() else frozenset())
+    claude = [name for name in names if name in claude_names]
     if not claude:
         return ""
-    both = len(claude) == 2
+    both = "opus5" in claude and "sonnet5" in claude
     # Read the configured lists, not the currently-available winner: a cooling
     # opus5 would otherwise revive the built-in default mid-session, which is the
     # one moment the operator's own order needs to be the thing that speaks.
@@ -2433,11 +2664,16 @@ def _claude_target_sentence(names: Iterable[str], cfg: Optional[Dict[str, Any]] 
         for kind in WORK_KINDS
         for name in _preference_list(kind, cfg)
     )
+    reach = (
+        'Reach them with delegate_claude(tier="haiku"|"sonnet"|"opus"), never with delegate_task. '
+        if claude_delegation.is_active() else ""
+    )
     return (
         f"{' and '.join(claude)} run on Claude, a different subscription from every other "
         f"target, so they are the strongest way to keep independent work off a single quota. "
         f"They are ordinary workers with the usual tools: give them implementation or deep "
         f"review, not just reading. "
+        + reach
         + ("Use sonnet5 by default and reserve opus5 for consequential or hard work. "
            if both and not operator_chose else "")
     )
@@ -2580,20 +2816,57 @@ def _prepare_orchestration_delegation(
     cfg: Optional[Dict[str, Any]] = None,
     *,
     force_tools: bool = True,
+    claude_choice: Tuple[str, str, str] = ("", "", ""),
 ) -> Dict[str, Any]:
     """Force one real Terra-supervised Spark dispatch before parent execution.
 
     This is an operational delegation checkpoint, never a benchmark: the
     parent must use returned evidence, explicitly accept/reject it, and retain
     integration ownership.
+
+    ``claude_choice`` is (kind, target, balanced); target is set when the turn's
+    first choice is a Claude tier, and balanced explains a load-balancing reorder. The call then offers delegate_claude next to delegate_task and still
+    requires one of them -- forcing delegate_task alone made that preference
+    unreachable (a review turn ran on Terra instead of Sonnet, 2026-09-19).
     """
     orchestrator_tier = _conductor_tier(cfg)
-    
+
     routed = deepcopy(request)
+    claude_kind, claude_target, balanced = claude_choice
+    claude_tool, via_bridge = _claude_route_tool(request) if claude_target else (None, False)
+    if claude_tool is None:
+        claude_target = ""
+    model_param = _host_delegate_has_model(request)
+    claude_hint = (
+        "For real work prefer a native Claude worker through delegate_claude when one is offered. "
+        + _DEFERRED_DELEGATION_HINT
+        if claude_delegation.is_active() else
+        "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered. "
+    )
+    if claude_target:
+        claude_tier = claude_delegation.TIER_FOR_TARGET[claude_target]
+        lead = (
+            f"Plan ID: {plan_id}. Before any normal tool action, delegate exactly once, by one of two calls. "
+            f"CLAUDE ROUTE (preferred): this turn classifies as {claude_kind}, and its "
+            + (f"load-balanced first choice is {claude_target} (Balanced: {balanced}), " if balanced else
+               f"configured first choice is {claude_target}, ")
+            + f"so give the whole objective to one Claude worker with delegate_claude(tier=\"{claude_tier}\"). "
+            + ('It is a deferred tool: call it through tool_call with name "delegate_claude" and its arguments '
+               '(tier, tasks). ' if via_bridge else "")
+            + "Take this route unless the work needs several workers; on it there is no conductor, and you accept "
+            "or reject the Claude worker's result yourself. "
+            f"CONDUCTOR ROUTE: otherwise call delegate_task with role=\"orchestrator\" and a goal beginning with "
+            f"[{orchestrator_tier}]. "
+        )
+    else:
+        lead = (
+            f"Plan ID: {plan_id}. Before any normal tool action, call delegate_task exactly once with role=\"orchestrator\" "
+            f"and a goal beginning with [{orchestrator_tier}]. "
+            + (f"Balanced: {balanced}, so this turn's delegation stays off Claude. " if balanced else "")
+        )
     instruction = (
         f"\n\n[INTERNAL ORCHESTRATOR PREFLIGHT]\n"
-        f"Plan ID: {plan_id}. Before any normal tool action, call delegate_task exactly once with role=\"orchestrator\" "
-        f"and a goal beginning with [{orchestrator_tier}]. This creates a dedicated {orchestrator_tier} planner and conductor, not a benchmark worker. "
+        f"{lead}This creates a dedicated {orchestrator_tier} planner and conductor, not a benchmark worker. "
         "Give that conductor the full current objective. It must first inspect any current image itself and Create a structured dispatch plan "
         f"before any implementation. The plan may contain zero to {max_tasks} independent workers; do not invent work merely to fill slots. "
         f"{orchestrator_tier} chooses the decomposition from the actual task. {_leaf_label_contract(cfg)}"
@@ -2602,10 +2875,10 @@ def _prepare_orchestration_delegation(
         f"worker goal with [sol] only for security/auth/credentials/payment/migration/production analysis. Workers receive a "
         "self-contained textual scope, never the original image. A read-only leaf must stay read-only: prohibit edits, commands with side effects, "
         "external messages, deploys, credentials, database/auth/payment operations, and destructive actions. "
-        f"{_model_param_contract(orchestrator_tier, cfg)} "
+        f"{_model_param_contract(orchestrator_tier, cfg, model_param=model_param)} "
         "A [sonnet-review] or [opus-review] leaf takes no 'model', because its route is its label; it is read-only "
-        "and replaces a single call rather than running an agent. For real work prefer a native Claude target via "
-        "model:opus5 / model:sonnet5 when one is offered. "
+        "and replaces a single call rather than running an agent. "
+        f"{claude_hint}"
         "Write the goal as objective and acceptance criteria only: what must change, where, and how it is verified. "
         "Do not restate this routing policy inside the goal. The conductor already receives it verbatim as an immutable "
         "contract in the required `context` field, and the goal is re-read as a description of the work -- routing "
@@ -2642,7 +2915,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg, model_param='model' in properties)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -2669,12 +2942,27 @@ def _prepare_orchestration_delegation(
             if name not in required:
                 required.append(name)
         schema["required"] = required
-    if force_tools:
+    if force_tools and claude_target:
+        # Two tools and "call one of them": the parent still has to delegate, but
+        # the Claude preference is reachable. Next iteration gets the full toolset.
+        routed["tools"] = [planner_tool, claude_tool]
+        if _is_anthropic_shaped(routed):
+            routed["tool_choice"] = {"type": "any"}
+        else:
+            routed["tool_choice"] = "required"
+            routed["parallel_tool_calls"] = False
+    elif force_tools:
         # One tool plus a required choice is deterministic, and leaves the
         # normal complete toolset untouched on the parent's next iteration.
         routed["tools"] = [planner_tool]
         if _is_anthropic_shaped(routed):
-            routed["tool_choice"] = {"type": "tool", "name": "delegate_task"}
+            # Name the tool exactly as offered: Anthropic OAuth requests carry it as
+            # mcp__delegate_task, and forcing the bare name is a 400 that drops the
+            # whole turn onto the fallback account.
+            forced_name = (planner_tool.get("name")
+                           or (planner_tool.get("function") or {}).get("name")
+                           or "delegate_task")
+            routed["tool_choice"] = {"type": "tool", "name": forced_name}
         else:
             routed["tool_choice"] = "required"
             routed["parallel_tool_calls"] = False
@@ -2807,6 +3095,13 @@ def _orchestration_skip_reason(
     user_text, user_index = _last_user_text_and_index(items)
     if not user_text:
         return "no_user_text"
+    # The operator explicitly named a delegation tool for this turn -- the forced
+    # delegate_task planning preflight would override that choice. `user_text` is
+    # the incoming request's own latest user turn, read before this same call adds
+    # the router's routing note or preflight contract to it (those are appended to
+    # a deep copy further down the pipeline), so this cannot fire on our own text.
+    if re.search(r"\bdelegate_(?:claude|task)\b", user_text):
+        return "explicit_delegation_tool"
     # A task too short to decompose is not worth a planner round trip plus up to
     # max_tasks bounded workers. Without this gate every actionable Terra turn
     # forced a fan-out dispatch, the dominant source of perceived latency. That
@@ -2897,6 +3192,9 @@ def _force_terra_supervisor_preflight(
                     },
                 )
         return None
+    claude_choice = (
+        _claude_first_choice(kwargs["request"], cfg, decision) if decision.tier != "sol" else ("", "", "")
+    )
     with _SHADOW_LOCK:
         if _orchestration_forced_event(cfg, turn_id):
             return None
@@ -2914,6 +3212,7 @@ def _force_terra_supervisor_preflight(
                 "preflight_bridge_model": "claude-opus-5" if decision.tier == "sol" else None,
                 "max_tasks": min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
                 "parent_prompt_preview": _prompt_preview(kwargs.get("request") or {}),
+                **({"balanced": claude_choice[2]} if claude_choice[2] else {}),
             },
         )
     if decision.tier == "sol":
@@ -2924,6 +3223,7 @@ def _force_terra_supervisor_preflight(
         min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
         cfg=cfg,
         force_tools=_supports_forced_tool_choice(kwargs, decision),
+        claude_choice=claude_choice,
     )
 
 
@@ -2995,8 +3295,226 @@ def _force_shadow_delegation_if_eligible(kwargs: Dict[str, Any], cfg: Dict[str, 
     return _prepare_shadow_delegation(kwargs["request"], benchmark_id)
 
 
+_NOTE_TOOL_NAMES = frozenset({"delegate_task", "mcp__delegate_task", "delegate_claude", "mcp__delegate_claude"})
+# Hermes's Tool Search defers every plugin tool by default: the parent sees only
+# tool_search/tool_describe/tool_call plus a catalog stub, and a direct call to
+# delegate_claude is rejected as unknown until it is loaded once. Every place
+# that tells a parent to call delegate_claude while Claude delegation is active must also
+# say how to reach it.
+_DEFERRED_DELEGATION_HINT = (
+    'If delegate_claude is not in your tool list it is a deferred tool: load it once with tool_describe, '
+    'then call it through tool_call with name "delegate_claude". '
+)
+_CLAUDE_DELEGATION_AVAILABLE_LINE = (
+    'Claude delegation is available through delegate_claude: tier "haiku" for quick lookups, "sonnet" as '
+    'the default worker, "opus" for hard or consequential work.'
+)
+
+
+def _note_names(kind: str, cfg: Dict[str, Any], states: Dict[str, str], claude_offered: set) -> list:
+    """The kind's preference chain, limited to what can be offered, in advice order."""
+    names = []
+    for name in _preference_list(kind, cfg):
+        if name in claude_delegation.TIER_FOR_TARGET:
+            if name in claude_offered and _target_is_offered(name, cfg):
+                names.append(name)
+        elif _is_routable_tier(name, cfg) and _target_is_offered(name, cfg):
+            names.append(name)
+    held = {account for account, state in states.items() if state in ("soft", "closed")}
+    if held:
+        # An account at its limit still runs, but it is no longer the first thing to reach for.
+        names = ([n for n in names if _account_of(n, cfg) not in held]
+                 + [n for n in names if _account_of(n, cfg) in held])
+    return names
+
+
+def _advised_chain(
+    kind: str, cfg: Dict[str, Any], states: Dict[str, str], claude_offered: set, readings: Dict[str, Any]
+) -> Tuple[list, str]:
+    """(chain, reason): the advice chain, load-balanced between accounts under Claude delegation.
+
+    After the soft/hard guard has ordered the chain, compare its first account with
+    the next account the chain lists, on ``window`` (5-hour by default; the
+    parent's share counts on its own account). When the first one is at
+    least ``busy_percent`` and the other is at least ``margin_percent`` points
+    freer, that account's first entry moves to the front. Only listed targets
+    move, the parent never does, and a missing or stale reading changes nothing.
+    ``reason`` is "" unless the order changed.
+    """
+    names = _note_names(kind, cfg, states, claude_offered)
+    policy = usage_guard.balance_config(cfg)
+    if not policy["enabled"] or not claude_delegation.is_active() or len(names) < 2:
+        return names, ""
+    first_account = _account_of(names[0], cfg)
+    other = next((n for n in names if _account_of(n, cfg) not in ("", first_account)), "")
+    if not first_account or not other:
+        return names, ""
+    other_account = _account_of(other, cfg)
+    busy_reading, free_reading = readings.get(first_account), readings.get(other_account)
+    if not (usage_guard.fresh(busy_reading, cfg) and usage_guard.fresh(free_reading, cfg)):
+        return names, ""
+    busy = usage_guard.load(busy_reading, policy["window"])
+    free = usage_guard.load(free_reading, policy["window"])
+    if busy is None or free is None:
+        return names, ""
+    if busy[0] < policy["busy_percent"] or busy[0] - free[0] < policy["margin_percent"]:
+        return names, ""
+    reason = (f"{kind} → {other} first ({usage_guard.account_label(first_account)} {busy[1]} {busy[0]:.0f}% vs "
+              f"{usage_guard.account_label(other_account)} {free[0]:.0f}%)")
+    return [other] + [n for n in names if n != other], reason
+
+
+def _note_label(name: str, notes: Dict[str, str], *, as_call: bool) -> str:
+    if not as_call:
+        return f"{name}{notes.get(name, '')}"
+    tier = claude_delegation.TIER_FOR_TARGET.get(name)
+    call = f'delegate_claude(tier="{tier}")' if tier else f"delegate_task (goal prefix [{name}])"
+    return f"{name} → {call}{notes.get(name, '')}"
+
+
+def _guarded_readings(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """One cached usage reading per guarded account; {} when the guard is unreadable."""
+    try:
+        guarded_accounts = [a for a in (usage_guard.guard_config(cfg).get("accounts") or {})
+                            if usage_guard.guarded(a, cfg)]
+        return {account: usage_guard.peek(account, cfg) for account in guarded_accounts}
+    except Exception:
+        return {}
+
+
+def _claude_first_choice(
+    request: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision
+) -> Tuple[str, str, str]:
+    """(kind, claude_target, balanced) for this turn's forced call.
+
+    ``claude_target`` is set when the first advised choice is a Claude tier;
+    ``balanced`` is the balancing reason when load balancing reordered the chain,
+    whichever way it went. The same chain the routing note advises from, so the
+    forced call and the note never disagree. An external parent's decision
+    carries no kind, so the turn is classified here the way the note classifies it.
+    """
+    if not claude_delegation.is_active():
+        return "", "", ""
+    kind = decision.kind if decision.kind in WORK_KINDS else ""
+    if not kind:
+        try:
+            kind = classify_request(request, api_call_count=1, config=cfg).kind or ""
+        except Exception:
+            return "", "", ""
+    readings = _guarded_readings(cfg)
+    chain, balanced = _advised_chain(kind, cfg, _account_states(cfg, readings),
+                                     set(_delegation_target_names()), readings)
+    first = chain[0] if chain else ""
+    return kind, (first if first in claude_delegation.TIER_FOR_TARGET else ""), balanced
+
+
+def _claude_route_tool(request: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """(tool, via_bridge): delegate_claude itself when listed, else the tool_call bridge, else None."""
+    bridge = None
+    for tool in request.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name") or (tool.get("function") or {}).get("name")
+        if name in (claude_delegation.TOOL_NAME, f"mcp__{claude_delegation.TOOL_NAME}"):
+            return tool, False
+        if name in claude_delegation._BRIDGE_CALL_NAMES and bridge is None:
+            bridge = tool
+    return (bridge, True) if bridge is not None else (None, False)
+
+
+def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str, Any]) -> str:
+    """Advice for a Claude parent: which account and tier, per kind of work.
+
+    With orchestration off, a parent on an external account got no routing advice
+    at all; the preference chains only ever reached a forced conductor. This is
+    that advice, once per turn, and advisory: the parent may overrule it.
+    """
+    if not claude_delegation.is_active():
+        return ""
+    if int(kwargs.get("api_call_count", 1) or 1) != 1:
+        return ""
+    if str(kwargs.get("platform", "")).casefold() == "subagent" or ":sa-" in str(kwargs.get("turn_id", "")):
+        return ""
+    if not set(_tool_names(request)) & _NOTE_TOOL_NAMES:
+        return ""
+    text, _index = _last_user_text_and_index(_request_items(request))
+    if not text or _is_delegation_outcome_text(text) or _lifecycle_event_kind(request):
+        return ""
+    try:
+        kind = classify_request(request, api_call_count=1, config=cfg).kind or "default"
+    except Exception:
+        kind = "default"
+    # One peek per guarded account for the whole note: the chain, the "other
+    # kinds" summary and the usage line all read the same snapshot instead of
+    # each re-peeking (and each risking a different answer mid-note).
+    readings = _guarded_readings(cfg)
+    states = _account_states(cfg, readings)
+    claude_offered = set(_delegation_target_names())
+
+    chain, balanced = _advised_chain(kind, cfg, states, claude_offered, readings)
+    notes = _target_availability(chain, cfg, states=states)
+    lines = [f"[ROUTER] This turn classifies as: {kind}."]
+    if balanced:
+        lines.append(f"Balanced: {balanced}; the busier account is spared, not closed.")
+    if chain:
+        lines.append(f"If you delegate {kind} work: "
+                     + " > ".join(_note_label(n, notes, as_call=True) for n in chain) + ".")
+    else:
+        lines.append(f"No preference is configured for {kind} work; delegate_task keeps its built-in route.")
+    others = []
+    for other in WORK_KINDS:
+        if other == kind:
+            continue
+        names, _balanced = _advised_chain(other, cfg, states, claude_offered, readings)
+        if names:
+            other_notes = _target_availability(names, cfg, states=states)
+            others.append(f"{other}: " + " > ".join(_note_label(n, other_notes, as_call=False)
+                                                   for n in names))
+    if others:
+        lines.append("Other kinds: " + "; ".join(others) + ".")
+    if not any(name in claude_delegation.TIER_FOR_TARGET for k in WORK_KINDS for name in _preference_list(k, cfg)):
+        lines.append(_CLAUDE_DELEGATION_AVAILABLE_LINE)
+    usage = []
+    for account in sorted(states, key=lambda a: usage_guard.account_label(a) != "Claude"):
+        limits = usage_guard.account_limits(account, cfg)
+        reading = readings.get(account)
+        value = "unknown" if reading is None or reading.weekly is None else f"{reading.weekly:.0f}%"
+        usage.append(f"{usage_guard.account_label(account)} weekly {value} "
+                     f"(soft {limits['soft_percent']:.0f}%, hard {limits['hard_percent']:.0f}%)")
+    if usage:
+        lines.append("Usage: " + "; ".join(usage) + ".")
+    lines.append(_DEFERRED_DELEGATION_HINT.rstrip())
+    lines.append("Advisory: if you route differently, say why in one line.")
+    return "\n\n" + "\n".join(lines) + "\n"
+
+
 def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
-    """Hermes llm_request middleware entrypoint."""
+    """Hermes llm_request middleware entrypoint.
+
+    Claude delegation is scoped to this request: offered only when the live
+    workflow allows it and the request itself carries delegate_claude. A session
+    whose tool list predates a workflow switch is then never told to call a tool
+    it lacks, nor steered to one the workflow has switched off.
+    """
+    available = claude_delegation.availability_block(_load_config()) == ""
+    claude_delegation.note_availability(available)
+    active = available and claude_delegation.is_active() and claude_delegation.offered(
+        _tool_names(kwargs.get("request"))
+    )
+    with claude_delegation.request_scope(active):
+        return _route_llm_request(**kwargs)
+
+
+def on_pre_gateway_dispatch(**kwargs: Any) -> None:
+    """Notice a workflow switch before the gateway builds a new session's agent."""
+    try:
+        claude_delegation.note_availability(claude_delegation.availability_block(_load_config()) == "")
+    except Exception as exc:
+        _logger.debug("pre_gateway_dispatch: workflow check skipped: %s", exc)
+    return None
+
+
+def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     cfg = _load_config()
     disabled = os.environ.get("HERMES_MODEL_ROUTER_DISABLE", "").casefold() in {
         "1", "true", "yes", "on"
@@ -3050,11 +3568,21 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
             )
             else ""
         )
-        if forced is None and not redispatch:
+        # The forced preflight already carries the full contract; the note is for
+        # the turns it leaves alone.
+        note = ""
+        if forced is None:
+            try:
+                note = _routing_note(request, kwargs, cfg)
+            except Exception:
+                note = ""
+        if forced is None and not redispatch and not note:
             return None
         forced = deepcopy(forced if forced is not None else request)
         if redispatch:
             _append_user_instruction(forced, redispatch)
+        if note:
+            _append_user_instruction(forced, note)
         # Same envelope as the normal path, minus any model/provider change: the
         # request carries the added contract, the route stays exactly as it arrived.
         return {
@@ -3198,6 +3726,12 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         if decision.tier == str(cfg.get("default_model", "terra")) and forced_preflight_request is None
         else None
     )
+    # The orchestration gates above must see the tier this request actually
+    # classified to -- an already-stepped-down decision would offer Terra's
+    # preflight to a Sol request that never got Sol's, and would skip the
+    # Sol/Opus preflight the request was actually entitled to. Usage only
+    # touches the *dispatched* tier, once those gates have already run.
+    decision = _usage_step_down(decision, cfg)
     # Hermes middleware cannot switch the underlying provider/transport. If a
     # rule selects a tier owned by another provider, changing only `model`
     # produces invalid calls such as `gpt-5.6-terra` at the Qwen Anthropic
@@ -4003,3 +4537,5 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("subagent_start", on_subagent_start)
     ctx.register_hook("subagent_stop", on_subagent_stop)
+    ctx.register_hook("pre_gateway_dispatch", on_pre_gateway_dispatch)
+    claude_delegation.register(ctx)

@@ -53,10 +53,14 @@ Azt kell látnod: `model-router` - enabled
 A live dashboard indítása:
 
 ```bash
-python3 ~/.hermes/plugins/model-router/web_viewer.py
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/plugins/model-router/web_viewer.py
 ```
 
 Ezután nyisd meg: http://localhost:8765
+
+A Hermes saját venv-jének pythonjával indítsd, ne egy sima `python3`-mal: a
+Frissítés gomb a Hermes `agent.account_usage` moduljába nyúlik be, ami csak
+abban a venv-ben van telepítve.
 
 ## Hibaelhárítás
 

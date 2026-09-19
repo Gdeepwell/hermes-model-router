@@ -148,8 +148,17 @@ for a model outside its own tier map, so nothing here rewrites them — but it d
 record them. Invisible to the router had meant invisible to the operator: a
 Claude worker produced no card, no count and no line in the per-account load, so
 the one account whose usage most needed watching was the one nothing reported on.
-They now appear as `opus5` and `sonnet5` alongside the other tiers, and their
-`callable` switches govern whether the conductor is offered them at all.
+They now appear as `opus5`, `sonnet5` and `haiku` alongside the other tiers, and
+their `callable` switches govern whether the conductor is offered them at all.
+
+**Haiku is a third Claude target, reachable only through Claude delegation.**
+It has no `delegation.targets` entry in Hermes's config, so `delegate_task` cannot
+start it; `delegate_claude(tier="haiku")` can (see
+[Claude delegation and the usage guard](#claude-delegation-and-the-usage-guard)).
+While that tool is live, `haiku` joins the conductor's target list with the
+advice "quick lookups", and it can be named in a preference chain like any other
+target — typically for `explore`. With Claude delegation off it is never offered,
+whatever its `callable` switch says.
 
 When both are offered the contract used to add "use `sonnet5` by default and
 reserve `opus5` for consequential or hard work". That sentence dates from the
@@ -216,7 +225,12 @@ preference chain overrides exactly one of them:
 
 The last row is the one that matters: a chain re-routes a turn, it does not change
 which model the process launches with. Setting `default_model` in the dashboard
-writes Hermes's own config as well as the router's.
+writes Hermes's own config as well as the router's. It does so **only when you
+actually change it**: the Settings page posts `default_model` on every save, so
+writing it through unconditionally meant a callable toggle moved a Claude parent
+back onto this provider's tier. A tier with no entry in `models` — a delegation
+target such as `opus5` — is refused rather than written, because Hermes cannot
+launch on it and `_decision` raises for it.
 
 ### Preferred models per kind of work
 
@@ -231,11 +245,12 @@ differently because the difference is not cosmetic:
 - **A tier of the router's own provider** (`luna`, `spark`, `terra`, `sol`) is a
   real route. The router rewrites the model and the chain also replaces the
   built-in fallback order for that kind.
-- **Anything on another account** (`opus5`, `sonnet5`, `qwen`) cannot be routed
+- **Anything on another account** (`opus5`, `sonnet5`, `haiku`, `qwen`) cannot be routed
   to at all: `route_llm_request` runs after the provider is chosen, so it can only
   swap models inside one provider. Such an entry is passed to the conductor as a
-  delegation instruction instead — it reaches work through `delegate_task`, and
-  the conductor is the one that has to honour it.
+  delegation instruction instead — it reaches work through `delegate_task`
+  (or `delegate_claude` for a Claude tier under Claude delegation), and the
+  conductor is the one that has to honour it.
 
 A kind with no chain keeps its built-in route, so configuring nothing changes
 nothing. A kind with a chain overrides that route **completely**, including the
@@ -431,9 +446,13 @@ enough to pass `retry_call` to execution middleware.
 ### Live Dashboard
 
 ```bash
-python3 ~/.hermes/plugins/model_router/web_viewer.py
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/plugins/model-router/web_viewer.py
 # http://localhost:8765
 ```
+
+Run it with the Hermes venv's own python, not a bare `python3`: Refresh on an
+account card calls into Hermes's `agent.account_usage`, which only that venv
+has installed.
 
 Three tabs: **Model Router**, **Settings**, and an embedded **Hermes Command
 Center**. The interface is available in English and Hungarian.
@@ -477,6 +496,29 @@ anything you need to remember in this README rather than in the config.
 ## Configuration
 
 The plugin loads `router_config.yaml` from the plugin directory automatically.
+That file holds the shipped defaults -- the original Codex workflow -- and is the
+one under version control. Your own settings go in `router_config.local.yaml`
+beside it: git-ignored, and merged over the shipped file mapping by mapping, so
+it only needs the keys you change:
+
+```yaml
+# router_config.local.yaml
+workflow: claude_delegation
+default_model: terra
+preferences:
+  review: [sonnet5, opus5, terra]
+claude_delegation:
+  enabled: true
+usage_guard:
+  accounts:
+    anthropic:
+      soft_percent: 80
+```
+
+The dashboard reads the merged result and saves into the local file, keeping
+only what differs from the shipped one (it creates the file on the first such
+save). A local file that fails to parse is ignored with a warning, and the
+shipped settings apply. An override can change a shipped key but not remove it.
 
 ### Key Settings
 
@@ -489,6 +531,7 @@ callable:
   sol: true
   opus5: true
   sonnet5: true
+  haiku: true    # offered only while Claude delegation is live
   qwen: true
 
 # Which account each tier spends. Claude tiers are delegation targets rather
@@ -500,6 +543,7 @@ tier_providers:
   sol: openai-codex
   opus5: anthropic
   sonnet5: anthropic
+  haiku: anthropic
   qwen: qwen-token
 
 # Default parent model
@@ -510,6 +554,7 @@ default_model: terra
 preferences:
   review: [sonnet5, terra]
   design: [sol, opus5]
+  explore: [spark, luna, haiku]   # haiku needs Claude delegation
 
 # Delegation limits (in ~/.hermes/config.yaml)
 delegation:
@@ -580,6 +625,141 @@ usage_report:
   enabled: true
   window_seconds: 3600
 ```
+
+### Workflow switch
+
+One setting chooses between the two ways this router has been run:
+
+```yaml
+workflow: claude_delegation   # or: codex
+```
+
+- `codex` is the original workflow, exactly as on master: Codex does the work
+  through `delegate_task`, Opus stays available as the Hermes parent, there is
+  no `delegate_claude`, and the built-in routes apply. `preferences:` and the
+  `claude_delegation:` block stay in the file, unused, so switching back
+  restores them.
+- `claude_delegation` (also what an absent or unknown value means) runs the file
+  as written: Claude workers next to Codex, routed by `preferences:`. When a
+  turn's first choice is a Claude tier (review → `sonnet5`, say), the forced
+  planning call offers `delegate_claude` next to `delegate_task` -- directly when
+  the request lists it, else through Tool Search's `tool_call` -- and still
+  requires one of the two. Every other turn keeps the `delegate_task`-only call.
+
+The dashboard's Settings tab has the switch at the top. Saving it writes
+`workflow` into `router_config.local.yaml` (see [Configuration](#configuration))
+and keeps `claude_delegation.enabled` in step; the Claude account card
+reports the state but no longer has a toggle of its own.
+
+The switch is read live. The router rereads it on every request, so routing
+follows from the next one. `delegate_claude` is registered whenever the host can
+carry it, and its `check_fn` decides whether Hermes offers it, so a new session
+gains or loses the tool without a restart. A session already running keeps the
+tool list it was built with; the router offers Claude delegation to a request
+only when the workflow allows it *and* that request carries `delegate_claude`,
+and the tool itself refuses calls under `workflow: codex`, so that session is
+still pointed at the right route. Hermes memoizes tool lists without rerunning
+check_fns, so the router clears that memo (a private `model_tools` helper)
+when it sees the workflow flip, on a routed request or before a gateway message
+is dispatched.
+
+### Claude delegation and the usage guard
+
+Two config blocks, one shared mechanism (`usage_guard.py`), used differently by
+each account.
+
+`claude_delegation:` registers the `delegate_claude` tool, which reaches a
+Claude tier (haiku/sonnet/opus) as a real worker without going through the
+router's own tier map:
+
+```yaml
+claude_delegation:
+  enabled: false        # off by default; flip on to register the tool
+  default_tier: sonnet  # used when a call to delegate_claude names no tier
+  log_path: ""          # JSONL audit log: registration + one line per delegate_claude call
+  tiers:                 # model each short tier name actually starts
+    haiku: claude-haiku-4-5-20251001
+    sonnet: claude-sonnet-5
+    opus: claude-opus-5
+```
+
+One tier per call: `haiku` for quick lookups and exploration, `sonnet` as the
+everyday worker, `opus` for hard or consequential work. They count on the router's
+side as `haiku`, `sonnet5` and `opus5`, all on the `anthropic` account, and Haiku
+is reachable only this way (it has no `delegate_task` target). Clearing a tier's
+model in `tiers` removes that tier from what the conductor is offered.
+
+The tool is registered whenever the host has the delegation API it needs, and
+offered only while `enabled` is on and a Claude target is callable (see
+[Workflow switch](#workflow-switch)). A host that defers tool registration
+until first use (Tool Search) may not offer `delegate_claude` immediately after
+startup; the dashboard's Claude account card shows whether it is actually live
+(`delegate_claude live`), and flags `restart Hermes to apply` only when
+delegation is on but the tool never registered.
+
+`usage_guard:` is the same soft/hard usage guard for every account
+`tier_providers` names, keyed by account (`anthropic`, `openai-codex`, ...),
+not by tier:
+
+```yaml
+usage_guard:
+  cache_seconds: 300   # how long a fetched reading is trusted before refetching
+  state_path: ""       # shared JSON cache across the interactive TUI and the gateway process
+  accounts:
+    anthropic:
+      soft_percent: 70   # at/above this weekly %, the heaviest routed tier steps down
+      hard_percent: 90   # at/above this (weekly OR 5-hour session), delegation to the account closes
+      step_down:
+        opus5: sonnet5
+    openai-codex:
+      soft_percent: 70
+      hard_percent: 90
+      step_down:
+        sol: terra
+```
+
+An account absent from `usage_guard.accounts` is never touched: no reading is
+fetched for it and its state reports `unknown`. Codex is stepped down by the
+router itself (`_usage_step_down`); Claude is stepped down inside
+`delegate_claude`'s own dispatch, since the router never routes a Claude call
+in the first place. Either way the dashboard's account card shows the current
+reading, the configured limits, and — while cooling — the pill's reason.
+
+#### Load balancing between accounts
+
+The soft/hard limits react to one account reaching a line. `balance` compares
+the two, so a busy account is spared before it hits one. It runs only under
+Claude delegation, after the soft/hard guard has ordered the chain:
+
+```yaml
+usage_guard:
+  balance:
+    enabled: true        # off when the block is absent
+    window: 5-hour       # compare the 5-hour windows (default), or `tighter`: the higher of weekly and 5-hour
+    busy_percent: 20     # the first account's window is at least this
+    margin_percent: 10   # and the next account in the same chain is at least this many points freer
+```
+
+The aim is roughly equal 5-hour usage on both accounts. The Opus parent's own
+calls count on Claude's window, so Claude usually leads and delegation leans to
+Codex; with the numbers above, Claude at 23% and Codex at 12% sends the next
+review to Terra. The weekly window is left to the soft/hard limits: a Claude
+parent keeps Claude's week ahead, and balancing on it would pull every
+Claude-preferred kind to Codex for the rest of the week.
+
+When both hold, the other account's first entry in the kind's chain moves to
+the front: a busier Claude sends `review: [sonnet5, opus5, terra]` to Terra, and a
+busier Codex sends `code: [terra, sonnet5]` to Sonnet. Only targets the chain
+already lists move, so a kind whose chain stays on one account (or has no
+chain) is untouched, and the Opus parent never moves. A reading that is missing,
+or older than twice `cache_seconds`, turns balancing off for that turn.
+
+The switch and both thresholds are also in the dashboard's Workflow section
+while Claude delegation is selected. The routing advice and the forced planning
+call follow the balanced order, and
+say why in one line (`Balanced: review → terra first (Claude 5-hour 86% vs
+Codex 6%)`); the orchestration log's `preflight_forced` event carries the same
+text as `balanced`.
 
 ### Cooldowns
 
@@ -929,12 +1109,55 @@ the call rather than routing it, which is normal for Claude and Qwen.
 
 ## Tests
 
+The tests import the plugin as the `model_router` package (and a few modules by
+their bare name), and the Hermes venv ships neither pytest nor pip, so they run
+under `unittest` from a directory where the repo is linked as `model_router`.
+`HOME` points at a scratch directory so the run never writes to the real
+`~/.hermes/logs`; a copy of the Hermes config goes there because some tests read it.
+
 ```bash
-cd ~/.hermes/plugins/model_router
-pytest
+AGENT=~/.hermes/hermes-agent
+RUN=$(mktemp -d)
+mkdir -p "$RUN/home/.hermes" && cp ~/.hermes/config.yaml "$RUN/home/.hermes/"
+ln -s ~/Repositories/hermes-model-router "$RUN/model_router"
+cd "$RUN" && HOME="$RUN/home" PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
+  "$AGENT/venv/bin/python" -m unittest discover -s model_router -t . -p 'test_*.py'
 ```
 
+`test_callable_and_qwen_guards.py` uses pytest and is reported as an import error
+where pytest is not installed.
+
 ## Version
+
+**1.14.0** — `router_config.yaml` ships the original Codex workflow again
+(`workflow: codex`, `default_model: qwen`, no preference chains, Claude
+delegation off), and an operator's settings live in a git-ignored
+`router_config.local.yaml` merged over it. The dashboard reads the merged
+config and saves only the differences into the local file.
+
+**1.13.0** — Under Claude delegation, `usage_guard.balance` evens out the two
+accounts' 5-hour windows: when a kind's first account is at 20% or more and the
+next account in the chain is 10 points freer, that account goes first. It is
+switched and tuned from the dashboard's Workflow section. The soft/hard limits
+are unchanged and apply first.
+
+**1.12.0** — `workflow: codex | claude_delegation` switches between the original
+Codex workflow and Claude delegation from one setting, live and without a
+restart, with the switch at the top of the dashboard's Settings tab. Under Claude
+delegation, a turn whose first choice is a Claude tier gets a forced planning call
+that offers `delegate_claude` next to `delegate_task` (a review turn had been
+forced onto Terra); the Codex workflow keeps the `delegate_task`-only call.
+Dashboard saves keep `router_config.yaml`'s comments; a default-tier save follows
+Hermes's parent only when its model *and* provider are a router tier's, a
+Hermes config that changed mid-save is no longer overwritten, and a Hermes write
+that fails now fails the save instead of reporting success.
+
+**1.11.0** — The dashboard imports the router when launched as documented
+(the plugin directory is hyphenated, `model-router`, not `model_router`), a
+switched-off tier keeps its Settings switch, Claude/Codex delegation chips
+share one hover format and are assigned by turn id first, preference-chain
+chips show their account and its state, and `claude_delegation:` /
+`usage_guard:` are documented
 
 **1.10.13** — Every leaf goal must open with its own tier label, not only a Spark or Sol one: two read-only source-discovery leaves went out unlabelled and both opened on Sol, vetoed by the design gate on the bare word "ui" in "UI components". The contract also stops naming Spark when `callable.spark` is off, which had left read-only discovery with no labelled tier to use at all
 
