@@ -617,14 +617,37 @@ def _apply_workflow(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def _local_config_path() -> Path:
+    """The operator's own settings: git-ignored, beside the shipped router_config.yaml."""
+    return _CONFIG_PATH.with_name("router_config.local.yaml")
+
+
+def _local_overrides() -> Dict[str, Any]:
+    """router_config.local.yaml as a mapping; {} when absent or unreadable.
+
+    A broken local file must not take the shipped settings down with it, so it is
+    skipped with a warning rather than failing the whole load.
+    """
+    path = _local_config_path()
+    if not path.exists():
+        return {}
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        _logger.warning("router_config.local.yaml ignored: %s", exc)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _load_config() -> Dict[str, Any]:
+    """Built-in defaults, then the shipped router_config.yaml, then router_config.local.yaml."""
     if not _CONFIG_PATH.exists() or yaml is None:
         return _deep_merge({}, _DEFAULT_CONFIG)
     try:
         loaded = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
             return _deep_merge({}, _DEFAULT_CONFIG)
-        return _apply_workflow(_deep_merge(_DEFAULT_CONFIG, loaded))
+        return _apply_workflow(_deep_merge(_deep_merge(_DEFAULT_CONFIG, loaded), _local_overrides()))
     except Exception:
         return _deep_merge({}, _DEFAULT_CONFIG)
 

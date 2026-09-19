@@ -977,7 +977,9 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
 
             self.assertEqual(status, 200)
             self.assertTrue(body.get("success"))
-            written = web_viewer.yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            # Saves land in the git-ignored local file, over the shipped one.
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
             self.assertEqual(written["callable"]["sol"], False)
 
 
@@ -2138,8 +2140,12 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(config, {"claude_delegation": {"enabled": True}})
 
     def _serve(self, directory, calls):
+        # Saves go to router_config.local.yaml; an empty shipped file under it keeps
+        # every key an override, so the whole ROUTER_YAML round-trips there.
         config_path = Path(directory) / "router_config.yaml"
-        config_path.write_text(self.ROUTER_YAML, encoding="utf-8")
+        config_path.write_text("{}\n", encoding="utf-8")
+        local_path = config_path.with_name("router_config.local.yaml")
+        local_path.write_text(self.ROUTER_YAML, encoding="utf-8")
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -2158,7 +2164,7 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
                         results.append((error.code, json.load(error)))
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)
-        return config_path.read_text(encoding="utf-8"), results
+        return local_path.read_text(encoding="utf-8"), results
 
     def test_a_workflow_save_round_trips_and_keeps_the_files_comments(self):
         with tempfile.TemporaryDirectory() as directory:

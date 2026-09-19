@@ -486,6 +486,29 @@ anything you need to remember in this README rather than in the config.
 ## Configuration
 
 The plugin loads `router_config.yaml` from the plugin directory automatically.
+That file holds the shipped defaults -- the original Codex workflow -- and is the
+one under version control. Your own settings go in `router_config.local.yaml`
+beside it: git-ignored, and merged over the shipped file mapping by mapping, so
+it only needs the keys you change:
+
+```yaml
+# router_config.local.yaml
+workflow: claude_delegation
+default_model: terra
+preferences:
+  review: [sonnet5, opus5, terra]
+claude_delegation:
+  enabled: true
+usage_guard:
+  accounts:
+    anthropic:
+      soft_percent: 80
+```
+
+The dashboard reads the merged result and saves into the local file, keeping
+only what differs from the shipped one (it creates the file on the first such
+save). A local file that fails to parse is ignored with a warning, and the
+shipped settings apply. An override can change a shipped key but not remove it.
 
 ### Key Settings
 
@@ -611,7 +634,8 @@ workflow: claude_delegation   # or: codex
   requires one of the two. Every other turn keeps the `delegate_task`-only call.
 
 The dashboard's Settings tab has the switch at the top. Saving it writes
-`workflow` and keeps `claude_delegation.enabled` in step; the Claude account card
+`workflow` into `router_config.local.yaml` (see [Configuration](#configuration))
+and keeps `claude_delegation.enabled` in step; the Claude account card
 reports the state but no longer has a toggle of its own.
 
 The switch is read live. The router rereads it on every request, so routing
@@ -1085,6 +1109,12 @@ cd "$RUN" && HOME="$RUN/home" PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
 where pytest is not installed.
 
 ## Version
+
+**1.14.0** — `router_config.yaml` ships the original Codex workflow again
+(`workflow: codex`, `default_model: qwen`, no preference chains, Claude
+delegation off), and an operator's settings live in a git-ignored
+`router_config.local.yaml` merged over it. The dashboard reads the merged
+config and saves only the differences into the local file.
 
 **1.13.0** — Under Claude delegation, `usage_guard.balance` evens out the two
 accounts' 5-hour windows: when a kind's first account is at 20% or more and the

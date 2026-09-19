@@ -1,10 +1,14 @@
 enabled: true
-# Which workflow the router runs. claude_delegation: Claude workers next to Codex
-# through delegate_claude, routed by the preferences below. codex: the original
-# workflow -- Codex does the work through delegate_task, Opus stays available as
-# the Hermes parent, no delegate_claude, and the built-in routes apply (the
-# preferences are kept here, just not used). Read live: no restart needed.
-workflow: claude_delegation
+# These are the shipped defaults. Put your own settings in router_config.local.yaml
+# beside this file: it is git-ignored, layered over this one key by key, and it is
+# where the dashboard saves.
+#
+# Which workflow the router runs. codex (the default): the original workflow --
+# Codex does the work through delegate_task, Opus stays available as the Hermes
+# parent, no delegate_claude, and the built-in routes apply (preferences are not
+# used). claude_delegation: Claude workers next to Codex through delegate_claude,
+# routed by the preferences below. Read live: no restart needed.
+workflow: codex
 provider: openai-codex
 models:
   luna: gpt-5.6-luna
@@ -26,7 +30,7 @@ callable:
   opus5: true
   sonnet5: true
   haiku: true
-  qwen: false
+  qwen: true
 # Preferred models per kind of work, best first. The router takes the first entry
 # that is callable; if that entry is a Codex tier it becomes the route, and if it is
 # an external account (opus5, sonnet5, qwen) it becomes a delegation recommendation
@@ -35,14 +39,16 @@ callable:
 # A kind left out here keeps its built-in route. A kind listed here overrides that
 # route completely, including the safety defaults (design/sensitive/critical), so
 # the order you write is the order that applies.
-preferences:
-  design: [sol, opus5]
-  code: [terra, sonnet5]
-  explore: [spark, luna, haiku]
-  review: [sonnet5, opus5, terra]
-  sensitive: [opus5, sol]
-  critical: [opus5, sol]
-  long: [sol, sonnet5]
+preferences: {}
+# An example for workflow: claude_delegation, spreading work over both accounts:
+#  design:    [sol, opus5]
+#  code:      [terra, sonnet5]
+#  explore:   [spark, luna, haiku]
+#  review:    [sonnet5, opus5, terra]
+#  sensitive: [opus5, sol]
+#  critical:  [opus5, sol]
+#  long:      [sol, sonnet5]
+# Another ordering:
 #  design:    [sol, opus5, terra]
 #  code:      [terra, sol]
 #  explore:   [spark, luna, qwen]
@@ -59,7 +65,7 @@ fallbacks:
   sol: terra
   opus5: sol
   qwen: terra
-default_model: terra
+default_model: qwen
 coding_agent:
   enabled: false
   tier: opus5
@@ -172,7 +178,7 @@ shadow:
 # soft_percent opus work steps down to sonnet, and from hard_percent delegate_claude
 # refuses and names a Codex tier instead.
 claude_delegation:
-  enabled: true
+  enabled: false        # workflow: claude_delegation turns it on; codex keeps it off
   tiers:
     haiku: claude-haiku-4-5-20251001
     sonnet: claude-sonnet-5
@@ -201,7 +207,7 @@ usage_guard:
     margin_percent: 10
   accounts:
     anthropic:
-      soft_percent: 80
+      soft_percent: 70
       hard_percent: 90
       step_down: {opus5: sonnet5}
     openai-codex:

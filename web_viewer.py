@@ -715,12 +715,73 @@ def _save_balance(raw, config: dict):
     return None
 
 
-def _read_router_config_for_update():
+LOCAL_CONFIG_HEADER = (
+    "# Your own router settings, layered over router_config.yaml. Git-ignored:\n"
+    "# the dashboard saves here, keeping only what differs from the shipped file.\n"
+)
+
+
+def _local_config_path() -> Path:
+    """The operator's own settings, beside the shipped router_config.yaml (the router's rule too)."""
+    return CONFIG_PATH.with_name("router_config.local.yaml")
+
+
+def _merge(base: dict, override: dict) -> dict:
+    """``override`` over a deep copy of ``base``, mapping by mapping -- the router's layering."""
+    import copy
+
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _overlay(base: dict, target: dict) -> dict:
+    """The smallest mapping that, merged over ``base``, gives ``target``.
+
+    A key ``target`` drops cannot be expressed as an override; the dashboard
+    never drops one the shipped file sets.
+    """
+    out = {}
+    for key, value in target.items():
+        current = base.get(key) if isinstance(base, dict) else None
+        if isinstance(value, dict) and isinstance(current, dict):
+            nested = _overlay(current, value)
+            if nested:
+                out[key] = nested
+        elif not (isinstance(base, dict) and key in base) or current != value:
+            out[key] = value
+    return out
+
+
+def _load_yaml_mapping(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _read_router_config() -> dict:
+    """The shipped router_config.yaml with router_config.local.yaml over it, as the router reads it."""
+    shipped = _load_yaml_mapping(CONFIG_PATH)
+    try:
+        local = _load_yaml_mapping(_local_config_path())
+    except Exception:
+        local = {}
+    return _merge(shipped, local)
+
+
+def _read_router_config_for_update(path: Path | None = None):
     """(config, dump) for a read-modify-write that keeps the file's comments and layout.
 
-    ruamel.yaml round-trips comments; PyYAML is the fallback and strips them.
+    ruamel.yaml round-trips comments; PyYAML is the fallback and strips them. A
+    missing file reads as an empty mapping.
     """
-    text = CONFIG_PATH.read_text(encoding="utf-8")
+    path = CONFIG_PATH if path is None else path
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
     try:
         from ruamel.yaml import YAML
     except ImportError:
@@ -1770,7 +1831,12 @@ class Handler(BaseHTTPRequestHandler):
                 content_length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(content_length)
                 data = json.loads(body.decode("utf-8"))
-                config, dump = _read_router_config_for_update()
+                # The page edits the layered config; only what differs from the
+                # shipped file is written, and only into the git-ignored local file.
+                shipped = _load_yaml_mapping(CONFIG_PATH)
+                local_path = _local_config_path()
+                local, dump = _read_router_config_for_update(local_path)
+                config = _merge(shipped, _load_yaml_mapping(local_path))
                 if "callable" in data:
                     _assign_in_place(config, "callable", data["callable"])
                 if "hermes_fallback" in data:
@@ -1839,8 +1905,15 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         return
                     data["default_model"] = config["default_model"]
-                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                    dump(config, f)
+                delta = _overlay(shipped, config)
+                holder = {"local": local}
+                _assign_in_place(holder, "local", delta)
+                if delta or local_path.exists():
+                    created = not local_path.exists()
+                    with open(local_path, "w", encoding="utf-8") as f:
+                        if created:
+                            f.write(LOCAL_CONFIG_HEADER)
+                        dump(holder["local"], f)
                 self._send(200, json.dumps({"success": True}).encode("utf-8"), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e), "success": False}).encode("utf-8"), "application/json")
@@ -1848,8 +1921,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/usage/refresh":
             account = (parse_qs(parsed.query).get("account") or [""])[0]
             try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    config = yaml.safe_load(f) or {}
+                config = _read_router_config()
                 router = _router_module()
                 status = _accounts_status(config)
                 if account not in status or router is None:
@@ -1901,8 +1973,7 @@ class Handler(BaseHTTPRequestHandler):
                 source_entries, activity, requested_root_limit
             )
             try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    config_for_log = yaml.safe_load(f) or {} if yaml is not None else {}
+                config_for_log = _read_router_config() if yaml is not None else {}
             except Exception:
                 config_for_log = {}
             body = json.dumps(
@@ -1923,8 +1994,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"error": "yaml not available"}).encode("utf-8"), "application/json")
                 return
             try:
-                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                    config = yaml.safe_load(f) or {}
+                config = _read_router_config()
                 router = _router_module()
                 work_kinds = list(getattr(router, "WORK_KINDS", ())) if router else []
                 response = {

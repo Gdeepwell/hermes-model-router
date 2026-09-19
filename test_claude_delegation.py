@@ -463,15 +463,9 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertIn("haiku", self.cfg["peer_groups"]["light"])
 
     def test_the_starting_preferences(self):
-        self.assertEqual(self.cfg["preferences"], {
-            "design": ["sol", "opus5"],
-            "code": ["terra", "sonnet5"],
-            "explore": ["spark", "luna", "haiku"],
-            "review": ["sonnet5", "opus5", "terra"],
-            "sensitive": ["opus5", "sol"],
-            "critical": ["opus5", "sol"],
-            "long": ["sol", "sonnet5"],
-        })
+        # Shipped as master had them: the built-in routes. An operator's chains live
+        # in router_config.local.yaml; the shipped file carries them as a comment.
+        self.assertEqual(self.cfg["preferences"], {})
 
 
 from model_router import (  # noqa: E402
