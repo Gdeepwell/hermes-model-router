@@ -2462,6 +2462,11 @@ class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('data-balance-field="margin_percent" value="10"', out)
         self.assertIn("5-hour", out)
 
+    def test_each_threshold_sits_on_one_line_with_its_label_and_unit(self):
+        """The global `label{display:grid}` stacked "from", the box and "%" vertically,
+        so the two fields sat at different heights (seen on the dashboard)."""
+        self.assertIn(".balance-row .balance-field{display:inline-flex;align-items:center", HTML)
+
     def test_the_switch_is_off_when_balancing_is_off(self):
         out = self._control("claude_delegation", {"enabled": False, "busy_percent": 20, "margin_percent": 10,
                                                   "window": "5-hour"})
