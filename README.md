@@ -590,6 +590,42 @@ usage_report:
   window_seconds: 3600
 ```
 
+### Workflow switch
+
+One setting chooses between the two ways this router has been run:
+
+```yaml
+workflow: claude_delegation   # or: codex
+```
+
+- `codex` is the original workflow, exactly as on master: Codex does the work
+  through `delegate_task`, Opus stays available as the Hermes parent, there is
+  no `delegate_claude`, and the built-in routes apply. `preferences:` and the
+  `claude_delegation:` block stay in the file, unused, so switching back
+  restores them.
+- `claude_delegation` (also what an absent or unknown value means) runs the file
+  as written: Claude workers next to Codex, routed by `preferences:`. When a
+  turn's first choice is a Claude tier (review → `sonnet5`, say), the forced
+  planning call offers `delegate_claude` next to `delegate_task` -- directly when
+  the request lists it, else through Tool Search's `tool_call` -- and still
+  requires one of the two. Every other turn keeps the `delegate_task`-only call.
+
+The dashboard's Settings tab has the switch at the top. Saving it writes
+`workflow` and keeps `claude_delegation.enabled` in step; the Claude account card
+reports the state but no longer has a toggle of its own.
+
+The switch is read live. The router rereads it on every request, so routing
+follows from the next one. `delegate_claude` is registered whenever the host can
+carry it, and its `check_fn` decides whether Hermes offers it, so a new session
+gains or loses the tool without a restart. A session already running keeps the
+tool list it was built with; the router offers Claude delegation to a request
+only when the workflow allows it *and* that request carries `delegate_claude`,
+and the tool itself refuses calls under `workflow: codex`, so that session is
+still pointed at the right route. Hermes memoizes tool lists without rerunning
+check_fns, so the router clears that memo (a private `model_tools` helper)
+when it sees the workflow flip, on a routed request or before a gateway message
+is dispatched.
+
 ### Claude delegation and the usage guard
 
 Two config blocks, one shared mechanism (`usage_guard.py`), used differently by
@@ -610,11 +646,13 @@ claude_delegation:
     opus: claude-opus-5
 ```
 
-Because the tool is registered dynamically, a host that defers tool
-registration until first use (Tool Search) may not offer `delegate_claude`
-immediately after startup; the dashboard's Claude account card shows whether
-registration actually happened (`delegate_claude live`) versus merely
-configured, and flags `restart Hermes to apply` when the two disagree.
+The tool is registered whenever the host has the delegation API it needs, and
+offered only while `enabled` is on and a Claude target is callable (see
+[Workflow switch](#workflow-switch)). A host that defers tool registration
+until first use (Tool Search) may not offer `delegate_claude` immediately after
+startup; the dashboard's Claude account card shows whether it is actually live
+(`delegate_claude live`), and flags `restart Hermes to apply` only when
+delegation is on but the tool never registered.
 
 `usage_guard:` is the same soft/hard usage guard for every account
 `tier_providers` names, keyed by account (`anthropic`, `openai-codex`, ...),
@@ -992,12 +1030,36 @@ the call rather than routing it, which is normal for Claude and Qwen.
 
 ## Tests
 
+The tests import the plugin as the `model_router` package (and a few modules by
+their bare name), and the Hermes venv ships neither pytest nor pip, so they run
+under `unittest` from a directory where the repo is linked as `model_router`.
+`HOME` points at a scratch directory so the run never writes to the real
+`~/.hermes/logs`; a copy of the Hermes config goes there because some tests read it.
+
 ```bash
-cd ~/.hermes/plugins/model-router
-pytest
+AGENT=~/.hermes/hermes-agent
+RUN=$(mktemp -d)
+mkdir -p "$RUN/home/.hermes" && cp ~/.hermes/config.yaml "$RUN/home/.hermes/"
+ln -s ~/Repositories/hermes-model-router "$RUN/model_router"
+cd "$RUN" && HOME="$RUN/home" PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
+  "$AGENT/venv/bin/python" -m unittest discover -s model_router -t . -p 'test_*.py'
 ```
 
+`test_callable_and_qwen_guards.py` uses pytest and is reported as an import error
+where pytest is not installed.
+
 ## Version
+
+**1.12.0** — `workflow: codex | claude_delegation` switches between the original
+Codex workflow and Claude delegation from one setting, live and without a
+restart, with the switch at the top of the dashboard's Settings tab. Under Claude
+delegation, a turn whose first choice is a Claude tier gets a forced planning call
+that offers `delegate_claude` next to `delegate_task` (a review turn had been
+forced onto Terra); the Codex workflow keeps the `delegate_task`-only call.
+Dashboard saves keep `router_config.yaml`'s comments; a default-tier save follows
+Hermes's parent only when its model *and* provider are a router tier's, a
+Hermes config that changed mid-save is no longer overwritten, and a Hermes write
+that fails now fails the save instead of reporting success.
 
 **1.11.0** — The dashboard imports the router when launched as documented
 (the plugin directory is hyphenated, `model-router`, not `model_router`), a

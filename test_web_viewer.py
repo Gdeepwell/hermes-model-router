@@ -678,7 +678,8 @@ class PreferenceSettingsTests(DashboardProbeMixin, unittest.TestCase):
                   ("luna", "spark", "terra", "sol", "opus5", "sonnet5", "qwen")}
         probe = (
             self.i18n_runtime(language)
-            + "let html='';const box={set innerHTML(v){html=v;},appendChild(el){html+=el.outerHTML||el.textContent;}};"
+            + "let html='';const box={set innerHTML(v){html=v;},appendChild(el){html+=el.outerHTML||el.textContent;},"
+            "classList:{toggle(){}}};"
             "function $(id){return id==='pref-kinds'?box:null;}"
             "let currentConfig=" + json.dumps(config) + ";"
             "document={createElement:()=>({className:'',set innerHTML(v){this._h=v;},"
@@ -1292,6 +1293,7 @@ class AccountsApiTests(unittest.TestCase):
             "tool": "delegate_claude",
             "enabled": True,
             "registered": True,
+            "workflow": "claude_delegation",
             "restart_needed": False,
             "default_tier": "sonnet",
             "tiers": list(self.model_router.claude_delegation.TIERS),
@@ -1367,6 +1369,12 @@ class AccountsApiTests(unittest.TestCase):
                 {"anthropic": {"soft_percent": 0, "hard_percent": 90}}, config))
             self.assertIsNotNone(web_viewer._save_usage_limits(
                 {"nope": {"soft_percent": 10, "hard_percent": 90}}, config))
+
+    def test_whole_percentages_are_saved_as_integers(self):
+        config = {"usage_guard": {"accounts": {"anthropic": {"soft_percent": 70, "hard_percent": 90}}}}
+        self.assertIsNone(web_viewer._save_usage_limits({"anthropic": {"soft_percent": 80, "hard_percent": 92.5}}, config))
+        limits = config["usage_guard"]["accounts"]["anthropic"]
+        self.assertEqual((repr(limits["soft_percent"]), repr(limits["hard_percent"])), ("80", "92.5"))
 
     def test_an_empty_usage_limits_payload_touches_nothing(self):
         """M9: setdefault()-ing usage_guard/accounts even for an empty payload
@@ -1611,7 +1619,9 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_claude_card_specifics(self):
         registered = self._card("anthropic", self.CLAUDE_INFO)
-        self.assertIn('data-account-toggle="anthropic"', registered)
+        # The Workflow switch owns delegate_claude being on; the card only reports it.
+        self.assertNotIn("data-account-toggle", registered)
+        self.assertIn("account.delegation.via", registered)
         self.assertIn('<select data-default-tier', registered)
         for tier in ("haiku", "sonnet", "opus"):
             self.assertIn(f'value="{tier}"', registered)
@@ -2090,3 +2100,311 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         self.assertTrue(observed["routesHasChip"])
         self.assertFalse(observed["headerHasChip"])
         self.assertTrue(observed["headerHasRoutes"])
+
+
+class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
+    """One switch between Claude delegation and the original Codex workflow.
+
+    It writes ``workflow`` and keeps ``claude_delegation.enabled`` in step, saves
+    without stripping the file's comments, and replaces the per-card delegation
+    toggle so there is only one control for one state.
+    """
+
+    ROUTER_YAML = (
+        "# Router settings -- this comment must survive a dashboard save.\n"
+        "enabled: true\n"
+        "callable:\n"
+        "  terra: true\n"
+        "  opus5: true\n"
+        "preferences:\n"
+        "  review: [sonnet5, opus5, terra]  # Claude-tuned chain\n"
+        "claude_delegation:\n"
+        "  enabled: true\n"
+        "  default_tier: sonnet\n"
+    )
+
+    def test_save_workflow_keeps_the_delegation_flag_in_step(self):
+        config = {"claude_delegation": {"enabled": True, "default_tier": "opus"}}
+        self.assertIsNone(web_viewer._save_workflow("codex", config))
+        self.assertEqual(config["workflow"], "codex")
+        self.assertEqual(config["claude_delegation"], {"enabled": False, "default_tier": "opus"})
+        self.assertIsNone(web_viewer._save_workflow("claude_delegation", config))
+        self.assertEqual(config["workflow"], "claude_delegation")
+        self.assertTrue(config["claude_delegation"]["enabled"])
+
+    def test_save_workflow_refuses_an_unknown_name_and_touches_nothing(self):
+        config = {"claude_delegation": {"enabled": True}}
+        self.assertIn("Unknown workflow", web_viewer._save_workflow("gemini", config))
+        self.assertEqual(config, {"claude_delegation": {"enabled": True}})
+
+    def _serve(self, directory, calls):
+        config_path = Path(directory) / "router_config.yaml"
+        config_path.write_text(self.ROUTER_YAML, encoding="utf-8")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        results = []
+        try:
+            with patch.object(web_viewer, "CONFIG_PATH", config_path):
+                for method, body in calls:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/config",
+                        data=None if body is None else json.dumps(body).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}, method=method)
+                    try:
+                        with urllib.request.urlopen(request) as response:
+                            results.append((response.status, json.load(response)))
+                    except urllib.error.HTTPError as error:
+                        results.append((error.code, json.load(error)))
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+        return config_path.read_text(encoding="utf-8"), results
+
+    def test_a_workflow_save_round_trips_and_keeps_the_files_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, results = self._serve(directory, [("POST", {"workflow": "codex"}), ("GET", None)])
+        self.assertEqual(results[0], (200, {"success": True}))
+        self.assertEqual(results[1][1]["workflow"], "codex")
+        self.assertIn("# Router settings -- this comment must survive a dashboard save.", text)
+        self.assertIn("# Claude-tuned chain", text)
+        self.assertIn("workflow: codex", text)
+        self.assertIn("review: [sonnet5, opus5, terra]", text, "the chain is kept for switching back")
+        import yaml
+        loaded = yaml.safe_load(text)
+        self.assertFalse(loaded["claude_delegation"]["enabled"])
+
+    def test_a_full_page_save_keeps_the_comments_and_flow_lists(self):
+        """Measured live 2026-09-19: the page posts callable and preferences on every
+        save, and replacing those blocks wholesale dropped every comment attached to
+        them -- including the ones above the next key -- and turned [a, b] into
+        block lists. They are updated in place instead."""
+        yaml_text = (
+            "callable:\n"
+            "  terra: true\n"
+            "  sol: true\n"
+            "  sonnet5: true\n"
+            "  # opus note: on since 2026-09-09\n"
+            "  opus5: true\n"
+            "  qwen: true\n"
+            "# Preferred models per kind of work\n"
+            "preferences:\n"
+            "  design:    [sol, opus5]\n"
+            "  review:    [sonnet5, opus5, terra]\n"
+            "#  chat:      [luna, spark]\n"
+            "\n"
+            "claude_delegation:\n"
+            "  enabled: true\n"
+            "  default_tier: sonnet\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self.ROUTER_YAML, original = yaml_text, self.ROUTER_YAML
+            try:
+                text, results = self._serve(directory, [("POST", {
+                    "workflow": "codex",
+                    "callable": {"terra": True, "sol": True, "sonnet5": True, "opus5": True, "qwen": False},
+                    "preferences": {"design": ["sol", "opus5"], "review": ["opus5", "terra"]},
+                })])
+            finally:
+                self.ROUTER_YAML = original
+        self.assertEqual(results[0][0], 200)
+        for comment in ("# opus note: on since 2026-09-09", "# Preferred models per kind of work",
+                        "#  chat:      [luna, spark]"):
+            self.assertIn(comment, text)
+        self.assertIn("qwen: false", text)
+        self.assertRegex(text, r"design: +\[sol, opus5\]")
+        self.assertRegex(text, r"review: +\[opus5, terra\]")
+
+    def test_the_workflow_wins_over_a_stale_delegation_flag_in_the_same_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, _ = self._serve(directory, [("POST", {
+                "workflow": "codex", "claude_delegation": {"enabled": True, "default_tier": "haiku"}})])
+        import yaml
+        loaded = yaml.safe_load(text)
+        self.assertEqual(loaded["claude_delegation"], {"enabled": False, "default_tier": "haiku"})
+
+    def test_an_unknown_workflow_is_a_400_and_the_file_is_untouched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, results = self._serve(directory, [("POST", {"workflow": "gemini"})])
+        self.assertEqual(results[0][0], 400)
+        self.assertEqual(text, self.ROUTER_YAML)
+
+    def _status(self, workflow, registered):
+        import model_router
+
+        with tempfile.TemporaryDirectory() as directory:
+            config, _, log_path = AccountsApiTests()._build_config(directory)
+            log_path.write_text(json.dumps({"event": "registration", "registered": registered}), encoding="utf-8")
+            config["workflow"] = workflow
+            config["claude_delegation"]["enabled"] = workflow == "claude_delegation"
+            model_router.usage_guard._reset_cache()
+            try:
+                return web_viewer._accounts_status(config)["anthropic"]["delegation"]
+            finally:
+                model_router.usage_guard._reset_cache()
+
+    def test_the_codex_workflow_shows_delegation_off_and_never_asks_for_a_restart(self):
+        delegation = self._status("codex", registered=True)
+        self.assertEqual((delegation["enabled"], delegation["restart_needed"], delegation["workflow"]),
+                         (False, False, "codex"))
+
+    def test_claude_delegation_without_a_registered_tool_asks_for_a_restart(self):
+        delegation = self._status("claude_delegation", registered=False)
+        self.assertEqual((delegation["enabled"], delegation["restart_needed"]), (True, True))
+
+    def _node(self, script):
+        probe = self.i18n_runtime() + "\n" + script
+        return subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True).stdout.strip()
+
+    def test_the_switch_sits_first_in_settings_and_marks_the_active_workflow(self):
+        start = HTML.index('id="settings-panel"')
+        panel = HTML[start:HTML.index("</section>", start)]
+        self.assertLess(panel.index('id="workflow-switch"'), panel.index('id="account-cards"'))
+        out = self._node(self.javascript_function("workflowControl") + "\nconsole.log(workflowControl('codex'));")
+        self.assertIn('data-workflow="codex" class="active"', out)
+        self.assertIn('data-workflow="claude_delegation"', out)
+        self.assertNotIn('data-workflow="claude_delegation" class="active"', out)
+        self.assertIn("Codex does the work", out)
+
+    def test_the_claude_card_no_longer_carries_its_own_toggle(self):
+        card_tests = AccountCardTests()
+        off = dict(AccountCardTests.CLAUDE_INFO, delegation=dict(
+            AccountCardTests.CLAUDE_INFO["delegation"], enabled=False, workflow="codex"))
+        card = card_tests._card("anthropic", off)
+        self.assertNotIn("data-account-toggle", card)
+        self.assertIn("account.delegation.off", card)
+        self.assertNotIn("account.delegation.live", card, "registered but switched off is not live")
+        self.assertIn("<select data-default-tier", card_tests._card("anthropic", AccountCardTests.CLAUDE_INFO))
+
+    def test_saving_posts_the_workflow_and_no_longer_the_delegation_flag(self):
+        source = self.javascript_function("saveSettings")
+        self.assertIn("workflow:currentConfig.workflow", source)
+        self.assertNotIn("enabled:!!", source)
+
+    def test_the_preferences_say_when_the_codex_workflow_has_paused_them(self):
+        source = self.javascript_function("renderPreferences")
+        self.assertIn("settings.prefs.paused", source)
+
+    def test_every_new_i18n_key_exists_in_both_languages(self):
+        for key in ("settings.workflow.heading", "settings.workflow.codex", "settings.workflow.claude",
+                    "settings.workflow.desc.codex", "settings.workflow.desc.claude", "settings.workflow.live",
+                    "settings.prefs.paused", "account.delegation.off"):
+            self.i18n(key)
+
+
+class HermesParentGuardTests(unittest.TestCase):
+    """Terra's review of 992d706.
+
+    1. Whether Hermes's parent is the router's own was decided by model name alone,
+       so the same model name served by a different provider counted as the router's.
+       Name and provider must both match a router tier.
+    2. The guard and the write read ~/.hermes/config.yaml separately, so a change
+       between the two could be overwritten. One read per save, and a write refuses
+       when the file changed since that read.
+    """
+
+    CONFIG = {
+        "models": {"terra": "gpt-5.6-terra", "luna": "gpt-5.6-luna", "qwen": "qwen3.7-plus"},
+        "callable": {"terra": True, "luna": True, "qwen": True},
+        "tier_providers": {"terra": "openai-codex", "luna": "openai-codex", "qwen": "qwen-token"},
+        "default_model": "terra",
+    }
+
+    def _config(self):
+        import copy
+
+        return copy.deepcopy(self.CONFIG)
+
+    def _hermes(self, directory, default, provider):
+        target = Path(directory) / "config.yaml"
+        target.write_text(f"model:\n  default: {default}\n  provider: {provider}\n", encoding="utf-8")
+        return target
+
+    def test_a_router_model_name_on_another_provider_is_not_the_routers_parent(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openrouter")
+            before = target.read_text(encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_default_model("luna", config))
+            self.assertEqual(target.read_text(encoding="utf-8"), before)
+        self.assertEqual(config["default_model"], "luna")
+
+    def test_a_parent_on_its_own_tiers_provider_still_follows_the_default(self):
+        """A Qwen parent on qwen-token is one the router put there (default_model: qwen
+        writes exactly that), so it still follows the router's default tier."""
+        config = self._config()
+        config["default_model"] = "qwen"
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "qwen3.7-plus", "qwen-token")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_default_model("terra", config))
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+        self.assertEqual((written["model"]["default"], written["model"]["provider"]),
+                         ("gpt-5.6-terra", "openai-codex"))
+
+    def test_a_parent_with_no_provider_is_judged_by_its_name(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text("model:\n  default: gpt-5.6-terra\n", encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_default_model("luna", config))
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+        self.assertEqual(written["model"]["default"], "gpt-5.6-luna")
+
+    def test_a_default_model_save_reads_the_hermes_config_once(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
+            real = web_viewer._read_hermes_config
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_read_hermes_config", side_effect=real) as reads:
+                self.assertIsNone(web_viewer._save_default_model("luna", config))
+        self.assertEqual(reads.call_count, 1)
+
+    def _changing_read(self, target, change):
+        real = web_viewer._read_hermes_config
+
+        def read():
+            snapshot = real()
+            target.write_text(change, encoding="utf-8")
+            import os
+            os.utime(target, ns=(target.stat().st_atime_ns, target.stat().st_mtime_ns + 1_000_000))
+            return snapshot
+        return read
+
+    def test_a_hermes_config_changed_mid_save_is_not_overwritten(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
+            concurrent = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_read_hermes_config", side_effect=self._changing_read(target, concurrent)):
+                error = web_viewer._save_default_model("luna", config)
+            self.assertIn("changed", error)
+            self.assertEqual(target.read_text(encoding="utf-8"), concurrent)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
+        self.assertEqual(config["default_model"], "terra", "a refused save stores nothing")
+
+    def test_a_fallback_chain_save_refuses_the_same_way(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "claude-opus-5", "anthropic")
+            concurrent = "model:\n  default: claude-opus-5\n  provider: anthropic\nfallback_providers: []\n"
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_read_hermes_config", side_effect=self._changing_read(target, concurrent)), \
+                 patch.object(web_viewer, "_hermes_chain", return_value=[]):
+                error = web_viewer._save_hermes_fallback({"orchestrator": []}, self._config())
+            self.assertIn("changed", error)
+            self.assertEqual(target.read_text(encoding="utf-8"), concurrent)
+
+    def test_a_failed_hermes_write_fails_the_save_and_stores_nothing(self):
+        """Codex review of 992d706: the write error was swallowed, the router saved the
+        new default and answered success while Hermes stayed on the old parent."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_write_hermes_config", side_effect=PermissionError("read-only")):
+                error = web_viewer._save_default_model("luna", config)
+        self.assertIn("read-only", error)
+        self.assertEqual(config["default_model"], "terra")
