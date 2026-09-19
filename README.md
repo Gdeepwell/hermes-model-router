@@ -148,8 +148,17 @@ for a model outside its own tier map, so nothing here rewrites them — but it d
 record them. Invisible to the router had meant invisible to the operator: a
 Claude worker produced no card, no count and no line in the per-account load, so
 the one account whose usage most needed watching was the one nothing reported on.
-They now appear as `opus5` and `sonnet5` alongside the other tiers, and their
-`callable` switches govern whether the conductor is offered them at all.
+They now appear as `opus5`, `sonnet5` and `haiku` alongside the other tiers, and
+their `callable` switches govern whether the conductor is offered them at all.
+
+**Haiku is a third Claude target, reachable only through Claude delegation.**
+It has no `delegation.targets` entry in Hermes's config, so `delegate_task` cannot
+start it; `delegate_claude(tier="haiku")` can (see
+[Claude delegation and the usage guard](#claude-delegation-and-the-usage-guard)).
+While that tool is live, `haiku` joins the conductor's target list with the
+advice "quick lookups", and it can be named in a preference chain like any other
+target — typically for `explore`. With Claude delegation off it is never offered,
+whatever its `callable` switch says.
 
 When both are offered the contract used to add "use `sonnet5` by default and
 reserve `opus5` for consequential or hard work". That sentence dates from the
@@ -236,11 +245,12 @@ differently because the difference is not cosmetic:
 - **A tier of the router's own provider** (`luna`, `spark`, `terra`, `sol`) is a
   real route. The router rewrites the model and the chain also replaces the
   built-in fallback order for that kind.
-- **Anything on another account** (`opus5`, `sonnet5`, `qwen`) cannot be routed
+- **Anything on another account** (`opus5`, `sonnet5`, `haiku`, `qwen`) cannot be routed
   to at all: `route_llm_request` runs after the provider is chosen, so it can only
   swap models inside one provider. Such an entry is passed to the conductor as a
-  delegation instruction instead — it reaches work through `delegate_task`, and
-  the conductor is the one that has to honour it.
+  delegation instruction instead — it reaches work through `delegate_task`
+  (or `delegate_claude` for a Claude tier under Claude delegation), and the
+  conductor is the one that has to honour it.
 
 A kind with no chain keeps its built-in route, so configuring nothing changes
 nothing. A kind with a chain overrides that route **completely**, including the
@@ -521,6 +531,7 @@ callable:
   sol: true
   opus5: true
   sonnet5: true
+  haiku: true    # offered only while Claude delegation is live
   qwen: true
 
 # Which account each tier spends. Claude tiers are delegation targets rather
@@ -532,6 +543,7 @@ tier_providers:
   sol: openai-codex
   opus5: anthropic
   sonnet5: anthropic
+  haiku: anthropic
   qwen: qwen-token
 
 # Default parent model
@@ -542,6 +554,7 @@ default_model: terra
 preferences:
   review: [sonnet5, terra]
   design: [sol, opus5]
+  explore: [spark, luna, haiku]   # haiku needs Claude delegation
 
 # Delegation limits (in ~/.hermes/config.yaml)
 delegation:
@@ -669,6 +682,12 @@ claude_delegation:
     sonnet: claude-sonnet-5
     opus: claude-opus-5
 ```
+
+One tier per call: `haiku` for quick lookups and exploration, `sonnet` as the
+everyday worker, `opus` for hard or consequential work. They count on the router's
+side as `haiku`, `sonnet5` and `opus5`, all on the `anthropic` account, and Haiku
+is reachable only this way (it has no `delegate_task` target). Clearing a tier's
+model in `tiers` removes that tier from what the conductor is offered.
 
 The tool is registered whenever the host has the delegation API it needs, and
 offered only while `enabled` is on and a Claude target is callable (see
