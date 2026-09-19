@@ -33,10 +33,13 @@ is what keeps a single quota from carrying everything.
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
 | `opus5` | Claude Opus 5 | Claude subscription | Delegation target, off by default (see below) |
 | `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, off by default (see below) |
+| `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude`, so offered only under Claude delegation |
 
-`qwen`, `opus5` and `sonnet5` are delegation targets rather than routable tiers:
-the middleware cannot move a call across providers, so they are reached by a
-plan choosing them with `model:`, not by the router switching to them mid-turn.
+`qwen`, `opus5`, `sonnet5` and `haiku` are delegation targets rather than routable
+tiers: the middleware cannot move a call across providers, so they are reached by a
+plan choosing them, not by the router switching to them mid-turn. The first three
+are chosen with `model:`; `haiku` has no `delegate_task` target and is reached with
+`delegate_claude(tier="haiku")` (see [Claude targets](#claude-targets)).
 Any tier in `models` can hold the orchestrator role, including one on another
 account — that choice is made at spawn time, where the provider is still open.
 
