@@ -2,7 +2,7 @@
 
 Routing and delegation for Hermes Agent. It keeps the user-facing conversation on one durable parent model, lets that parent's plan choose which model runs each delegated worker, and records every decision in a privacy-safe audit log.
 
-The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and a Claude subscription (Opus 5/Sonnet 5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
+The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and a Claude subscription (Opus 5/Sonnet 5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
 
 ## Install
 
@@ -31,15 +31,18 @@ is what keeps a single quota from carrying everything.
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
 | `sol` | GPT-5.6 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
-| `opus5` | Claude Opus 5 | Claude subscription | Delegation target, off by default (see below) |
-| `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, off by default (see below) |
+| `opus5` | Claude Opus 5 | Claude subscription | Delegation target for hard or consequential work (see below) |
+| `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
 | `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude`, so offered only under Claude delegation |
 
 `qwen`, `opus5`, `sonnet5` and `haiku` are delegation targets rather than routable
 tiers: the middleware cannot move a call across providers, so they are reached by a
-plan choosing them, not by the router switching to them mid-turn. The first three
-are chosen with `model:`; `haiku` has no `delegate_task` target and is reached with
-`delegate_claude(tier="haiku")` (see [Claude targets](#claude-targets)).
+plan choosing them, not by the router switching to them mid-turn. Under
+`workflow: codex` the first three are chosen with `model:` on `delegate_task`.
+Under `workflow: claude_delegation` the three Claude targets are reached with
+`delegate_claude(tier=...)` instead, and `haiku` only that way, since it has no
+`delegate_task` target (see [Workflow switch](#workflow-switch) and
+[Claude targets](#claude-targets)).
 Any tier in `models` can hold the orchestrator role, including one on another
 account — that choice is made at spawn time, where the provider is still open.
 
@@ -54,7 +57,7 @@ rather than applied behind it:
 ```yaml
 peer_groups:
   heavy: [terra, opus5, qwen, sonnet5]
-  light: [luna, spark]
+  light: [luna, spark, haiku]
 ```
 
 The contract names the groups, and an unavailable target is annotated with its
@@ -460,10 +463,12 @@ has installed.
 Three tabs: **Model Router**, **Settings**, and an embedded **Hermes Command
 Center**. The interface is available in English and Hungarian.
 
-The router tab opens with a counter card per tier — including the two Claude
-tiers, whose children the router records without routing them — then routing
-decisions grouped by prompt, each expandable into its individual API calls, with
-a grouped/raw toggle, tier filters and search.
+The router tab opens with a counter card per tier, grouped by account with a
+usage bar for each account — including the three Claude tiers, whose children the
+router records without routing them — then routing decisions grouped by prompt,
+each expandable into its individual API calls, with a grouped/raw toggle, tier
+filters and search. Every prompt row carries delegation chips saying which account
+(Codex or Claude) took each delegation of that turn.
 
 Below that, the live agent tree. It reads Hermes's durable delegation registry
 and the `turn_lifecycle` table, and nests running and recent children under their
@@ -477,24 +482,32 @@ call rather than routing it, because the model belongs to another provider.
 
 Everything refreshes every 3 seconds.
 
-The Settings tab holds the callability switches, the default orchestrator, the
-per-work-kind preference chains described above, and the interface language. It
-shows availability alongside the switches. A tier that is
-enabled but cooling carries a pill with the remaining time and the reason, since
-the switch alone would not explain why traffic went elsewhere; underneath, the
-per-account call counts for the same window the conductor is given. Both are read
-through the router's own helpers rather than recomputed, so the panel and the
-routing decision cannot disagree.
+The Settings tab opens with the **Workflow** section: the Codex / Claude
+delegation switch (see [Workflow switch](#workflow-switch)) and, under Claude
+delegation, the load-balancing switch and its two thresholds. Below it is **one
+card per account**: its models with their on/off switches, weekly and 5-hour
+usage bars with a Refresh button, the soft/hard limits, the Claude card's
+delegation state (`delegate_claude live`), and the account's recent call count
+for the same window the conductor is given. A tier switched off keeps its switch
+there, so it can be turned back on. A tier that is enabled but cooling carries a
+pill with the remaining time and the reason, since the switch alone would not
+explain why traffic went elsewhere. Then come the default orchestrator, the
+per-work-kind preference chains described above (each entry shows its account and
+that account's soft/closed state), the Hermes fallback chains, and the interface
+language. Everything is read through the router's own helpers rather than
+recomputed, so the panel and the routing decision cannot disagree.
 
 The server binds to `127.0.0.1` only, so it is not reachable from the local
-network. Every setting on that tab writes to `router_config.yaml` and takes effect
+network. Every setting on that tab writes to `router_config.local.yaml` (see
+[Configuration](#configuration)) and takes effect
 on the **next routed call, with no restart** — the config is re-read on every
 decision rather than cached. Changing the plugin's *code* does need a restart of
 the Hermes process that loaded it.
 
-One caveat: those writes go through a plain YAML dump, so **comments in
-`router_config.yaml` are lost** the first time you save from the dashboard. Keep
-anything you need to remember in this README rather than in the config.
+The shipped `router_config.yaml` is never written by the dashboard. Saves into
+the local file keep its comments and layout when `ruamel.yaml` is installed in the
+venv the dashboard runs with; without it they fall back to a plain YAML dump,
+which drops comments.
 
 ## Configuration
 
@@ -549,7 +562,7 @@ tier_providers:
   haiku: anthropic
   qwen: qwen-token
 
-# Default parent model
+# Default parent model (the shipped file has qwen)
 default_model: terra
 
 # Preferred models per kind of work, best first (see the section above).
@@ -574,7 +587,7 @@ logging:
 # plans the work and delegates the leaves.
 orchestration:
   enabled: true
-  min_chars: 60        # too short to decompose; skip the planner round trip
+  min_chars: 12        # too short to decompose; skip the planner round trip
   max_tasks: 2         # must not exceed delegation.max_concurrent_children
   rescue_min_calls: 6  # a turn this deep with no worker gets one late checkpoint
 
@@ -677,7 +690,7 @@ router's own tier map:
 
 ```yaml
 claude_delegation:
-  enabled: false        # off by default; flip on to register the tool
+  enabled: false        # kept in step with `workflow` by the dashboard's switch
   default_tier: sonnet  # used when a call to delegate_claude names no tier
   log_path: ""          # JSONL audit log: registration + one line per delegate_claude call
   tiers:                 # model each short tier name actually starts
@@ -804,8 +817,8 @@ again, and the next leaf spends its retries rediscovering the same wall.
 
 A usage quota also belongs to the **account**, not the model. `tier_providers`
 says which account each tier spends, so one tier's quota 429 benches its siblings
-for the same duration — all four Codex tiers together, or Opus and Sonnet
-together. Targets on other accounts are untouched, which is the point: the
+for the same duration — all four Codex tiers together, or Opus, Sonnet and
+Haiku together. Targets on other accounts are untouched, which is the point: the
 planner should be reaching for them.
 
 ### A worker stopped by a quota comes back as a re-dispatch
@@ -830,6 +843,10 @@ Re-dispatch each one with the model: parameter named above and tell the retry to
 continue from what the stopped worker already committed in its worktree instead
 of starting over. Do not re-plan or narrow the goal: only the account changed.
 ```
+
+Under Claude delegation the target is named by the call that reaches it:
+`re-dispatch with delegate_claude(tier="opus")` for a Claude target, and
+`delegate_task (goal prefix [terra])` for the others.
 
 When the whole chain is cooling it says what to wait for and for how long, so
 waiting stays a legible option instead of a guess.
@@ -1007,6 +1024,16 @@ in its goal — it does not share the conversation:
  "model": "sonnet5"}
 ```
 
+Under `workflow: claude_delegation` the same leaf goes through `delegate_claude`,
+which takes the same `tasks` shape plus one tier for the whole call:
+
+```python
+delegate_claude(tier="sonnet", tasks=[
+  {"goal": "Diagnose and fix the fullscreen calendar card in /path/to/repo. …",
+   "context": "…"},
+])
+```
+
 ### A goal carries what the worker cannot see
 
 That rule is not specific to Claude. **Every** delegated worker starts at
@@ -1042,7 +1069,7 @@ move: it is global, so it also widens every Codex leaf on the shared quota.
 **These requirements ride on the `delegate_task` schema, not on the message.**
 They used to travel only inside the forced preflight, so a turn that skipped it
 delegated with nobody having been told what a goal must carry — and a root prompt
-shorter than `orchestration.min_chars` (60) skips it, creating no conductor at
+shorter than `orchestration.min_chars` (12 in the shipped config) skips it, creating no conductor at
 all. A twelve-character `inplementald` produced exactly that: a whole-feature
 goal with no worktree, branch or base commit in it.
 
@@ -1091,6 +1118,7 @@ the gate instead:
 | `no_delegate_task_tool` | no delegation tool in the request — `tools_seen` lists what was there |
 | `sol_preflight_disabled` | `sol_opus5_preflight.enabled: false` |
 | `delegation_completion_delivery` | the turn is delivering a finished child's result |
+| `explicit_delegation_tool` | your message names `delegate_claude` or `delegate_task`, so the forced planning call steps aside and your choice stands |
 
 `tools_seen` exists because `no_delegate_task_tool` reads identically whether the
 request had no tools at all, the wrong wire shape, or a name the router did not
