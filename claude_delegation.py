@@ -18,11 +18,13 @@ import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import usage_guard
 
@@ -42,11 +44,44 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 _ACTIVE = False
+# Set by the router for the request it is routing: whether *this* request can use
+# delegate_claude. A session's tool list is fixed when its agent is built, so the
+# live workflow and the tools the request actually carries can disagree; the
+# request is what the conductor sees, so it decides.
+_REQUEST_ACTIVE: ContextVar[Optional[bool]] = ContextVar("claude_delegation_request_active", default=None)
+# The last availability the router saw, so a flip can drop Hermes's tool-list memo.
+_LAST_AVAILABLE: Optional[bool] = None
 
 
 def is_active() -> bool:
-    """True once ``delegate_claude`` is registered in this process."""
-    return _ACTIVE
+    """Whether Claude delegation may be offered right now.
+
+    Inside a routed request: the request's own answer (workflow allows it AND the
+    request offers the tool). Outside one: whether the tool is registered.
+    """
+    scoped = _REQUEST_ACTIVE.get()
+    return _ACTIVE if scoped is None else scoped
+
+
+@contextmanager
+def request_scope(active: bool) -> Iterator[None]:
+    token = _REQUEST_ACTIVE.set(bool(active))
+    try:
+        yield
+    finally:
+        _REQUEST_ACTIVE.reset(token)
+
+
+# Hermes's Tool Search defers plugin tools: a live parent request carries only the
+# tool_search/tool_describe/tool_call bridge, and delegate_claude is reached through
+# tool_call. Whether it is in that session's deferred scope follows tool_available().
+_BRIDGE_CALL_NAMES = frozenset({"tool_call", "mcp__tool_call"})
+
+
+def offered(tool_names: Iterable[str]) -> bool:
+    """Whether a request can reach delegate_claude: listed itself, or through tool_call."""
+    names = set(tool_names)
+    return bool(names & ({TOOL_NAME, f"mcp__{TOOL_NAME}"} | _BRIDGE_CALL_NAMES))
 
 
 def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -100,15 +135,57 @@ def host_check() -> Tuple[bool, str]:
     return True, ""
 
 
-def registration_block(cfg: Dict[str, Any]) -> str:
-    """Why ``delegate_claude`` must not be registered, or "" when it may be."""
+def availability_block(cfg: Dict[str, Any]) -> str:
+    """Why ``delegate_claude`` must not be offered now, or "" when it may be.
+
+    Config only, so it is cheap enough to run on every tool-list build. The
+    router's ``_load_config`` has already applied ``workflow: codex``, which turns
+    ``claude_delegation.enabled`` off.
+    """
     if not delegation_config(cfg).get("enabled"):
         return "claude_delegation.enabled is false"
     switches = cfg.get("callable") or {}
     if not any(switches.get(target) is True for target in TARGET_FOR_TIER.values()):
         return "every Claude target is switched off in `callable`"
-    ok, why = host_check()
-    return "" if ok else why
+    return ""
+
+
+def tool_available() -> bool:
+    """delegate_claude's check_fn: Hermes offers the tool only while this is True."""
+    from . import _load_config
+
+    return availability_block(_load_config()) == ""
+
+
+def note_availability(available: bool) -> None:
+    """Drop Hermes's memoized tool list when availability flips.
+
+    ``model_tools`` memoizes whole tool lists without re-running check_fns, so a
+    flipped workflow would otherwise reach new sessions only after a restart.
+    ``_clear_tool_defs_cache`` is private upstream; without it, new sessions
+    still follow the switch once the memo is rebuilt for another reason.
+    """
+    global _LAST_AVAILABLE
+    previous, _LAST_AVAILABLE = _LAST_AVAILABLE, bool(available)
+    if previous is None or previous == _LAST_AVAILABLE:
+        return
+    try:
+        import model_tools
+
+        clear = getattr(model_tools, "_clear_tool_defs_cache", None)
+        if callable(clear):
+            clear()
+    except Exception as exc:
+        _logger.debug("claude_delegation: could not clear the host tool-list memo: %s", exc)
+
+
+def _uncached(fn: Callable[[], bool]) -> Callable[[], bool]:
+    """Exempt a check_fn from Hermes's 30-second TTL cache, where the host supports it."""
+    try:
+        from tools.registry import no_cache_check_fn
+    except Exception:
+        return fn
+    return no_cache_check_fn(fn)
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +407,9 @@ def _dispatch(args: Dict[str, Any]) -> str:
     cfg = _load_config()
     settings = delegation_config(cfg)
     if not settings.get("enabled"):
+        if str(cfg.get("workflow") or "").strip().casefold() == "codex":
+            return _error("Claude delegation is off: router_config.yaml is on workflow: codex. "
+                          "Use delegate_task, which runs on the Codex route.")
         return _error("Claude delegation is switched off in router_config.yaml.")
     requested = str(args.get("tier") or settings.get("default_tier") or "sonnet").strip().casefold()
     if requested not in TIERS:
@@ -414,20 +494,25 @@ def _exempt_from_sequential_deadline() -> bool:
 
 
 def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
-    """Register delegate_claude when Claude delegation is on and the host can carry it."""
+    """Register delegate_claude whenever the host can carry it.
+
+    Registered even while the workflow keeps it off: its check_fn decides, per
+    tool-list build, whether Hermes offers it, so the switch needs no restart.
+    """
     global _ACTIVE
     if cfg is None:
         from . import _load_config
         cfg = _load_config()
-    reason = registration_block(cfg)
-    if reason:
+    ok, reason = host_check()
+    if not ok:
         _ACTIVE = False
         _logger.info("claude_delegation: delegate_claude not registered: %s", reason)
         _log(cfg, {"event": "registration", "registered": False, "reason": reason})
         return False
     try:
         handle = ctx.register_tool(name=TOOL_NAME, toolset="delegation", schema=build_schema(cfg),
-                                   handler=handle_delegate_claude, description=_DESCRIPTION, emoji="🪶")
+                                   handler=handle_delegate_claude, check_fn=_uncached(tool_available),
+                                   description=_DESCRIPTION, emoji="🪶")
     except Exception as exc:
         _ACTIVE = False
         reason = f"registering delegate_claude failed: {exc}"
@@ -442,5 +527,6 @@ def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
         return False
     _ACTIVE = True
     _exempt_from_sequential_deadline()
-    _log(cfg, {"event": "registration", "registered": True, "reason": ""})
+    _log(cfg, {"event": "registration", "registered": True, "reason": "",
+               "available": availability_block(cfg) == ""})
     return True

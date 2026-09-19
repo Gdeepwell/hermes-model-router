@@ -164,8 +164,13 @@ class ExplicitDelegationMentionTests(unittest.TestCase):
 
     def _route(self, text, tool_name="delegate_task"):
         request = _delegating_request("claude-sonnet-5", tool_name, text=text)
+        # A live session with Claude delegation carries delegate_claude next to
+        # delegate_task, and the router offers it only then.
+        request["tools"].append({"type": "function", "name": "delegate_claude",
+                                 "parameters": {"type": "object", "properties": {}}})
         with tempfile.TemporaryDirectory() as d, \
-             patch("model_router._load_config", return_value=_cfg(d)), \
+             patch("model_router._load_config", return_value=_cfg(
+                 d, claude_delegation={"enabled": True}, callable={**CALLABLE, "haiku": True})), \
              patch("model_router._log_decision"), \
              patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")), \
              patch.object(claude_delegation, "_ACTIVE", True):

@@ -20,7 +20,7 @@ from model_router import claude_delegation
 from model_router.claude_delegation import (
     TARGET_FOR_TIER,
     TIER_FOR_TARGET,
-    registration_block,
+    availability_block,
     target_for_model,
     target_names,
     tier_model,
@@ -86,25 +86,20 @@ class DelegationConfigTests(unittest.TestCase):
         self.assertIsNone(target_for_model("", _cfg()))
 
 
-class RegistrationBlockTests(unittest.TestCase):
-    def test_a_disabled_wing_does_not_register(self):
+class AvailabilityBlockTests(unittest.TestCase):
+    def test_a_disabled_wing_is_not_offered(self):
         cfg = _cfg()
         cfg["claude_delegation"]["enabled"] = False
-        self.assertIn("enabled", registration_block(cfg))
+        self.assertIn("enabled", availability_block(cfg))
 
-    def test_every_claude_target_switched_off_does_not_register(self):
+    def test_every_claude_target_switched_off_is_not_offered(self):
         cfg = _cfg()
         for target in ("haiku", "sonnet5", "opus5"):
             cfg["callable"][target] = False
-        self.assertIn("switched off", registration_block(cfg))
+        self.assertIn("switched off", availability_block(cfg))
 
-    def test_a_host_without_the_api_does_not_register(self):
-        with patch.object(claude_delegation, "host_check", return_value=(False, "delegate_task lacks credentials_cfg")):
-            self.assertIn("credentials_cfg", registration_block(_cfg()))
-
-    def test_an_enabled_wing_on_a_capable_host_registers(self):
-        with patch.object(claude_delegation, "host_check", return_value=(True, "")):
-            self.assertEqual(registration_block(_cfg()), "")
+    def test_an_enabled_wing_is_offered(self):
+        self.assertEqual(availability_block(_cfg()), "")
 
 
 from model_router import usage_guard  # noqa: E402
@@ -287,11 +282,10 @@ class RegisterTests(unittest.TestCase):
         self.assertIs(kwargs["handler"], handle_delegate_claude)
         self.assertTrue(claude_delegation.is_active())
 
-    def test_a_disabled_wing_registers_nothing(self):
+    def test_a_host_without_the_api_registers_nothing(self):
         ctx = MagicMock()
-        cfg = _cfg()
-        cfg["claude_delegation"]["enabled"] = False
-        self.assertFalse(claude_delegation.register(ctx, cfg))
+        with patch.object(claude_delegation, "host_check", return_value=(False, "delegate_task lacks credentials_cfg")):
+            self.assertFalse(claude_delegation.register(ctx, _cfg()))
         ctx.register_tool.assert_not_called()
         self.assertFalse(claude_delegation.is_active())
 
@@ -326,17 +320,18 @@ class RegisterTests(unittest.TestCase):
             log = Path(directory) / "claude-delegation.jsonl"
             cfg = _cfg()
             cfg["claude_delegation"]["log_path"] = str(log)
-            cfg["claude_delegation"]["enabled"] = False
-            claude_delegation.register(MagicMock(), cfg)
+            with patch.object(claude_delegation, "host_check", return_value=(False, "delegate_task lacks credentials_cfg")):
+                claude_delegation.register(MagicMock(), cfg)
             with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
                  patch.object(claude_delegation, "_independent_completions", return_value=False), \
                  patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=True):
-                cfg["claude_delegation"]["enabled"] = True
+                cfg["claude_delegation"]["enabled"] = False
                 claude_delegation.register(MagicMock(), cfg)
             lines = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([(l["event"], l["registered"]) for l in lines],
                          [("registration", False), ("registration", True)])
-        self.assertIn("enabled is false", lines[0]["reason"])
+        self.assertIn("credentials_cfg", lines[0]["reason"])
+        self.assertFalse(lines[1]["available"], "registered, but switched off until the config allows it")
 
 
 class SequentialDeadlineExemptionTests(unittest.TestCase):
@@ -439,9 +434,12 @@ class ShippedConfigTests(unittest.TestCase):
         path = Path(model_router.__file__).resolve().parent / "router_config.yaml"
         self.cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    def test_the_wing_ships_enabled_with_its_files(self):
+    def test_the_wing_ships_in_step_with_the_workflow_and_with_its_files(self):
+        # router_config.yaml is also the live config, and the dashboard's Workflow
+        # switch keeps `enabled` in step with it -- so either workflow is valid here.
         settings = self.cfg["claude_delegation"]
-        self.assertTrue(settings["enabled"])
+        self.assertIn(self.cfg.get("workflow", "claude_delegation"), ("claude_delegation", "codex"))
+        self.assertEqual(settings["enabled"], self.cfg.get("workflow", "claude_delegation") == "claude_delegation")
         self.assertEqual(settings["tiers"], CLAUDE_DELEGATION["tiers"])
         self.assertEqual(settings["default_tier"], "sonnet")
         self.assertNotIn("usage_guard", settings)

@@ -1,4 +1,10 @@
 enabled: true
+# Which workflow the router runs. claude_delegation: Claude workers next to Codex
+# through delegate_claude, routed by the preferences below. codex: the original
+# workflow -- Codex does the work through delegate_task, Opus stays available as
+# the Hermes parent, no delegate_claude, and the built-in routes apply (the
+# preferences are kept here, just not used). Read live: no restart needed.
+workflow: claude_delegation
 provider: openai-codex
 models:
   luna: gpt-5.6-luna
@@ -20,7 +26,7 @@ callable:
   opus5: true
   sonnet5: true
   haiku: true
-  qwen: true
+  qwen: false
 # Preferred models per kind of work, best first. The router takes the first entry
 # that is callable; if that entry is a Codex tier it becomes the route, and if it is
 # an external account (opus5, sonnet5, qwen) it becomes a delegation recommendation
@@ -30,13 +36,13 @@ callable:
 # route completely, including the safety defaults (design/sensitive/critical), so
 # the order you write is the order that applies.
 preferences:
-  design:    [sol, opus5]
-  code:      [terra, sonnet5]
-  explore:   [spark, luna, haiku]
-  review:    [sonnet5, opus5, terra]
+  design: [sol, opus5]
+  code: [terra, sonnet5]
+  explore: [spark, luna, haiku]
+  review: [sonnet5, opus5, terra]
   sensitive: [opus5, sol]
-  critical:  [opus5, sol]
-  long:      [sol, sonnet5]
+  critical: [opus5, sol]
+  long: [sol, sonnet5]
 #  design:    [sol, opus5, terra]
 #  code:      [terra, sol]
 #  explore:   [spark, luna, qwen]
@@ -53,7 +59,7 @@ fallbacks:
   sol: terra
   opus5: sol
   qwen: terra
-default_model: qwen
+default_model: terra
 coding_agent:
   enabled: false
   tier: opus5
@@ -183,7 +189,7 @@ usage_guard:
   state_path: ~/.hermes/state/model-router-usage.json
   accounts:
     anthropic:
-      soft_percent: 70
+      soft_percent: 80
       hard_percent: 90
       step_down: {opus5: sonnet5}
     openai-codex:
