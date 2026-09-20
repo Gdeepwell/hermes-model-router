@@ -474,3 +474,53 @@ class AccountMarkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForcedReadTests(unittest.TestCase):
+    """A human pressing Refresh is not a background poll.
+
+    ``read`` gates every fetch on ``cache_seconds`` (300s), so the dashboard's
+    Refresh button was a silent no-op for five minutes at a time: it returned
+    200 with the cached reading and the bars never moved. An explicit refresh
+    has to bypass the TTL that exists to throttle *automatic* reads.
+    """
+
+    def setUp(self):
+        usage_guard._reset_cache()
+        self.addCleanup(usage_guard._reset_cache)
+
+    def _fetchers(self, **readings):
+        return patch.dict(usage_guard.FETCHERS, {a: MagicMock(side_effect=r) for a, r in readings.items()})
+
+    def test_a_forced_read_fetches_inside_the_cache_window(self):
+        with self._fetchers(anthropic=[_reading(40), _reading(55)]):
+            first = usage_guard.read("anthropic", _cfg(), now=1000.0)
+            self.assertEqual(first.weekly, 40)
+            # Three seconds later -- far inside the 300s TTL.
+            forced = usage_guard.read("anthropic", _cfg(), now=1003.0, force=True)
+            self.assertEqual(usage_guard.FETCHERS["anthropic"].call_count, 2)
+            self.assertEqual(forced.weekly, 55)
+
+    def test_an_unforced_read_still_honours_the_cache_window(self):
+        with self._fetchers(anthropic=[_reading(40), _reading(55)]):
+            usage_guard.read("anthropic", _cfg(), now=1000.0)
+            usage_guard.read("anthropic", _cfg(), now=1003.0)
+            self.assertEqual(usage_guard.FETCHERS["anthropic"].call_count, 1)
+
+    def test_a_forced_read_retries_after_a_recent_failure(self):
+        """The failure backoff is throttling too; a human asking again overrides it."""
+        with self._fetchers(anthropic=[None, _reading(55)]):
+            self.assertIsNone(usage_guard.read("anthropic", _cfg(), now=1000.0))
+            forced = usage_guard.read("anthropic", _cfg(), now=1003.0, force=True)
+            self.assertEqual(usage_guard.FETCHERS["anthropic"].call_count, 2)
+            self.assertEqual(forced.weekly, 55)
+
+    def test_a_forced_read_that_fails_keeps_the_last_good_reading(self):
+        with self._fetchers(anthropic=[_reading(40), None]):
+            usage_guard.read("anthropic", _cfg(), now=1000.0)
+            self.assertIsNone(usage_guard.read("anthropic", _cfg(), now=1003.0, force=True))
+            # The bar should keep showing the last number it had, not go blank.
+            self.assertEqual(usage_guard.cached("anthropic", _cfg()).weekly, 40)
+
+    def test_an_account_without_a_fetcher_is_still_nothing_to_force(self):
+        self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0, force=True))

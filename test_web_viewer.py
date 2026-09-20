@@ -1504,7 +1504,7 @@ class AccountsApiTests(unittest.TestCase):
                 fetched_at=time.time(),
             )
 
-            def fake_read(account, cfg):
+            def fake_read(account, cfg, *, force=False):
                 # Mimics the real read()'s cache side effect, without a network call.
                 self.model_router.usage_guard._slot(account)["reading"] = reading
                 return reading
@@ -1525,6 +1525,10 @@ class AccountsApiTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     self.assertEqual(payload["account"]["usage"]["weekly"], 20.0)
                     mocked_read.assert_called_once()
+                    # The button is an explicit request, so it must not be
+                    # throttled by the TTL that paces background reads.
+                    self.assertTrue(mocked_read.call_args.kwargs.get("force"),
+                                    "the refresh endpoint must force a live read")
 
                     bad_request = urllib.request.Request(
                         f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=nope",
@@ -2506,3 +2510,40 @@ class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
         for key in ("settings.balance.label", "settings.balance.desc", "settings.balance.busy",
                     "settings.balance.margin", "settings.balance.window.5-hour", "settings.balance.window.tighter"):
             self.i18n(key)
+
+
+class RefreshButtonUsageTests(DashboardProbeMixin, unittest.TestCase):
+    """The toolbar Refresh button only ever re-read /api/entries and /api/agents,
+    so the usage % bars -- drawn by loadAccounts() off /api/config -- never moved
+    on a click. /api/config serves guard.cached(), so a re-render alone is not
+    enough either: a click has to force the live read that /api/usage/refresh does.
+    """
+
+    def test_a_dashboard_refresh_redraws_the_usage_bars(self):
+        self.assertIn("loadAccounts()", self.javascript_function("refreshDashboard"))
+
+    def test_a_click_forces_a_live_usage_read_first(self):
+        source = self.javascript_function("manualRefresh")
+        self.assertIn("refreshAllUsage()", source)
+        self.assertIn("refreshDashboard()", source)
+
+    def test_the_live_read_posts_to_the_usage_refresh_endpoint(self):
+        source = self.javascript_function("refreshAllUsage")
+        self.assertIn("/api/usage/refresh?account=", source)
+        self.assertIn("method:'POST'", source)
+        # Accounts with no usage source have nothing to read; asking 400s.
+        self.assertIn("has_usage_source", source)
+
+    def test_the_click_is_wired_to_the_manual_path_and_the_timer_is_not(self):
+        wiring = HTML[HTML.index("$('refresh').addEventListener"):]
+        wiring = wiring[:wiring.index("\n")]
+        self.assertIn("manualRefresh", wiring)
+        timer = HTML[HTML.index("if($('auto').checked)"):]
+        self.assertNotIn("manualRefresh", timer[:timer.index("\n")])
+
+    def test_the_handlers_never_hand_their_event_to_refreshDashboard(self):
+        """addEventListener passes an Event, which is truthy -- a bare function
+        reference would make any future argument silently arrive as the event."""
+        for wiring in ("$('last').addEventListener('change',", "$('refresh').addEventListener('click',"):
+            line = HTML[HTML.index(wiring) + len(wiring):]
+            self.assertTrue(line.startswith("()=>"), f"{wiring} passes the event through")

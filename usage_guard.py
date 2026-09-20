@@ -272,19 +272,26 @@ def cached(account: str, cfg: Dict[str, Any]) -> Optional[Reading]:
         return _newest(account, cfg)
 
 
-def read(account: str, cfg: Dict[str, Any], *, now: Optional[float] = None) -> Optional[Reading]:
-    """The current reading, fetching at most once per ``cache_seconds``; failures back off too."""
+def read(account: str, cfg: Dict[str, Any], *, now: Optional[float] = None,
+         force: bool = False) -> Optional[Reading]:
+    """The current reading, fetching at most once per ``cache_seconds``; failures back off too.
+
+    ``force`` skips both gates. They throttle *automatic* reads, so applying them
+    to someone pressing Refresh made the button a no-op for a whole period: it
+    answered from the cache and the bars never moved. An explicit refresh fetches.
+    """
     fetcher = FETCHERS.get(account)
     if fetcher is None:
         return None
     now = time.time() if now is None else now
     ttl = _ttl(cfg)
-    with _LOCK:
-        reading = _newest(account, cfg)
-        if reading is not None and now - reading.fetched_at < ttl:
-            return reading
-        if now - _slot(account)["failed_at"] < ttl:
-            return None
+    if not force:
+        with _LOCK:
+            reading = _newest(account, cfg)
+            if reading is not None and now - reading.fetched_at < ttl:
+                return reading
+            if now - _slot(account)["failed_at"] < ttl:
+                return None
     try:
         fresh = fetcher()
     except Exception:
