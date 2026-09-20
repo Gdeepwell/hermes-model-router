@@ -88,6 +88,9 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("--model", command)
         self.assertIn("opus", command)
+        # Opus results are accepted only when Claude reports canonical Opus, so
+        # do not ask the CLI to spend a rejected Sonnet fallback.
+        self.assertNotIn("--fallback-model", command)
         self.assertIn("--tools", command)
         self.assertEqual(command[command.index("--tools") + 1], "Read")
         self.assertIn("--disallowedTools", command)

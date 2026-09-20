@@ -197,11 +197,8 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         "claude", "-p", "--model", alias,
         "--max-turns", str(resolved_max_turns), "--max-budget-usd", "5.00", "--output-format", "json",
     ]
-    # Only Opus has a lower tier worth falling back to. Sonnet must not silently
-    # drop to a smaller model, because the result is accepted on the strength of
-    # the model that produced it.
-    if alias == "opus":
-        command += ["--fallback-model", "sonnet"]
+    # Results are accepted only when Claude reports the requested canonical tier.
+    # Do not request a lower-tier fallback that this contract must reject.
     # Read-only runs override the available tool set and additionally deny every
     # mutating or shell-capable built-in. `--allowedTools Read` alone can be
     # widened by an existing Claude Code permission profile, so it is not a
