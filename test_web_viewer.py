@@ -465,6 +465,20 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(self.i18n('status.refresh.short'), ('Refresh…', 'Frissítés…'))
         self.assertIn("setInterval(()=>{if($('auto').checked)refreshDashboard()},3000)", HTML)
 
+    def test_a_client_disconnect_does_not_escape_the_response_writer(self):
+        from unittest.mock import MagicMock
+
+        for error in (BrokenPipeError(32, "broken pipe"), ConnectionResetError(104, "reset")):
+            with self.subTest(error=type(error).__name__):
+                handler = object.__new__(Handler)
+                handler.send_response = MagicMock()
+                handler.send_header = MagicMock()
+                handler.end_headers = MagicMock()
+                handler.wfile = MagicMock()
+                handler.wfile.write.side_effect = error
+
+                handler._send(200, b"response", "application/json")
+
     def test_external_opus_child_card_has_badges_metrics_states_and_stable_run_disclosure(self):
         source = self.execution_source()
         self.assertIn("node.external", source)

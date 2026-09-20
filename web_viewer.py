@@ -2024,13 +2024,18 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b'{"error":"not found"}', "application/json")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The dashboard refreshes in parallel; closing or reloading the tab can
+            # cancel either response after the server has already started writing.
+            return
 
     def log_message(self, format: str, *args: object) -> None:
         return
