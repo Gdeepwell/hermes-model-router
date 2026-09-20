@@ -587,7 +587,7 @@ logging:
 # plans the work and delegates the leaves.
 orchestration:
   enabled: true
-  min_chars: 12        # too short to decompose; skip the planner round trip
+  min_chars: 1000      # too short to decompose; skip the planner round trip
   max_tasks: 2         # must not exceed delegation.max_concurrent_children
   rescue_min_calls: 6  # a turn this deep with no worker gets one late checkpoint
 
@@ -1069,7 +1069,7 @@ move: it is global, so it also widens every Codex leaf on the shared quota.
 **These requirements ride on the `delegate_task` schema, not on the message.**
 They used to travel only inside the forced preflight, so a turn that skipped it
 delegated with nobody having been told what a goal must carry — and a root prompt
-shorter than `orchestration.min_chars` (12 in the shipped config) skips it, creating no conductor at
+shorter than `orchestration.min_chars` (1000 in the shipped config) skips it, creating no conductor at
 all. A twelve-character `inplementald` produced exactly that: a whole-feature
 goal with no worktree, branch or base commit in it.
 
