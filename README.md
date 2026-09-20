@@ -1175,8 +1175,13 @@ cd "$RUN" && HOME="$RUN/home" PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
   "$AGENT/venv/bin/python" -m unittest discover -s model_router -t . -p 'test_*.py'
 ```
 
-`test_callable_and_qwen_guards.py` uses pytest and is reported as an import error
-where pytest is not installed.
+Every test is a `unittest.TestCase`, so the command above collects all 680. They
+were not always: `test_artifact_name.py`, `test_leaf_label_contract.py` and
+`test_callable_and_qwen_guards.py` held 25 tests written as module-level
+`def test_*` functions. unittest never collects those, so the first two reported
+`Ran 0 tests ... OK` — passing by running nothing — and the third needed pytest
+to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silently
+skipped here.
 
 ## Version
 
