@@ -66,6 +66,10 @@ fallbacks:
   opus5: sol
   qwen: terra
 default_model: qwen
+# Claude Code CLI bridge only, not `delegate_claude`: these settings govern the
+# subprocess path that runs `claude -p` in `default_repo` (or a configured alias).
+# The bridge's project/runtime behaviour is owned by the installed Claude Code CLI;
+# `claude_delegation` below instead starts ordinary Hermes provider children.
 coding_agent:
   enabled: false
   tier: opus5

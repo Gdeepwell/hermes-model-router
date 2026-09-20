@@ -145,9 +145,29 @@ and the delegated credential path that `_task_credentials` resolves per child.
 If you are on an older Hermes and see the 400, update before you buy credit.
 
 
-Meanwhile the CLI bridge below does draw on the plan: `claude -p` *is* Claude
-Code, so a `[sonnet-review]` or `[opus-review]` leaf works regardless. It is
-read-only and replaces a single call instead of running an agent.
+The native targets above are Hermes workers, not Claude Code processes. A normal
+`model: "opus5"` / `model: "sonnet5"` target is a Hermes child on the Anthropic
+provider; under Claude delegation, `delegate_claude` reaches the same kind of
+child by passing a pinned `provider: anthropic` / model route to Hermes's own
+`delegate_task`. Hermes resolves that child's credentials and supplies its usual
+worker lifecycle and tool set. That is why these are the normal choice for
+parallel delegated work, and why Haiku exists only there.
+
+Meanwhile the CLI bridge below invokes `claude -p` in the selected repository:
+that is a Claude Code process, not a native provider child. Its authentication,
+tools and project behaviour belong to the installed, authenticated CLI; this
+plugin only supplies the prompt, working directory and bounded tool flags. A
+`[sonnet-review]` or `[opus-review]` is therefore a read-only replacement for
+one call, not an agent. The same bridge can take the explicit `[opus]` / `[opus5]`
+coding override when `coding_agent.enabled` admits it; that is the bounded
+single-call coding path, configured by `coding_agent.default_repo`, aliases and
+its CLI limits, not a `delegate_claude` worker. Choose this path when the work
+specifically requires Claude Code project context or CLI-managed capabilities
+(for example a project's `CLAUDE.md`, skills, plugins, MCP servers or Claude Code
+tools); the native target does not start the CLI. This repository has not
+measured which of those features a particular Claude Code installation loads
+from `cwd`, so verify that setup in the target project rather than treating this
+paragraph as a capability probe.
 
 The router does not *route* these children — `route_llm_request` returns `None`
 for a model outside its own tier map, so nothing here rewrites them — but it does
