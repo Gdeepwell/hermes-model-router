@@ -51,7 +51,7 @@ GOAL = (
     "carry a Szamla Agent key / agent user-password, and where are they read?\n"
     "5. What does the runbook say about sandbox vs production issuing?\n\n"
     "Method: read-only inspection only. Do NOT modify, create, or delete any file. "
-    "Do NOT open, print, echo, or cat any .env, .env.local, or credential file "
+    "Do NOT open, print, echo, or dump any .env, .env.local, or credential file "
     "contents. Never print a secret value; if you encounter one, write [REDACTED]."
 )
 
