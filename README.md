@@ -1185,6 +1185,14 @@ skipped here.
 
 ## Version
 
+**1.14.1** — `test_root_parent_is_pinned_when_classifier_wants_sol_worker` no
+longer asserts that a pinned root parent skips the forced delegation preflight.
+That expectation encoded the `pin_root_parent` gate removed from
+`_orchestration_eligible` in c7d59eb (2026-09-07) because it stopped a stable
+parent from delegating; the test had been failing ever since, unseen while
+unittest silently skipped this file's pytest-style functions. The whole suite
+(680 tests) is green again.
+
 **1.14.0** — `router_config.yaml` ships the original Codex workflow again
 (`workflow: codex`, `default_model: qwen`, no preference chains, Claude
 delegation off), and an operator's settings live in a git-ignored

@@ -200,7 +200,13 @@ class CallableGuardTests(unittest.TestCase):
         self.assertEqual(routed["metadata"]["tier"], "terra")
         self.assertEqual(routed["request"]["model"], MODELS["terra"])
         self.assertIn("pinned", routed["reason"])
-        self.assertNotIn("tool_choice", routed["request"])
+        # A pinned root parent still gets the forced delegation preflight. This
+        # assertion used to read assertNotIn, encoding the pin_root_parent gate
+        # that c7d59eb (2026-09-07) deliberately removed from
+        # _orchestration_eligible -- that gate was exactly what stopped a stable
+        # parent from delegating at all. The pin decides *who answers the user*,
+        # not whether the turn delegates, so tool_choice belongs here.
+        self.assertEqual(routed["request"]["tool_choice"], "required")
 
     def test_route_log_uses_bounded_redacted_preview_when_policy_enabled(self):
         path = self.tmp_path / "router.jsonl"
