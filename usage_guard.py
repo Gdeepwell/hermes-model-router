@@ -24,7 +24,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 _logger = logging.getLogger("model_router.usage_guard")
 
@@ -141,21 +141,67 @@ def _iso(value: Any) -> Optional[str]:
 _ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
+def _status_code(exc: BaseException) -> Optional[int]:
+    """The HTTP status an exception carries, without importing the http client."""
+    code = getattr(getattr(exc, "response", None), "status_code", None)
+    return code if isinstance(code, int) else None
+
+
+def _anthropic_tokens() -> Iterator[str]:
+    """Tokens to try against the usage endpoint, best first.
+
+    ``resolve_anthropic_token`` reads the credential pool with ``refresh=False``
+    on purpose, so that diagnostic callers never mutate auth.json or hit the
+    network. A pool row that is not the Claude Code one -- a ``manual:hermes_pkce``
+    entry, say -- therefore shadows the refreshable Claude Code credentials with a
+    token that may already have expired, and the endpoint answers 401. The API
+    call path recovers by refreshing; this reader is not on that path, so it falls
+    back explicitly rather than reporting the account unreadable for as long as
+    the stale row sits in the pool (measured on this host 2026-09-21: the resolver
+    gave a 401 token while the Claude Code credentials were valid for hours).
+    """
+    from agent import anthropic_credentials as credentials
+
+    seen = set()
+    resolvers = (
+        getattr(credentials, "resolve_anthropic_token", None),
+        getattr(credentials, "_resolve_claude_code_token_from_credentials", None),
+    )
+    for resolve in resolvers:
+        if not callable(resolve):
+            continue
+        try:
+            token = (resolve() or "").strip()
+        except Exception:
+            continue
+        if token and token not in seen:
+            seen.add(token)
+            yield token
+
+
 def _fetch_anthropic() -> Optional[Reading]:
     """Read raw: the endpoint reports utilization as a percentage (live 2026-09-18:
     5.0 / 13.0), and Hermes's fetch_account_usage scales any value <= 1 by 100."""
     try:
         from agent.account_usage import _get_json
-        from agent.anthropic_credentials import resolve_anthropic_token
+        import agent.anthropic_credentials  # noqa: F401  -- _anthropic_tokens needs it
     except Exception:
         return None
-    token = (resolve_anthropic_token() or "").strip()
-    if not token:
-        return None
-    payload = _get_json(_ANTHROPIC_USAGE_URL, {
-        "Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
-        "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0",
-    }, timeout=15.0)
+    payload = None
+    for token in _anthropic_tokens():
+        try:
+            payload = _get_json(_ANTHROPIC_USAGE_URL, {
+                "Authorization": f"Bearer {token}", "Accept": "application/json",
+                "Content-Type": "application/json",
+                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0",
+            }, timeout=15.0)
+            break
+        except Exception as exc:
+            # Only a rejected token is worth another identity; anything else
+            # (network, 5xx, a changed endpoint) fails the read as before.
+            if _status_code(exc) not in (401, 403):
+                return None
+            _logger.debug("usage_guard: the Anthropic usage endpoint rejected a token; trying the next one")
     if not isinstance(payload, dict):
         return None
     week, session = payload.get("seven_day") or {}, payload.get("five_hour") or {}

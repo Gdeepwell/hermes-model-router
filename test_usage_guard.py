@@ -24,6 +24,18 @@ ACCOUNTS = ("anthropic", "openai-codex")
 STEP = {"anthropic": ("opus5", "sonnet5"), "openai-codex": ("sol", "terra")}
 
 
+class _HttpError(Exception):
+    """An HTTP failure shaped like httpx's: the guard reads .response.status_code."""
+
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.response = SimpleNamespace(status_code=status)
+
+
+def _unauthorized(status):
+    return _HttpError(status)
+
+
 def _cfg(state_path=""):
     return {"usage_guard": {
         "cache_seconds": 300, "state_path": state_path,
@@ -297,6 +309,60 @@ class FetcherTests(unittest.TestCase):
             usage_guard.FETCHERS["anthropic"]()
         headers = get_json.call_args.args[1]
         self.assertEqual(headers["Authorization"], "Bearer tok")
+
+    def test_a_rejected_token_falls_back_to_the_refreshing_resolver(self):
+        """A stale pool row must not make the account permanently unreadable.
+
+        resolve_anthropic_token reads the pool with refresh=False, so a
+        manual:hermes_pkce row can shadow valid Claude Code credentials with an
+        expired token. Observed on this host 2026-09-21: a 401 while the Claude
+        Code credentials were good for another six hours.
+        """
+        payload = {"five_hour": {"utilization": 16.0}, "seven_day": {"utilization": 2.0}}
+        answers = {"stale": _unauthorized(401), "fresh": payload}
+
+        def answer(url, headers, **kwargs):
+            result = answers[headers["Authorization"].removeprefix("Bearer ")]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="stale"), \
+             patch("agent.anthropic_credentials._resolve_claude_code_token_from_credentials",
+                   return_value="fresh", create=True), \
+             patch("agent.account_usage._get_json", side_effect=answer) as get_json:
+            reading = usage_guard.FETCHERS["anthropic"]()
+        self.assertIsNotNone(reading)
+        self.assertEqual((reading.weekly, reading.session), (2.0, 16.0))
+        self.assertEqual(get_json.call_count, 2)
+
+    def test_the_first_token_is_used_when_it_is_accepted(self):
+        payload = {"five_hour": {"utilization": 5.0}, "seven_day": {"utilization": 13.0}}
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
+             patch("agent.anthropic_credentials._resolve_claude_code_token_from_credentials",
+                   return_value="other", create=True) as fallback, \
+             patch("agent.account_usage._get_json", return_value=payload) as get_json:
+            usage_guard.FETCHERS["anthropic"]()
+        self.assertEqual(get_json.call_count, 1)
+        fallback.assert_not_called()
+
+    def test_one_identity_is_never_tried_twice(self):
+        """Both resolvers commonly return the same token; that is one attempt, not two."""
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="same"), \
+             patch("agent.anthropic_credentials._resolve_claude_code_token_from_credentials",
+                   return_value="same", create=True), \
+             patch("agent.account_usage._get_json", side_effect=_unauthorized(401)) as get_json:
+            self.assertIsNone(usage_guard.FETCHERS["anthropic"]())
+        self.assertEqual(get_json.call_count, 1)
+
+    def test_a_non_auth_failure_does_not_try_another_token(self):
+        """A network or 5xx failure is not about identity, so it fails the read at once."""
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="stale"), \
+             patch("agent.anthropic_credentials._resolve_claude_code_token_from_credentials",
+                   return_value="fresh", create=True), \
+             patch("agent.account_usage._get_json", side_effect=_unauthorized(503)) as get_json:
+            self.assertIsNone(usage_guard.FETCHERS["anthropic"]())
+        self.assertEqual(get_json.call_count, 1)
 
     def test_codex_uses_the_weekly_and_session_windows(self):
         reset = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)

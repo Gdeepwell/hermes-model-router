@@ -1185,6 +1185,15 @@ skipped here.
 
 ## Version
 
+**1.14.2** — The Anthropic usage reader no longer gives up on a 401. It now
+falls back to the refreshing Claude Code resolver, because
+`resolve_anthropic_token` reads the credential pool with `refresh=False` (so
+diagnostic callers never mutate auth.json), and a pool row that is not the
+Claude Code one can shadow valid credentials with an expired token. Measured
+on the operator's host 2026-09-21: the resolver returned a 401 token while the
+Claude Code credentials were valid for another six hours, which left the Claude
+usage guard and load balancing silently inert.
+
 **1.14.1** — `test_root_parent_is_pinned_when_classifier_wants_sol_worker` no
 longer asserts that a pinned root parent skips the forced delegation preflight.
 That expectation encoded the `pin_root_parent` gate removed from
