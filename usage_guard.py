@@ -26,6 +26,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional
 
+from .hermes_paths import hermes_path
+
 _logger = logging.getLogger("model_router.usage_guard")
 
 ACCOUNT_LABELS: Dict[str, str] = {"openai-codex": "Codex", "anthropic": "Claude", "qwen-token": "Qwen"}
@@ -266,7 +268,7 @@ def _ttl(cfg: Dict[str, Any]) -> float:
 
 def _state_path(cfg: Dict[str, Any]) -> Optional[Path]:
     configured = str(guard_config(cfg).get("state_path") or "").strip()
-    return Path(os.path.expanduser(configured)) if configured else None
+    return hermes_path(configured) if configured else None
 
 
 def _load_file(cfg: Dict[str, Any]) -> Dict[str, Reading]:

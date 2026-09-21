@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - Hermes includes PyYAML
 
 from . import claude_delegation
 from . import usage_guard
+from .hermes_paths import hermes_path
 
 _logger = logging.getLogger("model_router")
 
@@ -354,7 +355,7 @@ def _cooldown_path(cfg: Dict[str, Any]) -> Optional[Path]:
     silently writes to the real file and its state leaks into unrelated runs.
     """
     configured = str((cfg.get("cooldown") or {}).get("path") or "").strip()
-    return Path(os.path.expanduser(configured)) if configured else None
+    return hermes_path(configured) if configured else None
 
 
 def _read_cooldown_state(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1838,7 +1839,7 @@ def _log_decision(decision: RouteDecision, kwargs: Dict[str, Any], cfg: Dict[str
     configured = str(log_cfg.get("path") or "").strip()
     if not configured:
         return
-    path = Path(os.path.expanduser(configured))
+    path = hermes_path(configured)
     request = kwargs.get("request")
     event_kind = _lifecycle_event_kind(request)
     delegation_id = _completion_delegation_id(request) if event_kind == "async_delegation_completion" else ""
@@ -1881,7 +1882,7 @@ def _log_decision(decision: RouteDecision, kwargs: Dict[str, Any], cfg: Dict[str
 
 def _shadow_path(cfg: Dict[str, Any]) -> Path:
     shadow = cfg.get("shadow") or {}
-    return Path(os.path.expanduser(str(shadow.get("path", "~/.hermes/logs/spark-shadow-benchmark.jsonl"))))
+    return hermes_path(shadow.get("path", "~/.hermes/logs/spark-shadow-benchmark.jsonl"))
 
 
 def _shadow_event(cfg: Dict[str, Any], event: Dict[str, Any]) -> None:
@@ -1964,7 +1965,7 @@ def _completed_actual_spark_benchmark_count(events: Iterable[Dict[str, Any]], cf
         if event.get("event") == "child_completed" and event.get("child_session_id"):
             child_session_by_benchmark[benchmark_id] = str(event["child_session_id"])
 
-    route_path = Path(os.path.expanduser(str((cfg.get("logging") or {}).get("path", _DEFAULT_CONFIG["logging"]["path"]))))
+    route_path = hermes_path((cfg.get("logging") or {}).get("path", _DEFAULT_CONFIG["logging"]["path"]))
     try:
         route_events = [json.loads(line) for line in route_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     except Exception:
@@ -2150,7 +2151,7 @@ def _supports_forced_tool_choice(kwargs: Dict[str, Any], decision: RouteDecision
     return "token-plan." not in str(kwargs.get("base_url") or "").casefold()
 
 
-_HERMES_CONFIG_PATH = Path(os.path.expanduser("~/.hermes/config.yaml"))
+_HERMES_CONFIG_PATH = hermes_path("~/.hermes/config.yaml")
 
 
 def _hermes_delegation_target_names() -> Tuple[str, ...]:
@@ -2201,7 +2202,7 @@ def _recent_account_load(cfg: Dict[str, Any], window_seconds: int) -> Dict[str, 
     runs on the preflight path where a full scan would be felt.
     """
     log_cfg = cfg.get("logging") or {}
-    path = Path(os.path.expanduser(str(log_cfg.get("path") or "")))
+    path = hermes_path(log_cfg.get("path") or "")
     tier_providers = cfg.get("tier_providers") or {}
     if not str(path) or not tier_providers:
         return {}
@@ -3087,7 +3088,7 @@ def _prepare_sol_opus5_preflight(request: Dict[str, Any], plan_id: str) -> Dict[
 
 def _orchestration_path(cfg: Dict[str, Any]) -> Path:
     orchestration = cfg.get("orchestration") or {}
-    return Path(os.path.expanduser(str(orchestration.get("path", "~/.hermes/logs/terra-spark-orchestration.jsonl"))))
+    return hermes_path(orchestration.get("path", "~/.hermes/logs/terra-spark-orchestration.jsonl"))
 
 
 def _orchestration_event(cfg: Dict[str, Any], event: Dict[str, Any]) -> None:
@@ -4126,7 +4127,7 @@ def _recent_verified_opus5_route(cfg: Dict[str, Any]) -> bool:
     coding_cfg = cfg.get("coding_agent") or {}
     policy = coding_cfg.get("explicit_ui") or {}
     ttl = max(1, int(policy.get("require_recent_verified_probe_seconds", 86400) or 86400))
-    path = Path(os.path.expanduser(str((cfg.get("logging") or {}).get("path", _DEFAULT_CONFIG["logging"]["path"]))))
+    path = hermes_path((cfg.get("logging") or {}).get("path", _DEFAULT_CONFIG["logging"]["path"]))
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except Exception:

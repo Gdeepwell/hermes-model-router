@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import usage_guard
+from .hermes_paths import hermes_path
 
 _logger = logging.getLogger("model_router.claude_delegation")
 
@@ -340,7 +341,7 @@ def _log(cfg: Dict[str, Any], entry: Dict[str, Any]) -> None:
         return
     line = {"timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), **entry}
     try:
-        path = Path(os.path.expanduser(configured))
+        path = hermes_path(configured)
         path.parent.mkdir(parents=True, exist_ok=True)
         with _AUDIT_LOCK, path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(line, ensure_ascii=False) + "\n")

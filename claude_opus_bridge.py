@@ -28,6 +28,7 @@ if str(_PLUGIN_PARENT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_PARENT))
 
 from model_router import RouteDecision, _load_config, _log_decision, _normalise
+from model_router.hermes_paths import hermes_path
 
 CANONICAL_OPUS_MODEL = "claude-opus-5-5"
 # The review label picks the Claude tier. Two are offered so a conductor can
@@ -35,7 +36,7 @@ CANONICAL_OPUS_MODEL = "claude-opus-5-5"
 # the point of reaching Claude at all is that it draws on a separate quota, and
 # one tier would exhaust that quota on work Sonnet handles fine.
 CLAUDE_REVIEW_MODELS = {"opus": CANONICAL_OPUS_MODEL, "sonnet": "claude-sonnet-5"}
-DEFAULT_LIFECYCLE_PATH = Path("~/.hermes/logs/claude-code-bridge.jsonl").expanduser()
+DEFAULT_LIFECYCLE_PATH = hermes_path("~/.hermes/logs/claude-code-bridge.jsonl")
 # Eight turns repeatedly truncates read-only reviews before their verdict. A
 # bounded 16-turn review is cheaper than discarding and re-running an almost
 # complete Opus audit; callers may lower it for narrow checks.
@@ -160,9 +161,9 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
     # not get the production one. Defaulting there is how the test suite wrote
     # 220 mocked runs into it, which then read back as real Claude activity.
     if lifecycle_path is None:
-        lifecycle_path = Path(os.path.expanduser(str(
+        lifecycle_path = hermes_path(
             (_load_config().get("coding_agent") or {}).get("lifecycle_path") or ""
-        ))) if (_load_config().get("coding_agent") or {}).get("lifecycle_path") else None
+        ) if (_load_config().get("coding_agent") or {}).get("lifecycle_path") else None
     eligible, reason = classify_review_dispatch(task) if review else classify_coding_dispatch(task)
     if not eligible:
         raise ValueError(reason)

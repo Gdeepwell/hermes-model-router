@@ -17,11 +17,12 @@ except ImportError:
     yaml = None
 
 from agent_activity import load_agent_activity
+from hermes_paths import hermes_path
 from view_log import DEFAULT_LOG, load_entries
 
-DEFAULT_STATE_DB = Path("~/.hermes/state.db").expanduser()
-DEFAULT_AGENT_LOG = Path("~/.hermes/logs/agent.log").expanduser()
-DEFAULT_BRIDGE_LIFECYCLE = Path("~/.hermes/logs/claude-code-bridge.jsonl").expanduser()
+DEFAULT_STATE_DB = hermes_path("~/.hermes/state.db")
+DEFAULT_AGENT_LOG = hermes_path("~/.hermes/logs/agent.log")
+DEFAULT_BRIDGE_LIFECYCLE = hermes_path("~/.hermes/logs/claude-code-bridge.jsonl")
 DEFAULT_ROOT_LIMIT = 10
 RAW_HISTORY_LIMIT = 10000
 # Beside this file, exactly like the router's own _CONFIG_PATH: `hermes plugins
@@ -31,7 +32,7 @@ RAW_HISTORY_LIMIT = 10000
 CONFIG_PATH = Path(__file__).resolve().parent / "router_config.yaml"
 
 
-HERMES_CONFIG_PATH = Path.home() / ".hermes" / "config.yaml"
+HERMES_CONFIG_PATH = hermes_path("~/.hermes/config.yaml")
 
 
 def _read_hermes_config() -> dict:
@@ -500,7 +501,7 @@ def _tier_accounts(config: dict) -> dict:
 
 def _delegation_log_path(config: dict):
     configured = str((config.get("claude_delegation") or {}).get("log_path") or "").strip()
-    return Path(configured).expanduser() if configured else None
+    return hermes_path(configured) if configured else None
 
 
 _DELEGATION_LOG_TAIL_BYTES = 1_000_000

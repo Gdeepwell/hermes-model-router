@@ -13,9 +13,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+try:
+    from .hermes_paths import hermes_path
+except ImportError:
+    from hermes_paths import hermes_path
 
-DEFAULT_LOG = Path("~/.hermes/logs/model-router.jsonl").expanduser()
-DEFAULT_STATE_DB = Path("~/.hermes/state.db").expanduser()
+
+DEFAULT_LOG = hermes_path("~/.hermes/logs/model-router.jsonl")
+DEFAULT_STATE_DB = hermes_path("~/.hermes/state.db")
 
 
 def _second_timestamp(value: str) -> str:

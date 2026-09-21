@@ -480,6 +480,15 @@ Run it with the Hermes venv's own python, not a bare `python3`: Refresh on an
 account card calls into Hermes's `agent.account_usage`, which only that venv
 has installed.
 
+On Windows Hermes lives in `%LOCALAPPDATA%\hermes`, not `~/.hermes`:
+
+```bash
+"$LOCALAPPDATA/hermes/hermes-agent/venv/Scripts/python.exe" "$LOCALAPPDATA/hermes/plugins/model-router/web_viewer.py"
+```
+
+The dashboard finds Hermes's state database, agent log and config the way Hermes
+does — see [Where Hermes lives](#where-hermes-lives).
+
 Three tabs: **Model Router**, **Settings**, and an embedded **Hermes Command
 Center**. The interface is available in English and Hungarian.
 
@@ -557,6 +566,20 @@ The dashboard reads the merged result and saves into the local file, keeping
 only what differs from the shipped one (it creates the file on the first such
 save). A local file that fails to parse is ignored with a warning, and the
 shipped settings apply. An override can change a shipped key but not remove it.
+
+### Where Hermes lives
+
+Paths in the config are written as `~/.hermes/...`. That prefix means *Hermes's
+home*, and `hermes_paths.py` resolves it the way Hermes does: Hermes's own
+`get_hermes_home()` when the plugin runs inside Hermes (so a profile's home is
+honoured), and otherwise `HERMES_HOME`, then `%LOCALAPPDATA%\hermes` on Windows,
+then `~/.hermes`. Any other path is only user-expanded.
+
+Before this, `~/.hermes` was literal. On Windows, where that directory does not
+exist, the router read no `delegation.targets` from Hermes's config, so a Claude
+parent was never recognised as a delegation target and ran without a conductor.
+Its logs, cooldowns and usage state went to a `~/.hermes` that Hermes never
+reads, and the dashboard read an empty state database beside them.
 
 ### Key Settings
 
@@ -1165,17 +1188,25 @@ the call rather than routing it, which is normal for Claude and Qwen.
 The tests import the plugin as the `model_router` package (and a few modules by
 their bare name), and the Hermes venv ships neither pytest nor pip, so they run
 under `unittest` from a directory where the repo is linked as `model_router`.
-`HOME` points at a scratch directory so the run never writes to the real
-`~/.hermes/logs`; a copy of the Hermes config goes there because some tests read it.
+`HOME` and `HERMES_HOME` point at a scratch directory so the run never writes to
+the real Hermes logs; a copy of the Hermes config goes there because some tests
+read it. Both are needed: the plugin resolves `~/.hermes/...` through Hermes's
+home, so with `HOME` alone a machine that sets `HERMES_HOME` — every Windows
+install — would write the test run into the real one.
 
 ```bash
 AGENT=~/.hermes/hermes-agent
 RUN=$(mktemp -d)
 mkdir -p "$RUN/home/.hermes" && cp ~/.hermes/config.yaml "$RUN/home/.hermes/"
 ln -s ~/Repositories/hermes-model-router "$RUN/model_router"
-cd "$RUN" && HOME="$RUN/home" PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
+cd "$RUN" && HOME="$RUN/home" HERMES_HOME="$RUN/home/.hermes" \
+  PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
   "$AGENT/venv/bin/python" -m unittest discover -s model_router -t . -p 'test_*.py'
 ```
+
+Use a fresh `RUN` for every run. Some tests still write the default orchestration
+log inside that home, and `test_root_parent_is_pinned_when_classifier_wants_sol_worker`
+fails on a second run over the same one.
 
 Every test is a `unittest.TestCase`, so the command above collects all 680. They
 were not always: `test_artifact_name.py`, `test_leaf_label_contract.py` and
