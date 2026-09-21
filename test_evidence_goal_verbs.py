@@ -145,5 +145,104 @@ class DescriptiveQuestionTests(unittest.TestCase):
                 self.assertFalse(_is_spark_read_only_work(text))
 
 
+class VerbAsNounTests(unittest.TestCase):
+    """A write verb naming what a read-only report is measured against.
+
+    Observed 2026-09-21: a second `[luna]` evidence goal ran on Sol, same reason
+    as the receipt one. It asked for "a concrete test case that would fail before
+    the requested edit" and closed with "make no edits" -- escalated for the word
+    "edit" in a clause that forbids editing, with "authorization" supplying the
+    consequential half.
+    """
+
+    SECOND_INCIDENT = (
+        "[luna] Map the exact existing issuer-mode behavior and its focused "
+        "regression-test seam for the staff receipt member editor. Acceptance "
+        "criteria: report the relevant source/test paths, the identifiers and "
+        "state/authorization flow governing `Ceg / szalon` versus `Sajat "
+        "kibocsato`, the smallest executable test command, and a concrete test "
+        "case that would fail before the requested edit; make no edits."
+    )
+
+    def test_the_second_incident_goal_reads_as_read_only(self):
+        self.assertTrue(_is_spark_read_only_work(self.SECOND_INCIDENT))
+
+    def test_the_second_incident_keeps_its_luna_label(self):
+        decision = classify_request(
+            chat_request(self.SECOND_INCIDENT), 1, CFG, allow_plan_label_over_design=True
+        )
+        self.assertEqual(decision.tier, "luna")
+        self.assertNotEqual(decision.reason, "consequential Luna task requires Sol")
+
+    def test_the_consequential_half_is_still_there(self):
+        """As with the receipt goal: true, and unreachable because it reads read-only."""
+        self.assertTrue(_is_consequential_spark_request(self.SECOND_INCIDENT))
+
+    def test_a_verb_after_a_temporal_preposition_is_a_noun(self):
+        for text in (
+            "[luna] Report a test case that fails before the requested edit in /home/x.",
+            "[spark] Compare the behavior after the proposed change in /home/x.",
+            "[luna] List what breaks prior to the planned migration in /home/x.",
+            "[spark] State the behavior before the update in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_an_adjective_makes_it_a_noun_without_a_preposition(self):
+        for text in (
+            "[luna] Describe the requested edit and its blast radius in /home/x.",
+            "[spark] Report the scope of the proposed rewrite in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_a_bare_determiner_is_still_an_instruction(self):
+        """"Make the change" must not become read-only: the adjective is the token."""
+        for text in (
+            "[luna] Make the change in /home/x.",
+            "[spark] Apply the requested edit to the router in /home/x.",
+            "[luna] Do the update in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+    def test_the_filler_never_walks_over_a_real_instruction(self):
+        """An open filler swallowed the verb after the noun; a closed list cannot."""
+        for text in (
+            "[luna] Before the audit rewrite the config in /home/x.",
+            "[spark] After the review implement the fix in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+
+class NegatedVerbTests(unittest.TestCase):
+    """An explicit refusal to write, in a shape the prohibition filter misses.
+
+    The prohibition-clause filter knows "do not", "never" and "without". A goal
+    saying "make no edits" kept its verb, and escaped only because the plural
+    missed a singular pattern.
+    """
+
+    def test_refusing_to_write_is_not_writing(self):
+        for text in (
+            "[luna] Report the schema in /home/x; make no edits.",
+            "[spark] Inspect the router in /home/x and make no edit.",
+            "[luna] Map the flow in /home/x with no changes to the schema.",
+            "[spark] Trace the importer in /home/x, no further edits.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_a_refusal_does_not_hide_the_instruction_beside_it(self):
+        """Stripped as a phrase, not as a clause, exactly so this still reads as a write."""
+        for text in (
+            "[luna] Make no edits but rewrite the config in /home/x.",
+            "[spark] No edits and rewrite the schema in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+
 if __name__ == "__main__":
     unittest.main()

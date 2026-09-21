@@ -1185,6 +1185,21 @@ skipped here.
 
 ## Version
 
+**1.14.4** — Two more shapes a read-only goal cannot avoid. A write verb
+used as a noun ("a test case that would fail before the requested edit") and
+one the goal explicitly refuses ("make no edits") no longer read as
+instructions to write. Both are stripped as phrases, so a real instruction
+standing beside them still counts: "make no edits but rewrite the config" is
+still a write. The adjective between the determiner and the verb comes from a
+closed list, because an open one walked over the noun in front of a genuine
+instruction and swallowed it.
+
+Observed 2026-09-21: a `[luna]` goal mapping issuer-mode behavior ran seven
+calls on Sol as "consequential Luna task requires Sol" — escalated for the
+word "edit" in a clause that forbids editing, with "authorization" supplying
+the consequential half. It now keeps its Luna label, while the same goal
+ending in a real instruction still escalates.
+
 **1.14.3** — The recorded goal in `test_evidence_goal_verbs.py` now says "dump"
 where it used to name the shell command that prints a file. Hermes's
 install-time scanner reads that verb beside a secrets filename as

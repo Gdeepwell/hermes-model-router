@@ -890,17 +890,84 @@ def _without_descriptive_questions(text: str) -> str:
     return _DESCRIPTIVE_QUESTION.sub(" ", text or "")
 
 
-def _without_non_instructing_verbs(text: str) -> str:
-    """Strip write verbs that name, quote, or describe instead of instructing.
+# What may stand between a determiner and the verb-as-noun. A closed list, not
+# free words: an open filler walks over the noun in front of a real instruction
+# and swallows it, so "before the audit rewrite the config" read as read-only,
+# and "no edits but rewrite the config" hid its rewrite behind the refusal.
+# These adjectives are the ones that actually qualify a change, and none of them
+# can be the object of the verb that follows.
+_CHANGE_ADJECTIVE = (
+    r"requested|proposed|planned|intended|suggested|upcoming|pending|eventual|"
+    r"further|additional|subsequent|later|final|actual|next|same|initial|other|new"
+)
 
-    Four shapes, one failure: a read-only goal cannot say what it looks at
+
+# "a test case that would fail before the requested edit": the write verb is a
+# *noun* -- the thing the report is measured against, not work to do. A read-only
+# goal asking for a currently-failing test has to name the change that will
+# eventually make it pass, and naming it read as an instruction to make it.
+#
+# Observed 2026-09-21: "[luna] Map the exact existing issuer-mode behavior ... a
+# concrete test case that would fail before the requested edit; make no edits."
+# was escalated with "consequential Luna task requires Sol" -- a goal that
+# forbids editing in its last clause, sent to Sol for the word "edit" in its
+# second, because "authorization" supplied the consequential half.
+#
+# Two arms, each with its own corroborating token, because a bare determiner is
+# not enough: "Make the change" is an instruction and must stay one. A temporal
+# preposition puts the verb outside the work being asked for; failing that, an
+# adjective ("the requested edit") marks it as something decided elsewhere --
+# which is why the second arm requires one and the first does not.
+_VERB_AS_NOUN = re.compile(
+    rf"\b(?:before|after|prior\s+to|following|since|once|until)\s+"
+    rf"(?:the|a|an|this|that|its|their|any)\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}"
+    rf"(?:{_SPARK_MUTATING_VERBS})s?\b"
+    rf"|\b(?:the|a|an|this|that|its|their|any)\s+"
+    rf"(?:(?:{_CHANGE_ADJECTIVE})\s+){{1,2}}"
+    rf"(?:{_SPARK_MUTATING_VERBS})s?\b",
+    re.I,
+)
+
+
+def _without_verbs_as_nouns(text: str) -> str:
+    """Remove write verbs naming what a read-only report is measured against."""
+    return _VERB_AS_NOUN.sub(" ", text or "")
+
+
+# "make no edits", "no changes to the schema": an explicit refusal to write, in a
+# shape the prohibition-clause filter cannot see. That filter knows "do not",
+# "never" and "without", so a goal that says "no edits" instead kept the verb and
+# read as mutating. The same goal above escaped only by accident -- the plural
+# "edits" missed a pattern written in the singular.
+#
+# Stripped here as a phrase rather than added to the prohibition clauses on
+# purpose: dropping the whole clause would hide a real instruction standing next
+# to it, so "make no edits but rewrite the config" must still read as a write.
+_NEGATED_VERB = re.compile(
+    rf"\bno\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?\b", re.I)
+
+
+def _without_negated_verbs(text: str) -> str:
+    """Remove write verbs a goal explicitly refuses ("make no edits")."""
+    return _NEGATED_VERB.sub(" ", text or "")
+
+
+def _without_non_instructing_verbs(text: str) -> str:
+    """Strip write verbs that name, quote, describe or refuse instead of instructing.
+
+    Six shapes, one failure: a read-only goal cannot say what it looks at
     without using the vocabulary of changing it. Each stripper requires its own
     corroborating token -- a hash, an artifact noun, a bracketed placeholder, an
-    interrogative -- so an unadorned instruction still reads as a write.
+    interrogative, a temporal preposition or participle, an explicit "no" -- so
+    an unadorned instruction still reads as a write.
     """
-    return _without_descriptive_questions(
-        _without_redaction_placeholders(
-            _without_artifact_names(_without_commit_references(text))
+    return _without_negated_verbs(
+        _without_verbs_as_nouns(
+            _without_descriptive_questions(
+                _without_redaction_placeholders(
+                    _without_artifact_names(_without_commit_references(text))
+                )
+            )
         )
     )
 
