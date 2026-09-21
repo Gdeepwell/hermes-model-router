@@ -1185,6 +1185,14 @@ skipped here.
 
 ## Version
 
+**1.14.3** — The recorded goal in `test_evidence_goal_verbs.py` says "dump"
+where it used to say "cat". Hermes's install-time scanner matches
+`cat …\.env` as `read_secrets_file` (critical) without reading the "Do NOT"
+in front of it, and one critical finding makes the verdict `dangerous`, which
+`--force` does not override — so `hermes plugins install` refused this plugin
+outright. The verdict is now `caution`. The prohibition is unchanged, and the
+routing decision for that goal is identical in every field.
+
 **1.14.2** — The Anthropic usage reader no longer gives up on a 401. It now
 falls back to the refreshing Claude Code resolver, because
 `resolve_anthropic_token` reads the credential pool with `refresh=False` (so
