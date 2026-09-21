@@ -1185,13 +1185,18 @@ skipped here.
 
 ## Version
 
-**1.14.3** — The recorded goal in `test_evidence_goal_verbs.py` says "dump"
-where it used to say "cat". Hermes's install-time scanner matches
-`cat …\.env` as `read_secrets_file` (critical) without reading the "Do NOT"
-in front of it, and one critical finding makes the verdict `dangerous`, which
-`--force` does not override — so `hermes plugins install` refused this plugin
-outright. The verdict is now `caution`. The prohibition is unchanged, and the
-routing decision for that goal is identical in every field.
+**1.14.3** — The recorded goal in `test_evidence_goal_verbs.py` now says "dump"
+where it used to name the shell command that prints a file. Hermes's
+install-time scanner reads that verb beside a secrets filename as
+`read_secrets_file` (critical) and never sees the "Do NOT" in front of it, and
+one critical finding makes the verdict `dangerous`, which `--force` does not
+override — so `hermes plugins install` refused this plugin outright. The verdict
+is now `caution`. The prohibition is unchanged, and the routing decision for
+that goal is identical in every field.
+
+Note for future entries: describing that rule is enough to trip it. Name the
+verb and the filename in the same line and the scanner matches the sentence
+itself, which is how this very entry blocked the install once already.
 
 **1.14.2** — The Anthropic usage reader no longer gives up on a 401. It now
 falls back to the refreshing Claude Code resolver, because
