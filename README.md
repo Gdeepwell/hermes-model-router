@@ -502,9 +502,11 @@ call rather than routing it, because the model belongs to another provider.
 
 Everything refreshes every 3 seconds.
 
-The Settings tab opens with the **Workflow** section: the Codex / Claude
-delegation switch (see [Workflow switch](#workflow-switch)) and, under Claude
-delegation, the load-balancing switch and its two thresholds. Below it is **one
+The Settings tab opens with the **Workflow** section: the *Codex only* /
+*Codex + Claude* switch -- the dashboard's names for `workflow: codex` and
+`workflow: claude_delegation`, chosen to say how many accounts work rather than
+which one came first (see [Workflow switch](#workflow-switch)) -- and, under
+*Codex + Claude*, the load-balancing switch and its two thresholds. Below it is **one
 card per account**: its models with their on/off switches, weekly and 5-hour
 usage bars with a Refresh button, the soft/hard limits, the Claude card's
 delegation state (`delegate_claude live`), and the account's recent call count
@@ -1184,6 +1186,20 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.14.5** — The dashboard's two workflows are named for what differs between
+them. *Codex (original)* said only which one came first, and *Claude
+delegation* only that Claude is involved; neither named the thing the choice
+turns on, which is how many accounts do the work. They are now *Codex only* and
+*Codex + Claude* (*Csak Codex* / *Codex + Claude*), and each description opens
+with that -- "One account works: ..." / "Both accounts work: ..." -- before the
+mechanics. The `workflow:` values are untouched: `codex` and `claude_delegation`
+still name themselves in the file, so nothing saved needs rewriting.
+
+The Codex description also stopped saying Opus stays available as the Hermes
+parent. The parent tier is chosen at spawn time and is not always Opus, so the
+line read as a guarantee the workflow does not make; it now says the Claude
+account stays available as the parent.
 
 **1.14.4** — Two more shapes a read-only goal cannot avoid. A write verb
 used as a noun ("a test case that would fail before the requested edit") and

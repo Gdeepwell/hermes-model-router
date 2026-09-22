@@ -2287,7 +2287,7 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('data-workflow="codex" class="active"', out)
         self.assertIn('data-workflow="claude_delegation"', out)
         self.assertNotIn('data-workflow="claude_delegation" class="active"', out)
-        self.assertIn("Codex does the work", out)
+        self.assertIn("One account works", out)
 
     def test_the_claude_card_no_longer_carries_its_own_toggle(self):
         card_tests = AccountCardTests()
