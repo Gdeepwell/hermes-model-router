@@ -74,7 +74,7 @@ coding_agent:
   enabled: false
   tier: opus5
   requested_alias: opus
-  canonical_model: claude-opus-5
+  canonical_model: claude-opus-5-5
   default_repo: /home/deepwell/booking-saas
   max_turns: 8
   max_budget_usd: 5.0
@@ -150,7 +150,7 @@ orchestration:
 sol_opus5_preflight:
   enabled: false
   owner: sol
-  bridge_model: claude-opus-5
+  bridge_model: claude-opus-5-5
   require_successful_auth_probe: true
 peer_groups:
   heavy:
@@ -186,7 +186,7 @@ claude_delegation:
   tiers:
     haiku: claude-haiku-4-5-20251001
     sonnet: claude-sonnet-5
-    opus: claude-opus-5
+    opus: claude-opus-5-5
   default_tier: sonnet
   log_path: ~/.hermes/logs/claude-delegation.jsonl
 

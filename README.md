@@ -2,7 +2,7 @@
 
 Routing and delegation for Hermes Agent. It keeps the user-facing conversation on one durable parent model, lets that parent's plan choose which model runs each delegated worker, and records every decision in a privacy-safe audit log.
 
-The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and a Claude subscription (Opus 5/Sonnet 5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
+The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and a Claude subscription (Opus 5.5/Sonnet 5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
 
 ## Install
 
@@ -31,7 +31,7 @@ is what keeps a single quota from carrying everything.
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
 | `sol` | GPT-5.6 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
-| `opus5` | Claude Opus 5 | Claude subscription | Delegation target for hard or consequential work (see below) |
+| `opus5` | Claude Opus 5.5 | Claude subscription | Delegation target for hard or consequential work (see below) |
 | `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
 | `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude`, so offered only under Claude delegation |
 
@@ -110,7 +110,7 @@ delegation:
   targets:
     opus5:
       provider: anthropic
-      model: claude-opus-5
+      model: claude-opus-5-5
     sonnet5:
       provider: anthropic
       model: claude-sonnet-5
@@ -718,7 +718,7 @@ claude_delegation:
   tiers:                 # model each short tier name actually starts
     haiku: claude-haiku-4-5-20251001
     sonnet: claude-sonnet-5
-    opus: claude-opus-5
+    opus: claude-opus-5-5
 ```
 
 One tier per call: `haiku` for quick lookups and exploration, `sonnet` as the
@@ -1186,6 +1186,13 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.15.0** — The Opus tier runs Claude Opus 5.5 (`claude-opus-5-5`) instead
+of Opus 5. The `claude_delegation.tiers.opus` default, the bridge's canonical
+model and the Sol preflight's `bridge_model` all moved, and the bridge accepts
+a run only when `modelUsage` reports `claude-opus-5-5`. The target key stays
+`opus5`, so preference chains, fallbacks and existing logs need no rewrite; the
+dashboard still counts old `claude-opus-5` log lines under the same card.
 
 **1.14.5** — The dashboard's two workflows are named for what differs between
 them. *Codex (original)* said only which one came first, and *Claude

@@ -223,7 +223,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         cards = HTML[HTML.index('<div class="cards">'):HTML.index('<div id="runs"')]
         for key, label in [('card.luna', 'GPT-5.6 Luna'), ('card.spark', 'GPT-5.3 Spark'),
                            ('card.terra', 'GPT-5.6 Terra'), ('card.sol', 'GPT-5.6 Sol'),
-                           ('card.opus5', 'Claude Opus 5')]:
+                           ('card.opus5', 'Claude Opus 5.5')]:
             self.assertIn(f'<div class="k" data-i18n="{key}">{label}</div>', cards)
             self.assertEqual(self.i18n(key), (label, label))
         # Since Task 7 the static #tier select only carries the "all" option;
@@ -382,7 +382,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         source = self.execution_source()
         self.assertIn("source.includes('opus5')||source.includes('claude-opus-5')", source)
         self.assertIn("opus5:0", source)
-        parent = {"children": [{"id": "external", "model": "claude-opus-5", "routed_calls": [{"tier": "opus5", "model": "claude-opus-5", "effort": "external"}], "children": []}]}
+        parent = {"children": [{"id": "external", "model": "claude-opus-5-5", "routed_calls": [{"tier": "opus5", "model": "claude-opus-5-5", "effort": "external"}], "children": []}]}
         probe = source + "\nfunction sessionIdFromTurn(entry){return String(entry?.turn_id||'').split(':')[0]}\nconst scope=executionScope([{tier:'terra'}],[]," + json.dumps(parent) + ",'opus5');console.log(JSON.stringify({calls:scope.calls,kinds:scope.nodes.map(executionKind),summary:executionSummary([scope.calls])}));"
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         observed = json.loads(result.stdout)
@@ -790,7 +790,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
     careful with a file it does not own, and the UI has to say which file it writes."""
 
     OPTIONS = [
-        {"key": "opus5", "provider": "anthropic", "model": "claude-opus-5"},
+        {"key": "opus5", "provider": "anthropic", "model": "claude-opus-5-5"},
         {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"},
         {"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"},
     ]
@@ -810,11 +810,11 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
     def test_duplicates_collapse_and_order_is_kept(self):
         chain, error = web_viewer._clean_fallback_chain([
             {"provider": "qwen-token", "model": "qwen3.7-plus"},
-            {"provider": "anthropic", "model": "claude-opus-5"},
+            {"provider": "anthropic", "model": "claude-opus-5-5"},
             {"provider": "qwen-token", "model": "qwen3.7-plus"},
         ], self.OPTIONS)
         self.assertIsNone(error)
-        self.assertEqual([e["model"] for e in chain], ["qwen3.7-plus", "claude-opus-5"])
+        self.assertEqual([e["model"] for e in chain], ["qwen3.7-plus", "claude-opus-5-5"])
 
     def test_an_empty_chain_is_preserved_not_dropped(self):
         """For a delegated worker [] means "no fallback" — not "inherit the parent's"."""
@@ -845,7 +845,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "config.yaml"
             target.write_text(
-                "delegation:\n  fallback_providers:\n  - provider: anthropic\n    model: claude-opus-5\n",
+                "delegation:\n  fallback_providers:\n  - provider: anthropic\n    model: claude-opus-5-5\n",
                 encoding="utf-8")
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
                  patch.object(web_viewer, "_fallback_chain_options", return_value=self.OPTIONS):
@@ -853,7 +853,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
                     {"orchestrator": [{"provider": "qwen-token", "model": "qwen3.7-plus"}]}, {})
             self.assertIsNone(error)
             written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
-            self.assertEqual(written["delegation"]["fallback_providers"][0]["model"], "claude-opus-5")
+            self.assertEqual(written["delegation"]["fallback_providers"][0]["model"], "claude-opus-5-5")
             self.assertEqual(written["fallback_providers"][0]["model"], "qwen3.7-plus")
 
     def test_an_unreadable_config_is_never_overwritten(self):
@@ -881,7 +881,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         router_cfg = {
             "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
             "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
-            "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5"}},
+            "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
         }
         with patch.object(web_viewer, "_read_hermes_config", return_value={}):
             options = web_viewer._fallback_chain_options(router_cfg)
@@ -909,7 +909,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             target.write_text(
                 "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
                 "delegation:\n  targets:\n"
-                "    opus5:\n      provider: anthropic\n      model: claude-opus-5\n"
+                "    opus5:\n      provider: anthropic\n      model: claude-opus-5-5\n"
                 "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
                 encoding="utf-8")
             router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
@@ -949,7 +949,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
                 "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
                 "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
                 "preferences": {},
-                "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5"}},
+                "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
             }
             with open(config_path, "w", encoding="utf-8") as f:
                 web_viewer.yaml.dump(router_cfg, f)
@@ -958,7 +958,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             hermes_path.write_text(
                 "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
                 "delegation:\n  targets:\n"
-                "    opus5:\n      provider: anthropic\n      model: claude-opus-5\n"
+                "    opus5:\n      provider: anthropic\n      model: claude-opus-5-5\n"
                 "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
                 encoding="utf-8")
 
@@ -1063,7 +1063,7 @@ class DefaultModelSaveTests(unittest.TestCase):
         },
         "default_model": "terra",
     }
-    HERMES = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+    HERMES = "model:\n  default: claude-opus-5-5\n  provider: anthropic\n"
     HERMES_CODEX = "model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n"
 
     def _config(self):
@@ -2402,7 +2402,7 @@ class HermesParentGuardTests(unittest.TestCase):
         config = self._config()
         with tempfile.TemporaryDirectory() as directory:
             target = self._hermes(directory, "gpt-5.6-terra", "openai-codex")
-            concurrent = "model:\n  default: claude-opus-5\n  provider: anthropic\n"
+            concurrent = "model:\n  default: claude-opus-5-5\n  provider: anthropic\n"
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
                  patch.object(web_viewer, "_read_hermes_config", side_effect=self._changing_read(target, concurrent)):
                 error = web_viewer._save_default_model("luna", config)
@@ -2413,8 +2413,8 @@ class HermesParentGuardTests(unittest.TestCase):
 
     def test_a_fallback_chain_save_refuses_the_same_way(self):
         with tempfile.TemporaryDirectory() as directory:
-            target = self._hermes(directory, "claude-opus-5", "anthropic")
-            concurrent = "model:\n  default: claude-opus-5\n  provider: anthropic\nfallback_providers: []\n"
+            target = self._hermes(directory, "claude-opus-5-5", "anthropic")
+            concurrent = "model:\n  default: claude-opus-5-5\n  provider: anthropic\nfallback_providers: []\n"
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
                  patch.object(web_viewer, "_read_hermes_config", side_effect=self._changing_read(target, concurrent)), \
                  patch.object(web_viewer, "_hermes_chain", return_value=[]):

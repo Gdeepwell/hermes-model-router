@@ -29,7 +29,7 @@ from model_router.claude_delegation import (
 
 CLAUDE_DELEGATION = {
     "enabled": True,
-    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5"},
+    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
 }
 
@@ -63,7 +63,7 @@ class DelegationConfigTests(unittest.TestCase):
     def test_a_partial_block_keeps_the_other_defaults(self):
         settings = delegation_config({"claude_delegation": {"enabled": True, "default_tier": "haiku"}})
         self.assertEqual(settings["default_tier"], "haiku")
-        self.assertEqual(settings["tiers"]["opus"], "claude-opus-5")
+        self.assertEqual(settings["tiers"]["opus"], "claude-opus-5-5")
         self.assertNotIn("usage_guard", settings)
 
     def test_names_map_both_ways(self):
@@ -406,7 +406,7 @@ class OfferedNamesTests(unittest.TestCase):
         path = Path(directory) / "config.yaml"
         path.write_text(
             "delegation:\n  targets:\n"
-            "    opus5: {provider: anthropic, model: claude-opus-5}\n"
+            "    opus5: {provider: anthropic, model: claude-opus-5-5}\n"
             "    sonnet5: {provider: anthropic, model: claude-sonnet-5}\n",
             encoding="utf-8",
         )
@@ -623,7 +623,7 @@ def _parent_request(tools=("delegate_task", "delegate_claude")):
     # The same actionable prompt the external-orchestrator tests use, so the
     # forced-preflight case below is not skipped by an unrelated gate.
     request = chat_request(ACTIONABLE)
-    request["model"] = "claude-opus-5"
+    request["model"] = "claude-opus-5-5"
     request["tools"] = [{"type": "function", "name": name, "parameters": {"type": "object", "properties": {}}}
                         for name in tools]
     return request
@@ -724,14 +724,14 @@ class RoutingNoteMiddlewareTests(unittest.TestCase):
              patch("model_router._log_decision"), \
              patch("model_router._orchestration_event"), \
              patch("model_router._delegation_target_names", return_value=("haiku", "opus5", "sonnet5")):
-            return route_llm_request(request=_parent_request(), provider="anthropic", model="claude-opus-5",
+            return route_llm_request(request=_parent_request(), provider="anthropic", model="claude-opus-5-5",
                                      api_call_count=1, turn_id="root-turn", platform="cli")
 
     def test_a_claude_parent_gets_the_note_and_keeps_its_model(self):
         routed = self._route(orchestration=False)
         self.assertIsNotNone(routed)
         self.assertIn("[ROUTER] This turn classifies as", routed["request"]["messages"][-1]["content"])
-        self.assertEqual(routed["request"]["model"], "claude-opus-5")
+        self.assertEqual(routed["request"]["model"], "claude-opus-5-5")
 
     def test_a_forced_preflight_carries_the_contract_instead(self):
         routed = self._route(orchestration=True)

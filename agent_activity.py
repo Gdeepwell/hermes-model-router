@@ -508,7 +508,7 @@ def load_agent_activity(
         calls = [{"tier": "opus5", "model": evidence.get("canonical_model"), "effort": "external"}] if evidence.get("canonical_model") else []
         child = {
             "id": run_id, "bridge_run_id": run_id, "goal": "Opus review",
-            "task_description": "Claude Opus 5 · külső Claude Code reviewer",
+            "task_description": "Claude Opus 5.5 · külső Claude Code reviewer",
             "reason": "Külső Claude Code review", "external": True,
             "access_mode": "read_only" if evidence.get("review") else ("requested_read_only" if evidence.get("requested_read_only") else "standard"),
             "state": state, "model": evidence.get("canonical_model") or "",

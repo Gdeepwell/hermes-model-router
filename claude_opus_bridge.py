@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit Claude Code Opus 5 bridge for conservative coding tasks.
+"""Explicit Claude Code Opus 5.5 bridge for conservative coding tasks.
 
 This is intentionally separate from ``route_llm_request``: that middleware
 serves OpenAI-compatible requests and must never pretend that an Anthropic
@@ -29,7 +29,7 @@ if str(_PLUGIN_PARENT) not in sys.path:
 
 from model_router import RouteDecision, _load_config, _log_decision, _normalise
 
-CANONICAL_OPUS_MODEL = "claude-opus-5"
+CANONICAL_OPUS_MODEL = "claude-opus-5-5"
 # The review label picks the Claude tier. Two are offered so a conductor can
 # spend the cheaper one on routine checks and reserve Opus for hard review --
 # the point of reaching Claude at all is that it draws on a separate quota, and
@@ -79,7 +79,7 @@ def classify_coding_dispatch(task: str) -> tuple[bool, str]:
     # Keep ordinary unlabelled design work excluded, while allowing that narrow
     # manual contract to reach the bridge without a Sol/Terra/Spark pre-loop.
     if OVERRIDE.match(normalised):
-        return True, "explicit Claude Opus 5 coding override"
+        return True, "explicit Claude Opus 5.5 coding override"
     if DESIGN_SIGNAL.search(normalised):
         return False, "Sol-only design/CSS/UI work is not eligible for Claude coding dispatch"
     if CODING_SIGNAL.search(normalised):
@@ -90,7 +90,7 @@ def classify_coding_dispatch(task: str) -> tuple[bool, str]:
 def classify_review_dispatch(task: str) -> tuple[bool, str]:
     """Allow only an explicit Opus request to perform a read-only review."""
     if REVIEW_OVERRIDE.match(_normalise(task or "")):
-        return True, "explicit Claude Opus 5 read-only review override"
+        return True, "explicit Claude Opus 5.5 read-only review override"
     return False, "review dispatch requires an explicit [opus-review] or [opus5-review] prefix"
 
 

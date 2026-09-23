@@ -38,7 +38,7 @@ TIER_FOR_TARGET: Dict[str, str] = {target: tier for tier, target in TARGET_FOR_T
 
 DEFAULTS: Dict[str, Any] = {
     "enabled": False,
-    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5"},
+    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
     "log_path": "",
 }

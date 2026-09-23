@@ -71,14 +71,14 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
         {"name": "delegate_task"} on a Claude parent whose tool was mcp__delegate_task.
         Anthropic answered 400 "Tool 'delegate_task' not found in provided tools" and the
         turn fell back off Opus. The forced name must be the one actually offered."""
-        request = _delegating_request("claude-opus-5", "mcp__delegate_task")
+        request = _delegating_request("claude-opus-5-5", "mcp__delegate_task")
         request["tools"] = [{"name": "mcp__delegate_task",
                              "input_schema": request["tools"][0]["parameters"]}]
         with tempfile.TemporaryDirectory() as d, \
              patch("model_router._load_config", return_value=_cfg(d)), \
              patch("model_router._log_decision"), \
              patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")):
-            routed = route_llm_request(request=request, provider="anthropic", model="claude-opus-5",
+            routed = route_llm_request(request=request, provider="anthropic", model="claude-opus-5-5",
                                        api_call_count=1, turn_id="external-parent-turn")
         self.assertIsNotNone(routed)
         self.assertEqual(routed["request"]["tool_choice"], {"type": "tool", "name": "mcp__delegate_task"})

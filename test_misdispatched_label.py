@@ -50,7 +50,7 @@ class DetectionTests(unittest.TestCase):
 
     def test_a_leaf_already_on_that_account_is_not_misdispatched(self):
         """There the prefix is redundant, not wrong -- model: did its job."""
-        self.assertEqual(_misdispatched_external_label(GOAL, "claude-opus-5", CFG), "")
+        self.assertEqual(_misdispatched_external_label(GOAL, "claude-opus-5-5", CFG), "")
 
     def test_a_claude_review_label_is_a_real_label(self):
         for text in ("[opus5-review] Review the diff.", "[sonnet-review] Review the diff."):

@@ -44,7 +44,7 @@ def _cfg(temp_dir, workflow="claude_delegation"):
 
 def _anthropic_request(text, tools):
     request = chat_request(text)
-    request["model"] = "claude-opus-5"
+    request["model"] = "claude-opus-5-5"
     request["tools"] = [{"name": name, "input_schema": dict(SCHEMA)} for name in tools]
     return request
 
@@ -62,7 +62,7 @@ def _names(request):
 
 
 class ForcedPreflightTests(unittest.TestCase):
-    def _route(self, request, workflow="claude_delegation", model="claude-opus-5", provider="anthropic"):
+    def _route(self, request, workflow="claude_delegation", model="claude-opus-5-5", provider="anthropic"):
         with tempfile.TemporaryDirectory() as d, \
              patch("model_router._load_config", return_value=_cfg(d, workflow)), \
              patch("model_router._log_decision"), \

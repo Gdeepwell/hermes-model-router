@@ -227,7 +227,7 @@ class ModelRouterTests(unittest.TestCase):
                 "models": MODELS, "callable": CALLABLE,
                 "effort": {"terra": "medium", "spark": "medium", "sol": "medium", "luna": "low"},
                 "orchestration": {"enabled": True, "max_tasks": 3, "path": str(Path(temp_dir) / "orchestration.jsonl")},
-                "sol_opus5_preflight": {"enabled": True, "owner": "sol", "bridge_model": "claude-opus-5", "require_successful_auth_probe": True},
+                "sol_opus5_preflight": {"enabled": True, "owner": "sol", "bridge_model": "claude-opus-5-5", "require_successful_auth_probe": True},
                 "shadow": {"enabled": False},
             }
             request = chat_request("Készíts UX/UI preflight értékelést egy bejelentkezési oldal vizuális elrendezéséről.")
@@ -243,7 +243,7 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(result["metadata"]["tier"], "sol")
         preflight = json.dumps(result["request"], ensure_ascii=False)
         self.assertIn("INTERNAL SOL + CLAUDE OPUS 5 PREFLIGHT", preflight)
-        self.assertIn("claude-opus-5", preflight)
+        self.assertIn("claude-opus-5-5", preflight)
         self.assertIn("goal beginning [sol]", preflight)
         self.assertNotIn("[spark]", preflight)
         self.assertNotIn("[terra]", preflight)
@@ -1716,7 +1716,7 @@ class ModelRouterTests(unittest.TestCase):
                     "path": str(Path(temp_dir) / "orchestration.jsonl"),
                 },
                 "sol_opus5_preflight": {
-                    "enabled": True, "owner": "sol", "bridge_model": "claude-opus-5",
+                    "enabled": True, "owner": "sol", "bridge_model": "claude-opus-5-5",
                     "require_successful_auth_probe": True,
                 },
                 "shadow": {"enabled": False},
@@ -1731,7 +1731,7 @@ class ModelRouterTests(unittest.TestCase):
                     api_call_count=1, turn_id="sol-short-preflight-turn",
                 )
         self.assertEqual(result["metadata"]["tier"], "sol")
-        self.assertIn("claude-opus-5", json.dumps(result["request"], ensure_ascii=False))
+        self.assertIn("claude-opus-5-5", json.dumps(result["request"], ensure_ascii=False))
 
     @patch("model_router._log_decision")
     def test_long_terra_loop_is_rescued_even_when_original_prompt_has_no_regex_markers(self, mocked_log):
@@ -1764,7 +1764,7 @@ class ModelRouterTests(unittest.TestCase):
                 "coding_agent": {
                     "enabled": True,
                     "tier": "opus5",
-                    "model": "claude-opus-5",
+                    "model": "claude-opus-5-5",
                     "default_repo": repo,
                     "max_turns": 8,
                     "max_budget_usd": 5.0,
@@ -1772,7 +1772,7 @@ class ModelRouterTests(unittest.TestCase):
             }
             result = {
                 "result": "OPUS IMPLEMENTATION COMPLETE",
-                "effective_model": "claude-opus-5",
+                "effective_model": "claude-opus-5-5",
                 "usage": {"input_tokens": 17, "output_tokens": 9},
             }
             with patch("model_router._load_config", return_value=cfg), patch(
@@ -1788,7 +1788,7 @@ class ModelRouterTests(unittest.TestCase):
                 )
 
         bridge.assert_called_once()
-        self.assertEqual(response.model, "claude-opus-5")
+        self.assertEqual(response.model, "claude-opus-5-5")
         self.assertEqual(response.output[0].content[0].text, "OPUS IMPLEMENTATION COMPLETE")
 
     def test_explicit_opus_review_executes_read_only_for_non_coding_review(self):
@@ -1799,12 +1799,12 @@ class ModelRouterTests(unittest.TestCase):
                 "models": MODELS, "callable": CALLABLE,
                 "coding_agent": {
                     "enabled": True,
-                    "canonical_model": "claude-opus-5",
+                    "canonical_model": "claude-opus-5-5",
                     "default_repo": repo,
                     "reviewer": {"enabled": True, "max_chars": 8000},
                 },
             }
-            result = {"result": "OPUS REVIEW COMPLETE", "effective_model": "claude-opus-5"}
+            result = {"result": "OPUS REVIEW COMPLETE", "effective_model": "claude-opus-5-5"}
             prompt = "[opus-review] Review the access-control proposal for missing risks. Do not modify files."
             with patch("model_router._load_config", return_value=cfg), patch(
                 "model_router.shutil.which", return_value="/usr/bin/claude"
@@ -1824,7 +1824,7 @@ class ModelRouterTests(unittest.TestCase):
         bridge.assert_called_once()
         self.assertFalse(bridge.call_args.kwargs["write"])
         self.assertTrue(bridge.call_args.kwargs["review"])
-        self.assertEqual(response.model, "claude-opus-5")
+        self.assertEqual(response.model, "claude-opus-5-5")
         self.assertEqual(response.output[0].content[0].text, "OPUS REVIEW COMPLETE")
 
     def _delegated_review_cfg(self, repo, **overrides):
@@ -1838,7 +1838,7 @@ class ModelRouterTests(unittest.TestCase):
                 # Deliberately off: the delegated path must not depend on the
                 # switch that also arms the label-free coding classifier.
                 "enabled": False,
-                "canonical_model": "claude-opus-5",
+                "canonical_model": "claude-opus-5-5",
                 "default_repo": repo,
                 "delegated_review": policy,
             },
@@ -1919,7 +1919,7 @@ class ModelRouterTests(unittest.TestCase):
 
     def test_runtime_opus_bridge_uses_the_real_dispatch_entrypoint(self):
         cfg = {"coding_agent": {"timeout_seconds": 300}}
-        expected = {"result": "ok", "model": "claude-opus-5"}
+        expected = {"result": "ok", "model": "claude-opus-5-5"}
         with tempfile.TemporaryDirectory() as repo, patch(
             "model_router.claude_opus_bridge.dispatch", return_value=expected
         ) as dispatch:
@@ -1941,7 +1941,7 @@ class ModelRouterTests(unittest.TestCase):
             "enabled": True,
             "provider": "openai-codex",
             "models": MODELS, "callable": CALLABLE,
-            "coding_agent": {"enabled": True, "tier": "opus5", "model": "claude-opus-5"},
+            "coding_agent": {"enabled": True, "tier": "opus5", "model": "claude-opus-5-5"},
         }
         sentinel = object()
         with patch("model_router._load_config", return_value=cfg), patch(
@@ -1976,7 +1976,7 @@ class ModelRouterTests(unittest.TestCase):
                 "sol_opus5_preflight": {
                     "enabled": True,
                     "owner": "sol",
-                    "bridge_model": "claude-opus-5",
+                    "bridge_model": "claude-opus-5-5",
                     "require_successful_auth_probe": True,
                 },
                 "shadow": {"enabled": False},
@@ -2002,7 +2002,7 @@ class ModelRouterTests(unittest.TestCase):
             route_log.write_text(json.dumps({
                 "timestamp": "2099-01-01T00:00:00+00:00",
                 "tier": "opus5",
-                "model": "claude-opus-5",
+                "model": "claude-opus-5-5",
                 "reason": "verified probe",
             }) + "\n", encoding="utf-8")
             cfg = {
@@ -2012,7 +2012,7 @@ class ModelRouterTests(unittest.TestCase):
                 "logging": {"enabled": True, "path": str(route_log)},
                 "coding_agent": {
                     "enabled": True,
-                    "canonical_model": "claude-opus-5",
+                    "canonical_model": "claude-opus-5-5",
                     "default_repo": repo,
                     "timeout_seconds": 300,
                     "explicit_ui": {
@@ -2024,7 +2024,7 @@ class ModelRouterTests(unittest.TestCase):
             }
             result = {
                 "result": "OPUS UI FIX COMPLETE",
-                "effective_model": "claude-opus-5",
+                "effective_model": "claude-opus-5-5",
                 "usage": {"input_tokens": 11, "output_tokens": 7},
             }
             with patch("model_router._load_config", return_value=cfg), patch(
@@ -2042,7 +2042,7 @@ class ModelRouterTests(unittest.TestCase):
 
         bridge.assert_called_once()
         self.assertTrue(bridge.call_args.kwargs["task"].startswith("[opus5]"))
-        self.assertEqual(response.model, "claude-opus-5")
+        self.assertEqual(response.model, "claude-opus-5-5")
 
     def test_explicit_ui_opus_request_without_verified_bridge_stays_on_sol(self):
         cfg = {
@@ -2078,7 +2078,7 @@ class ModelRouterTests(unittest.TestCase):
             "enabled": True,
             "provider": "openai-codex",
             "models": MODELS, "callable": CALLABLE,
-            "coding_agent": {"enabled": True, "tier": "opus5", "model": "claude-opus-5"},
+            "coding_agent": {"enabled": True, "tier": "opus5", "model": "claude-opus-5-5"},
         }
         sentinel = object()
         with patch("model_router._load_config", return_value=cfg), patch(

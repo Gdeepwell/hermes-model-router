@@ -102,7 +102,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "coding_agent": {
         "enabled": False,
         "tier": "opus5",
-        "model": "claude-opus-5",
+        "model": "claude-opus-5-5",
         "default_repo": "",
         "max_turns": 8,
         "max_budget_usd": 5.0,
@@ -3053,7 +3053,7 @@ def _sol_opus5_preflight_enabled(cfg: Dict[str, Any]) -> bool:
         and _is_callable_tier("opus5", cfg)
         and bool(policy.get("enabled"))
         and str(policy.get("owner", "")).casefold() == "sol"
-        and str(policy.get("bridge_model", "")).casefold() == "claude-opus-5"
+        and str(policy.get("bridge_model", "")).casefold() == "claude-opus-5-5"
         and bool(policy.get("require_successful_auth_probe"))
     )
 
@@ -3062,7 +3062,7 @@ def _prepare_sol_opus5_preflight(request: Dict[str, Any], plan_id: str) -> Dict[
     """Force a Sol-owned preflight without routing it through Spark or Terra.
 
     The normal Sol request remains OpenAI-compatible; this records the required
-    read-only external Claude Code Opus 5 review contract rather than attempting
+    read-only external Claude Code Opus 5.5 review contract rather than attempting
     an unsafe provider/model-string substitution.
     """
     routed = deepcopy(request)
@@ -3071,7 +3071,7 @@ def _prepare_sol_opus5_preflight(request: Dict[str, Any], plan_id: str) -> Dict[
         f"Plan ID: {plan_id}. Before normal implementation, call delegate_task exactly once with a goal beginning [sol]. "
         "This is a Sol-owned visual/product/UI/UX/CSS/layout/design-system preflight. The delegated Sol reviewer must first inspect any "
         "current image itself, create a structured dispatch/review plan, and perform the configured read-only Claude Code bridge review "
-        "with requested alias `opus`. Accept the review only if the bridge reports canonical effective model `claude-opus-5`; otherwise "
+        "with requested alias `opus`. Accept the review only if the bridge reports canonical effective model `claude-opus-5-5`; otherwise "
         "stop and report the unavailable bridge without falling back to Spark or Terra. Do not expose credentials or make writes, deploys, "
         "payments, or production changes during preflight. Spark and Terra are not preflight targets for this request.\n"
     )
@@ -3276,7 +3276,7 @@ def _force_terra_supervisor_preflight(
                 "turn_id": turn_id,
                 "parent_model": decision.tier,
                 "preflight_owner": "sol" if decision.tier == "sol" else "terra",
-                "preflight_bridge_model": "claude-opus-5" if decision.tier == "sol" else None,
+                "preflight_bridge_model": "claude-opus-5-5" if decision.tier == "sol" else None,
                 "max_tasks": min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
                 "parent_prompt_preview": _prompt_preview(kwargs.get("request") or {}),
                 **({"balanced": claude_choice[2]} if claude_choice[2] else {}),
@@ -4135,7 +4135,7 @@ def _recent_verified_opus5_route(cfg: Dict[str, Any]) -> bool:
     for line in reversed(lines[-5000:]):
         try:
             event = json.loads(line)
-            if event.get("tier") != "opus5" or event.get("model") != "claude-opus-5":
+            if event.get("tier") != "opus5" or event.get("model") != "claude-opus-5-5":
                 continue
             observed = datetime.fromisoformat(str(event.get("timestamp") or "").replace("Z", "+00:00"))
             if observed.tzinfo is None:
@@ -4166,7 +4166,7 @@ def _verified_explicit_opus5_ui_repo(text: str, cfg: Dict[str, Any]) -> Optional
     canonical = str(coding_cfg.get("canonical_model") or coding_cfg.get("model") or "")
     if (
         not coding_cfg.get("enabled")
-        or canonical != "claude-opus-5"
+        or canonical != "claude-opus-5-5"
         or not _is_explicit_bounded_opus_ui_request(text, cfg)
         or shutil.which("claude") is None
         or not _recent_verified_opus5_route(cfg)
@@ -4183,7 +4183,7 @@ def _verified_explicit_opus5_review_repo(text: str, cfg: Dict[str, Any]) -> Opti
     if (
         not coding_cfg.get("enabled")
         or not reviewer_cfg.get("enabled")
-        or canonical != "claude-opus-5"
+        or canonical != "claude-opus-5-5"
         or len(text or "") > int(reviewer_cfg.get("max_chars", 8000) or 8000)
         or shutil.which("claude") is None
         or not _recent_verified_opus5_route(cfg)

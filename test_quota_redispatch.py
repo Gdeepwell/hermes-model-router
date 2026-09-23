@@ -191,7 +191,7 @@ class ExternalConductorTests(unittest.TestCase):
              patch("model_router._external_target_for_model", return_value="opus5"), \
              patch("model_router._force_terra_supervisor_preflight", return_value=forced):
             return route_llm_request(
-                request=request, provider="anthropic", model="claude-opus-5",
+                request=request, provider="anthropic", model="claude-opus-5-5",
                 api_call_count=1, turn_id="turn-external",
             )
 
@@ -204,7 +204,7 @@ class ExternalConductorTests(unittest.TestCase):
     def test_the_route_is_still_not_rewritten(self):
         """This branch may add text; it may never move the call to another provider."""
         result = self._route(request_for(envelope()))
-        self.assertEqual(result["metadata"]["model"], "claude-opus-5")
+        self.assertEqual(result["metadata"]["model"], "claude-opus-5-5")
         self.assertEqual(result["metadata"]["provider"], "anthropic")
         # Untouched: the middleware cannot move a call across providers, so the
         # request goes back carrying only the added text.

@@ -34,15 +34,15 @@ class AgentActivityTests(unittest.TestCase):
             lifecycle = Path(directory) / "bridge.jsonl"
             lifecycle.write_text("\n".join(map(json.dumps, [
                 {"bridge_run_id":"run-1","event":"started","state":"running","timestamp":20,"parent_session_id":"parent","parent_turn_id":"parent:turn","pid":999999,"review":True,"requested_read_only":True},
-                {"bridge_run_id":"run-1","event":"terminal","state":"success","timestamp":25,"parent_session_id":"parent","parent_turn_id":"parent:turn","canonical_model":"claude-opus-5","num_turns":2,"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"total_cost_usd":0.1,"duration_seconds":5,"review":True,"requested_read_only":True},
+                {"bridge_run_id":"run-1","event":"terminal","state":"success","timestamp":25,"parent_session_id":"parent","parent_turn_id":"parent:turn","canonical_model":"claude-opus-5-5","num_turns":2,"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"total_cost_usd":0.1,"duration_seconds":5,"review":True,"requested_read_only":True},
                 {"bridge_run_id":"run-1","event":"terminal","state":"success","timestamp":24,"parent_session_id":"parent"},
             ]))+"\n")
             router = Path(directory) / "router.jsonl"
-            router.write_text(json.dumps({"turn_id":"run-1:2","tier":"opus5","model":"claude-opus-5","effort":"external"})+"\n")
+            router.write_text(json.dumps({"turn_id":"run-1:2","tier":"opus5","model":"claude-opus-5-5","effort":"external"})+"\n")
             activity = load_agent_activity(db_path, now=30, router_log_path=router, bridge_lifecycle_path=lifecycle)
         self.assertEqual(len(activity["parents"]), 1)
         child = activity["parents"][0]["children"][0]
-        self.assertEqual((child["id"], child["goal"], child["state"], child["model"]), ("run-1", "Opus review", "success", "claude-opus-5"))
+        self.assertEqual((child["id"], child["goal"], child["state"], child["model"]), ("run-1", "Opus review", "success", "claude-opus-5-5"))
         self.assertEqual(child["api_calls"], 2)
         self.assertEqual(child["metrics"]["input_tokens"], 10)
         self.assertEqual(child["access_mode"], "read_only")
@@ -260,7 +260,7 @@ class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
             conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_name TEXT, timestamp REAL)")
             conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (1, "parent", "user", "inplementald", None, 90.0))
             conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-stopped", "parent", 100.0, None, "gpt-5.6-terra"))
-            conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-opus", "parent", 118.0, None, "claude-opus-5"))
+            conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-opus", "parent", 118.0, None, "claude-opus-5-5"))
             conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (2, "child-stopped", "user", stopped, None, 100.0))
             conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (3, "child-opus", "user", retried, None, 118.0))
             conn.execute("INSERT INTO async_delegations VALUES (?,?,?,?,?,?,?,?,?)", (
@@ -276,7 +276,7 @@ class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
         router_log_path = Path(directory) / "router.jsonl"
         router_log_path.write_text("\n".join([
             json.dumps({"turn_id": "child-stopped:sa-0:t", "tier": "sol", "model": "gpt-5.6-sol"}),
-            *(json.dumps({"turn_id": "child-opus:sa-0:t", "tier": "opus5", "model": "claude-opus-5"})
+            *(json.dumps({"turn_id": "child-opus:sa-0:t", "tier": "opus5", "model": "claude-opus-5-5"})
               for _ in range(16)),
         ]) + "\n", encoding="utf-8")
         return db_path, router_log_path
@@ -294,7 +294,7 @@ class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
     def test_the_worker_on_the_other_account_is_listed(self):
         """It ran sixteen calls on a separate subscription and had no row at all."""
         models = {child["model"] for child in self._children()}
-        self.assertIn("claude-opus-5", models)
+        self.assertIn("claude-opus-5-5", models)
 
     def test_no_session_is_shown_twice(self):
         sessions = [child["agent_session_id"] for child in self._children()]
@@ -302,7 +302,7 @@ class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
 
     def test_the_call_counts_follow_the_right_session(self):
         by_model = {child["model"]: child["api_calls"] for child in self._children()}
-        self.assertEqual(by_model["claude-opus-5"], 16)
+        self.assertEqual(by_model["claude-opus-5-5"], 16)
         self.assertEqual(by_model["gpt-5.6-sol"], 1)
 
     def test_a_relabelled_retry_still_matches_its_own_session(self):

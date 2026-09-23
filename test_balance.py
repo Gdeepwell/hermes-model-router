@@ -178,7 +178,7 @@ class ForcedCallTests(unittest.TestCase):
                  patch.object(claude_delegation, "_ACTIVE", True):
                 routed = route_llm_request(
                     request=_anthropic_request(text, ["mcp__delegate_task", "mcp__tool_call"]),
-                    provider="anthropic", model="claude-opus-5", api_call_count=1, turn_id="t1", platform="cli")
+                    provider="anthropic", model="claude-opus-5-5", api_call_count=1, turn_id="t1", platform="cli")
             events = [json.loads(line) for line in
                       Path(cfg["orchestration"]["path"]).read_text(encoding="utf-8").splitlines()]
         return routed["request"], events
