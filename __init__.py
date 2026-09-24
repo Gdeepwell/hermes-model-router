@@ -2537,11 +2537,22 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
     imperative won every time. The operator's configuration is not weaker than a
     built-in rule; it is the one thing here that was chosen deliberately.
     """
-    offered = set(names)
-    notes = _target_availability(names, cfg)
+    # Local tiers are reachable by label even when the host has no named model
+    # targets. Use the same candidate and ordering logic as root advice.
+    offered = set(names) | {
+        name for name in (cfg.get("models") or {})
+        if _account_of(name, cfg) == str(cfg.get("provider", "openai-codex"))
+        and _target_is_offered(name, cfg)
+    }
+    readings = _guarded_readings(cfg)
+    states = _account_states(cfg, readings)
+    notes = _target_availability(offered, cfg, states=states)
     chains = []
     for kind in WORK_KINDS:
-        chain = [name for name in _preference_list(kind, cfg) if name in offered]
+        if claude_delegation.is_active():
+            chain, _ = _advised_chain(kind, cfg, states, offered, readings)
+        else:
+            chain = [name for name in _preference_list(kind, cfg) if name in offered]
         if not chain:
             continue
         chains.append(f"{kind}: " + " > ".join(name + notes.get(name, "") for name in chain))
@@ -2562,6 +2573,14 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
         "suggestion, "
         + decides
     )
+
+
+def _worker_order_note(request: Dict[str, Any], cfg: Dict[str, Any]) -> str:
+    """Refresh a conductor's capacity advice without reclassifying its goal."""
+    if _find_delegate_tool(request) is None and not claude_delegation.offered(_tool_names(request)):
+        return ""
+    order = _preference_sentence(_delegation_target_names(), cfg)
+    return ("\n\n[ROUTER] Current worker order replaces earlier capacity advice. " + order) if order else ""
 
 
 def _goal_orientation_sentence() -> str:
@@ -3656,7 +3675,8 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         note = ""
         if forced is None:
             try:
-                note = _routing_note(request, kwargs, cfg)
+                note = (_worker_order_note(request, cfg) if subagent_marker
+                        else _routing_note(request, kwargs, cfg))
             except Exception:
                 note = ""
         if forced is None and not redispatch and not note:
@@ -3909,6 +3929,11 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         with_goal_contract = _with_goal_contract(routed)
         if with_goal_contract is not None:
             routed = with_goal_contract
+        if subagent_marker:
+            order = _worker_order_note(request, cfg)
+            if order:
+                routed = deepcopy(routed)
+                _append_user_instruction(routed, order)
         if forced_shadow_request is None and not subagent_marker:
             note = _routing_note(request, kwargs, cfg)
             if note:

@@ -1195,6 +1195,9 @@ the call rather than routing it, which is normal for Claude and Qwen.
 Balancing preserves usage-guard precedence: a soft-limited or closed account,
 or a cooling target, cannot be promoted because its five-hour window is freer.
 Unavailable targets remain visible in advice, but cannot win a forced Claude call.
+The root and conductor use the same effective preference order. Local Codex tiers
+remain candidates without named host targets; a conductor receives current order
+advice on subsequent calls so an old capacity snapshot cannot override it.
 
 The tests import the plugin as the `model_router` package (and a few modules by
 their bare name), and the Hermes venv ships neither pytest nor pip, so they run

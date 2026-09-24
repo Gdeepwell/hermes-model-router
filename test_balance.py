@@ -218,6 +218,25 @@ class ForcedCallTests(unittest.TestCase):
         forced = [e for e in events if e["event"] == "preflight_forced"][0]
         self.assertEqual(forced.get("balanced", ""), "")
 
+    def test_conductor_contract_uses_the_balanced_root_order(self):
+        request, _ = self._route(REVIEW, _reading(34, 86), _reading(1, 6))
+        contract = request["tools"][0]["input_schema"]["properties"]["context"]["enum"][0]
+        self.assertIn("review: terra > sonnet5 > opus5", contract)
+
+    def test_local_tiers_survive_and_conductor_advice_refreshes(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _cfg(d)
+            cfg["preferences"] = {"explore": ["luna", "haiku"]}
+            request = {"tools": [{"name": "delegate_task", "parameters": {}}]}
+            with patch.object(claude_delegation, "_ACTIVE", True), \
+                 patch.object(model_router, "_delegation_target_names", return_value=("haiku",)), \
+                 patch.object(usage_guard, "peek", return_value=_reading(0, 0)):
+                self.assertIn("explore: luna > haiku", model_router._worker_order_note(request, cfg))
+            with patch.object(claude_delegation, "_ACTIVE", True), \
+                 patch.object(model_router, "_delegation_target_names", return_value=("haiku",)), \
+                 patch.object(usage_guard, "peek", side_effect=lambda a, c: _reading(0, 65 if a == "openai-codex" else 0)):
+                self.assertIn("explore: haiku > luna", model_router._worker_order_note(request, cfg))
+
 
 if __name__ == "__main__":
     unittest.main()
