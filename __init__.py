@@ -3491,7 +3491,7 @@ def _claude_route_tool(request: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]
 
 
 def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str, Any]) -> str:
-    """Advice for a Claude parent: which account and tier, per kind of work.
+    """Advice for a root parent: which account and tier, per kind of work.
 
     With orchestration off, a parent on an external account got no routing advice
     at all; the preference chains only ever reached a forced conductor. This is
@@ -3894,6 +3894,11 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         with_goal_contract = _with_goal_contract(routed)
         if with_goal_contract is not None:
             routed = with_goal_contract
+        if forced_shadow_request is None and not subagent_marker:
+            note = _routing_note(request, kwargs, cfg)
+            if note:
+                routed = deepcopy(routed)
+                _append_user_instruction(routed, note)
     # TokenPlan's Anthropic-compatible Qwen endpoint rejects OpenAI/Codex
     # control fields. Sanitize the final request after every orchestration,
     # shadow, fallback, and cross-provider rewrite has run.

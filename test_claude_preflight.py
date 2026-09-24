@@ -115,6 +115,14 @@ class ForcedPreflightTests(unittest.TestCase):
         self.assertEqual(_names(request), ["mcp__delegate_task"])
         self.assertEqual(request["tool_choice"], {"type": "tool", "name": "mcp__delegate_task"})
 
+    def test_short_codex_parent_gets_claude_review_advice_without_preflight(self):
+        request = self._route(_openai_request(REVIEW, ["delegate_task", "tool_call"]),
+                              model="gpt-5.6-terra", provider="openai-codex")
+        instruction = self._instruction(request)
+        self.assertNotIn("[INTERNAL ORCHESTRATOR PREFLIGHT]", instruction)
+        self.assertIn('sonnet5 → delegate_claude(tier="sonnet")', instruction)
+        self.assertEqual(_names(request), ["delegate_task", "tool_call"])
+
     def test_a_session_with_no_route_to_claude_keeps_the_delegate_task_only_call(self):
         request = self._route(_anthropic_request(REVIEW, ["mcp__delegate_task", "mcp__read_file"]))
         self.assertEqual(_names(request), ["mcp__delegate_task"])
