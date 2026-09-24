@@ -79,11 +79,12 @@ class ForcedPreflightTests(unittest.TestCase):
     def test_a_deferred_claude_route_is_offered_through_the_tool_call_bridge(self):
         request = self._route(_anthropic_request(
             REVIEW, ["mcp__delegate_task", "mcp__tool_search", "mcp__tool_describe", "mcp__tool_call"]))
-        self.assertEqual(_names(request), ["mcp__delegate_task", "mcp__tool_call"])
+        self.assertEqual(_names(request), ["mcp__delegate_task", "mcp__tool_describe", "mcp__tool_call"])
         self.assertEqual(request["tool_choice"], {"type": "any"})
         instruction = self._instruction(request)
         self.assertIn('delegate_claude(tier="sonnet")', instruction)
         self.assertIn('tool_call with name "delegate_claude"', instruction)
+        self.assertIn('load it once with tool_describe', instruction)
         self.assertIn("review", instruction)
 
     def test_a_directly_listed_delegate_claude_is_offered_as_itself(self):

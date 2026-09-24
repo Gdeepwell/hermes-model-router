@@ -3011,9 +3011,13 @@ def _prepare_orchestration_delegation(
                 required.append(name)
         schema["required"] = required
     if force_tools and claude_target:
-        # Two tools and "call one of them": the parent still has to delegate, but
-        # the Claude preference is reachable. Next iteration gets the full toolset.
-        routed["tools"] = [planner_tool, claude_tool]
+        # A deferred Claude tool must be described before tool_call can invoke it.
+        # Keep that discovery step available during the restricted first call.
+        describe_tool = next((tool for tool in request.get("tools") or []
+                              if isinstance(tool, dict) and
+                              (tool.get("name") or (tool.get("function") or {}).get("name"))
+                              in {"tool_describe", "mcp__tool_describe"}), None) if via_bridge else None
+        routed["tools"] = [planner_tool] + ([describe_tool] if describe_tool else []) + [claude_tool]
         if _is_anthropic_shaped(routed):
             routed["tool_choice"] = {"type": "any"}
         else:
