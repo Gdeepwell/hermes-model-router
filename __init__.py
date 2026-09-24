@@ -3400,7 +3400,10 @@ def _note_names(kind: str, cfg: Dict[str, Any], states: Dict[str, str], claude_o
         # An account at its limit still runs, but it is no longer the first thing to reach for.
         names = ([n for n in names if _account_of(n, cfg) not in held]
                  + [n for n in names if _account_of(n, cfg) in held])
-    return names
+    # Unavailable entries remain visible for explanations, behind usable ones.
+    return sorted(names, key=lambda n: (
+        states.get(_account_of(n, cfg)) == "closed" or _tier_cooldown_remaining(n, cfg) > 0,
+    ))
 
 
 def _advised_chain(
@@ -3421,7 +3424,10 @@ def _advised_chain(
     if not policy["enabled"] or not claude_delegation.is_active() or len(names) < 2:
         return names, ""
     first_account = _account_of(names[0], cfg)
-    other = next((n for n in names if _account_of(n, cfg) not in ("", first_account)), "")
+    other = next((n for n in names
+                  if _account_of(n, cfg) not in ("", first_account)
+                  and states.get(_account_of(n, cfg)) not in ("soft", "closed")
+                  and _tier_cooldown_remaining(n, cfg) <= 0), "")
     if not first_account or not other:
         return names, ""
     other_account = _account_of(other, cfg)
@@ -3477,9 +3483,11 @@ def _claude_first_choice(
         except Exception:
             return "", "", ""
     readings = _guarded_readings(cfg)
-    chain, balanced = _advised_chain(kind, cfg, _account_states(cfg, readings),
+    states = _account_states(cfg, readings)
+    chain, balanced = _advised_chain(kind, cfg, states,
                                      set(_delegation_target_names()), readings)
-    first = chain[0] if chain else ""
+    first = next((name for name in chain if states.get(_account_of(name, cfg)) != "closed"
+                  and _tier_cooldown_remaining(name, cfg) <= 0), "")
     return kind, (first if first in claude_delegation.TIER_FOR_TARGET else ""), balanced
 
 

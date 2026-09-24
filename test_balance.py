@@ -162,6 +162,18 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(names, ["terra", "sonnet5", "opus5"])
         self.assertEqual(reason, "")
 
+    def test_balance_cannot_revive_a_weekly_held_account(self):
+        for weekly in (85, 95):
+            with self.subTest(weekly=weekly):
+                names, reason = self._chain("code", _reading(weekly, 0), _reading(10, 65))
+                self.assertEqual(names, ["terra", "sonnet5"])
+                self.assertEqual(reason, "")
+
+    def test_balance_cannot_promote_a_cooling_target(self):
+        with patch("model_router._tier_cooldown_remaining", side_effect=lambda n, c: 60 if n == "sonnet5" else 0):
+            names, reason = self._chain("code", _reading(10, 0), _reading(10, 65))
+        self.assertEqual((names, reason), (["terra", "sonnet5"], ""))
+
 
 class ForcedCallTests(unittest.TestCase):
     def setUp(self):
