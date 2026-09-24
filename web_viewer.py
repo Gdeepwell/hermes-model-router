@@ -849,7 +849,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 <label class="check"><input id="auto" type="checkbox" checked> <span data-i18n="router.auto">Automatikus frissítés</span></label>
 <button id="refresh" data-i18n="router.refresh">Frissítés</button><span id="status" class="status" data-i18n="router.loading">Betöltés…</span>
 </div>
-<div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-5.6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-5.6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5.5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card haiku"><div class="n" id="haiku">0</div><div class="k" data-i18n="card.haiku">Claude Haiku 4.5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
+<div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5.5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card haiku"><div class="n" id="haiku">0</div><div class="k" data-i18n="card.haiku">Claude Haiku 4.5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
 <div class="account-groups" id="account-groups"></div>
 <div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
 <section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.workflow.heading">Munkafolyamat</h3><div class="workflow-switch" id="workflow-switch"></div></div><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.routing.heading">Útválasztás</h3><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.fb.heading">Hermes tartaléklánc</h3><div class="sub"><span data-i18n="settings.fb.sub">Ha az elsődleges fiók nem tud kiszolgálni, ezek jönnek sorban.</span> <b class="fb-file" data-i18n="settings.fb.file">Ez a ~/.hermes/config.yaml fájlt írja, nem a routerét — minden mentés előtt másolat készül róla.</b></div><div class="pref-kinds" id="fb-chains"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
@@ -882,10 +882,10 @@ const I18N = {
     'router.loading': 'Loading…',
     // Cards
     'card.total': 'Total routing decisions',
-    'card.luna': 'GPT-5.6 Luna',
+    'card.luna': 'GPT-6 Luna',
     'card.spark': 'GPT-5.3 Spark',
     'card.terra': 'GPT-5.6 Terra',
-    'card.sol': 'GPT-5.6 Sol',
+    'card.sol': 'GPT-6 Sol',
     'card.opus5': 'Claude Opus 5.5',
     'card.sonnet5': 'Claude Sonnet 5',
     'card.haiku': 'Claude Haiku 4.5',
@@ -1106,10 +1106,10 @@ const I18N = {
     'router.refresh': 'Frissítés',
     'router.loading': 'Betöltés…',
     'card.total': 'Összes routing döntés',
-    'card.luna': 'GPT-5.6 Luna',
+    'card.luna': 'GPT-6 Luna',
     'card.spark': 'GPT-5.3 Spark',
     'card.terra': 'GPT-5.6 Terra',
-    'card.sol': 'GPT-5.6 Sol',
+    'card.sol': 'GPT-6 Sol',
     'card.opus5': 'Claude Opus 5.5',
     'card.sonnet5': 'Claude Sonnet 5',
     'card.haiku': 'Claude Haiku 4.5',

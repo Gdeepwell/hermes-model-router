@@ -18,10 +18,10 @@ from model_router import (
 
 
 MODELS = {
-    "luna": "gpt-5.6-luna",
+    "luna": "gpt-6-luna",
     "spark": "gpt-5.3-codex-spark",
     "terra": "gpt-5.6-terra",
-    "sol": "gpt-5.6-sol",
+    "sol": "gpt-6-sol",
 }
 
 READ_ONLY_UI_GOAL = (

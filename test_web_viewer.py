@@ -221,8 +221,8 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_only_top_summary_cards_use_expanded_model_family_labels(self):
         cards = HTML[HTML.index('<div class="cards">'):HTML.index('<div id="runs"')]
-        for key, label in [('card.luna', 'GPT-5.6 Luna'), ('card.spark', 'GPT-5.3 Spark'),
-                           ('card.terra', 'GPT-5.6 Terra'), ('card.sol', 'GPT-5.6 Sol'),
+        for key, label in [('card.luna', 'GPT-6 Luna'), ('card.spark', 'GPT-5.3 Spark'),
+                           ('card.terra', 'GPT-5.6 Terra'), ('card.sol', 'GPT-6 Sol'),
                            ('card.opus5', 'Claude Opus 5.5')]:
             self.assertIn(f'<div class="k" data-i18n="{key}">{label}</div>', cards)
             self.assertEqual(self.i18n(key), (label, label))
@@ -232,7 +232,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn("return effort?`${tier} · ${effort}`:tier", HTML)
         self.assertIn("String(raw?.tier||raw?.model||node.model||kind).toUpperCase()", HTML)
         router_run_markup = HTML[HTML.index('<div id="runs"'):HTML.index('<section id="settings-panel"')]
-        self.assertNotIn('GPT-5.6 Sol', router_run_markup)
+        self.assertNotIn('GPT-6 Sol', router_run_markup)
         self.assertIn('<div class="card sol">', cards)
         self.assertIn('.pill.sol{color:var(--sol)}', HTML)
 
@@ -876,16 +876,16 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
     def test_options_include_every_router_model_and_a_claude_tier(self):
         """Restricting the picker to Hermes delegation targets alone rejected the
         operator's own orchestrator chain, which named this router's own account
-        (openai-codex/gpt-5.6-sol) -- never a Hermes delegation target in the
+        (openai-codex/gpt-6-sol) -- never a Hermes delegation target in the
         first place."""
         router_cfg = {
-            "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+            "models": {"terra": "gpt-5.6-terra", "sol": "gpt-6-sol"},
             "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
             "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
         }
         with patch.object(web_viewer, "_read_hermes_config", return_value={}):
             options = web_viewer._fallback_chain_options(router_cfg)
-        self.assertIn({"key": "sol", "provider": "openai-codex", "model": "gpt-5.6-sol"}, options)
+        self.assertIn({"key": "sol", "provider": "openai-codex", "model": "gpt-6-sol"}, options)
         self.assertIn({"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"}, options)
 
     def test_options_still_include_the_hermes_delegation_targets(self):
@@ -899,7 +899,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
     def test_a_route_already_in_the_saved_chain_can_never_fail_a_save(self):
         """Measured live 2026-09-18: every settings save 400'd and reverted every
         toggle, because the operator's real orchestrator chain named a route
-        (openai-codex/gpt-5.6-sol) the old picker never offered. Whatever is
+        (openai-codex/gpt-6-sol) the old picker never offered. Whatever is
         already saved must always be re-acceptable, even if the picker's own
         options do not (any longer, or yet) include it."""
         import tempfile
@@ -907,7 +907,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "config.yaml"
             target.write_text(
-                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-6-sol\n"
                 "delegation:\n  targets:\n"
                 "    opus5:\n      provider: anthropic\n      model: claude-opus-5-5\n"
                 "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
@@ -915,10 +915,10 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
                 error = web_viewer._save_hermes_fallback(
-                    {"orchestrator": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]}, router_cfg)
+                    {"orchestrator": [{"provider": "openai-codex", "model": "gpt-6-sol"}]}, router_cfg)
             self.assertIsNone(error)
             written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
-            self.assertEqual(written["fallback_providers"][0]["model"], "gpt-5.6-sol")
+            self.assertEqual(written["fallback_providers"][0]["model"], "gpt-6-sol")
 
     def test_an_unknown_route_outside_the_saved_chain_is_still_rejected(self):
         import tempfile
@@ -946,7 +946,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             router_cfg = {
                 "callable": {"terra": True, "sol": True},
                 "default_model": "terra",
-                "models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+                "models": {"terra": "gpt-5.6-terra", "sol": "gpt-6-sol"},
                 "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
                 "preferences": {},
                 "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
@@ -956,7 +956,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
 
             hermes_path = Path(directory) / "hermes-config.yaml"
             hermes_path.write_text(
-                "fallback_providers:\n- provider: openai-codex\n  model: gpt-5.6-sol\n"
+                "fallback_providers:\n- provider: openai-codex\n  model: gpt-6-sol\n"
                 "delegation:\n  targets:\n"
                 "    opus5:\n      provider: anthropic\n      model: claude-opus-5-5\n"
                 "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
@@ -966,7 +966,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
                 "callable": {"terra": True, "sol": False},
                 "default_model": "terra",
                 "preferences": {},
-                "hermes_fallback": {"orchestrator": [{"provider": "openai-codex", "model": "gpt-5.6-sol"}]},
+                "hermes_fallback": {"orchestrator": [{"provider": "openai-codex", "model": "gpt-6-sol"}]},
                 "usage_limits": {},
             }).encode("utf-8")
 
@@ -1054,7 +1054,7 @@ class DefaultModelSaveTests(unittest.TestCase):
     """
 
     CONFIG = {
-        "models": {"luna": "gpt-5.6-luna", "terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol"},
+        "models": {"luna": "gpt-6-luna", "terra": "gpt-5.6-terra", "sol": "gpt-6-sol"},
         "callable": {"luna": True, "terra": True, "sol": False, "opus5": True},
         "fallbacks": {"sol": "terra"},
         "tier_providers": {
@@ -1095,7 +1095,7 @@ class DefaultModelSaveTests(unittest.TestCase):
             self.assertIsNone(error)
             self.assertEqual(config["default_model"], "luna")
             written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
-            self.assertEqual(written["model"]["default"], "gpt-5.6-luna")
+            self.assertEqual(written["model"]["default"], "gpt-6-luna")
             self.assertEqual(written["model"]["provider"], "openai-codex")
             self.assertEqual(written["model"]["api_mode"], "codex_responses")
             backups = list(Path(directory).glob("config.yaml.bak-router-*"))
@@ -2328,7 +2328,7 @@ class HermesParentGuardTests(unittest.TestCase):
     """
 
     CONFIG = {
-        "models": {"terra": "gpt-5.6-terra", "luna": "gpt-5.6-luna", "qwen": "qwen3.7-plus"},
+        "models": {"terra": "gpt-5.6-terra", "luna": "gpt-6-luna", "qwen": "qwen3.7-plus"},
         "callable": {"terra": True, "luna": True, "qwen": True},
         "tier_providers": {"terra": "openai-codex", "luna": "openai-codex", "qwen": "qwen-token"},
         "default_model": "terra",
@@ -2375,7 +2375,7 @@ class HermesParentGuardTests(unittest.TestCase):
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
                 self.assertIsNone(web_viewer._save_default_model("luna", config))
             written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
-        self.assertEqual(written["model"]["default"], "gpt-5.6-luna")
+        self.assertEqual(written["model"]["default"], "gpt-6-luna")
 
     def test_a_default_model_save_reads_the_hermes_config_once(self):
         config = self._config()

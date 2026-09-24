@@ -8,10 +8,10 @@ from model_router import RouteDecision, _log_decision, route_llm_request, run_ll
 
 
 MODELS = {
-    "luna": "gpt-5.6-luna",
+    "luna": "gpt-6-luna",
     "spark": "gpt-5.3-codex-spark",
     "terra": "gpt-5.6-terra",
-    "sol": "gpt-5.6-sol",
+    "sol": "gpt-6-sol",
     "qwen": "qwen3.7-plus",
 }
 

@@ -72,12 +72,12 @@ class AgentActivityTests(unittest.TestCase):
                 )""")
                 conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, started_at REAL, ended_at REAL, model TEXT)")
                 conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_name TEXT, timestamp REAL)")
-                conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-session", "session-a", 101.0, None, "gpt-5.6-sol"))
+                conn.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", ("child-session", "session-a", 101.0, None, "gpt-6-sol"))
                 conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (1, "session-a", "user", "Kérlek nézd át a változtatást.", None, 80.0))
                 conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?)", (2, "child-session", "tool", json.dumps({"output": "tests are running"}), "terminal", 103.0))
                 conn.execute("INSERT INTO async_delegations VALUES (?,?,?,?,?,?,?,?,?)", (
                     "deleg-1", "session-a", "session-a", "running", 100.0, None, 120.0,
-                    json.dumps({"goal": "Build dashboard", "toolsets": ["file", "terminal"], "model": "gpt-5.6-sol"}), None,
+                    json.dumps({"goal": "Build dashboard", "toolsets": ["file", "terminal"], "model": "gpt-6-sol"}), None,
                 ))
                 conn.execute("INSERT INTO async_delegations VALUES (?,?,?,?,?,?,?,?,?)", (
                     "deleg-2", "session-a", "session-a", "completed", 90.0, 110.0, 110.0,
@@ -90,7 +90,7 @@ class AgentActivityTests(unittest.TestCase):
             router_log_path.write_text(
                 "\n".join([
                     json.dumps({"turn_id": "child-session:turn-1", "tier": "spark", "model": "gpt-5.3-codex-spark", "effort": "medium"}),
-                    json.dumps({"turn_id": "child-session:turn-2", "tier": "sol", "model": "gpt-5.6-sol", "effort": "medium"}),
+                    json.dumps({"turn_id": "child-session:turn-2", "tier": "sol", "model": "gpt-6-sol", "effort": "medium"}),
                 ]) + "\n",
                 encoding="utf-8",
             )
@@ -104,9 +104,9 @@ class AgentActivityTests(unittest.TestCase):
         self.assertEqual(activity["parents"][0]["children"][0]["activity"], "Terminal parancs fut")
         self.assertEqual(activity["parents"][0]["children"][0]["routed_calls"], [
             {"tier": "spark", "model": "gpt-5.3-codex-spark", "effort": "medium"},
-            {"tier": "sol", "model": "gpt-5.6-sol", "effort": "medium"},
+            {"tier": "sol", "model": "gpt-6-sol", "effort": "medium"},
         ])
-        self.assertEqual(activity["parents"][0]["children"][0]["model"], "gpt-5.6-sol")
+        self.assertEqual(activity["parents"][0]["children"][0]["model"], "gpt-6-sol")
         self.assertEqual(activity["parents"][0]["children"][0]["console"][0]["tool"], "terminal")
         self.assertNotIn("output", activity["parents"][0]["children"][0]["console"][0])
         # "Review tests" has no session row of its own in this fixture — only
@@ -275,7 +275,7 @@ class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
             ))
         router_log_path = Path(directory) / "router.jsonl"
         router_log_path.write_text("\n".join([
-            json.dumps({"turn_id": "child-stopped:sa-0:t", "tier": "sol", "model": "gpt-5.6-sol"}),
+            json.dumps({"turn_id": "child-stopped:sa-0:t", "tier": "sol", "model": "gpt-6-sol"}),
             *(json.dumps({"turn_id": "child-opus:sa-0:t", "tier": "opus5", "model": "claude-opus-5-5"})
               for _ in range(16)),
         ]) + "\n", encoding="utf-8")
@@ -303,7 +303,7 @@ class TwoDispatchesInsideOneWindowTests(unittest.TestCase):
     def test_the_call_counts_follow_the_right_session(self):
         by_model = {child["model"]: child["api_calls"] for child in self._children()}
         self.assertEqual(by_model["claude-opus-5-5"], 16)
-        self.assertEqual(by_model["gpt-5.6-sol"], 1)
+        self.assertEqual(by_model["gpt-6-sol"], 1)
 
     def test_a_relabelled_retry_still_matches_its_own_session(self):
         """The retry carries the same work with the [opus5] prefix stripped —

@@ -1,4 +1,4 @@
-"""Conservative GPT-5.6 Luna/Terra/Sol + Codex-Spark request router."""
+"""Conservative GPT-6 Luna/GPT-5.6 Terra/GPT-6 Sol + Codex-Spark request router."""
 
 from __future__ import annotations
 
@@ -41,10 +41,10 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": True,
     "provider": "openai-codex",
     "models": {
-        "luna": "gpt-5.6-luna",
+        "luna": "gpt-6-luna",
         "spark": "gpt-5.3-codex-spark",
         "terra": "gpt-5.6-terra",
-        "sol": "gpt-5.6-sol",
+        "sol": "gpt-6-sol",
         "qwen": "qwen3.7-plus",
     },
     # Which tiers are callable — togglable from the web dashboard.

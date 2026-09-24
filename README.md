@@ -27,9 +27,9 @@ is what keeps a single quota from carrying everything.
 | Tier | Model | Account | Purpose |
 |------|-------|---------|---------|
 | `terra` | GPT-5.6 Terra | Codex | Durable default parent and conductor |
-| `luna` | GPT-5.6 Luna | Codex | Simple tasks, short answers |
+| `luna` | GPT-6 Luna | Codex | Simple tasks, short answers |
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
-| `sol` | GPT-5.6 Sol | Codex | Complex, security-sensitive, design |
+| `sol` | GPT-6 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
 | `opus5` | Claude Opus 5.5 | Claude subscription | Delegation target for hard or consequential work (see below) |
 | `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
@@ -1217,6 +1217,8 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.16.0** — The Luna and Sol tiers run GPT-6 Luna (`gpt-6-luna`) and GPT-6 Sol (`gpt-6-sol`) instead of GPT-5.6. The `models.luna` and `models.sol` defaults moved together, while the tier keys stay `luna` and `sol`; preference chains, fallbacks and existing logs need no rewrite. The dashboard still counts older GPT-5.6 Luna and Sol log lines under the same cards.
 
 **1.15.0** — The Opus tier runs Claude Opus 5.5 (`claude-opus-5-5`) instead
 of Opus 5. The `claude_delegation.tiers.opus` default, the bridge's canonical
