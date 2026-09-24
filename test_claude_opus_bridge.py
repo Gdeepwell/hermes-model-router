@@ -120,13 +120,16 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         run.return_value.stderr = ""
         run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}}, "result": "ok"})
         with tempfile.TemporaryDirectory() as directory:
-            out = dispatch("[sonnet-review] Review only", Path(directory), review=True)
+            out = dispatch("[sonnet-review] Review only", Path(directory), review=True,
+                           lifecycle_path=Path(directory) / "bridge.jsonl")
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--model") + 1], "sonnet")
         # Sonnet has no lower tier worth accepting: the result is trusted on the
         # strength of the model that produced it, so a silent drop must not happen.
         self.assertNotIn("--fallback-model", command)
         self.assertEqual(out["effective_model"], "claude-sonnet-5")
+        self.assertEqual((log.call_args.args[0].tier, log.call_args.args[0].model),
+                         ("sonnet5", "claude-sonnet-5"))
 
     @patch("claude_opus_bridge._log_decision")
     @patch("claude_opus_bridge.subprocess.run")

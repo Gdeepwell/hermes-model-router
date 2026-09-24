@@ -257,7 +257,7 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         raise RuntimeError(f"Claude Code failed with subtype {payload.get('subtype') or 'unknown'}")
     cfg = _load_config()
     _log_decision(
-        RouteDecision("opus5", effective_model, reason, "external"),
+        RouteDecision("sonnet5" if alias == "sonnet" else "opus5", effective_model, reason, "external"),
         {"turn_id": f"{bridge_run_id}:{payload.get('num_turns', 1)}", "api_call_count": payload.get("num_turns", 1), "request": {}},
         cfg,
     )
