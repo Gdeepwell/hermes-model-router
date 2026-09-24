@@ -1198,6 +1198,10 @@ Unavailable targets remain visible in advice, but cannot win a forced Claude cal
 The root and conductor use the same effective preference order. Local Codex tiers
 remain candidates without named host targets; a conductor receives current order
 advice on subsequent calls so an old capacity snapshot cannot override it.
+Hard usage limits refuse new workers on both accounts. Running workers return a
+router stop without a provider call once a fresh reading closes their account;
+parent continuation remains available. Same-account model step-down is only a
+soft-limit policy, never a remedy for an account's hard limit.
 
 The tests import the plugin as the `model_router` package (and a few modules by
 their bare name), and the Hermes venv ships neither pytest nor pip, so they run

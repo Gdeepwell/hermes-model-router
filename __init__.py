@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - Hermes includes PyYAML
 
 from . import claude_delegation
 from . import usage_guard
+from . import worker_admission
 from .hermes_paths import hermes_path
 
 _logger = logging.getLogger("model_router")
@@ -562,24 +563,9 @@ def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecis
             label, target = "soft", outcome.tier
             window_reason = f"weekly {outcome.usage}"
         elif outcome.refused:
-            # The hard limit refuses the call outright rather than naming a
-            # step-down target, so the target comes from the same step_down
-            # map the soft limit uses -- delegation to the account is closed
-            # either way, and a configured step-down tier is the one route
-            # left that does not depend on it.
-            limits = usage_guard.account_limits(account, cfg) or {}
-            target = (limits.get("step_down") or {}).get(decision.tier)
-            if not target:
-                return decision
-            label = "hard"
-            # M10: the hard limit can trigger on either window; name whichever
-            # one actually did rather than always claiming "weekly".
-            hard_percent = limits.get("hard_percent", 90.0)
-            session_value = reading.session if reading is not None else None
-            if session_value is not None and session_value >= hard_percent:
-                window_reason = f"session {session_value:.0f}%"
-            else:
-                window_reason = f"weekly {outcome.usage}"
+            # Account closure is enforced before spawning and at worker execution.
+            # Moving to another model on the same account cannot rescue it.
+            return decision
         else:
             return decision
         if not _is_routable_tier(target, cfg) or not _is_callable_tier(target, cfg):
@@ -4425,6 +4411,12 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     cfg = _load_config()
     provider = str(kwargs.get("provider", "")).casefold()
     configured_provider = str(cfg.get("provider", "openai-codex")).casefold()
+    if (cfg.get("enabled", True) and isinstance(request, dict)
+            and (str(kwargs.get("platform", "")).casefold() == "subagent"
+                 or ":sa-" in str(kwargs.get("turn_id", "")))):
+        refused = worker_admission.refusal(provider, str(request.get("model", "")), cfg)
+        if refused:
+            return worker_admission.stopped_response(refused, request.get("model", ""))
     if not isinstance(request, dict) or not callable(next_call) or provider != configured_provider:
         if not isinstance(request, dict) or not callable(next_call):
             return next_call(request)
@@ -4647,6 +4639,7 @@ def on_subagent_stop(**kwargs: Any) -> None:
 def register(ctx: Any) -> None:
     ctx.register_middleware("llm_request", route_llm_request)
     ctx.register_middleware("llm_execution", run_llm_with_transient_failover)
+    ctx.register_middleware("tool_execution", worker_admission.guard_tool_execution)
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("subagent_start", on_subagent_start)
     ctx.register_hook("subagent_stop", on_subagent_stop)

@@ -278,10 +278,11 @@ def _error(message: str) -> str:
 
 def next_codex_route(target: str, cfg: Dict[str, Any]) -> str:
     """The Codex tier to name when Claude delegation cannot take this target's work."""
-    from . import _is_callable_tier, _is_routable_tier, _peers_for
+    from . import _is_callable_tier, _is_routable_tier, _peers_for, _account_of, worker_admission
 
     def usable(name: str) -> bool:
-        return bool(name) and _is_routable_tier(name, cfg) and _is_callable_tier(name, cfg)
+        return (bool(name) and _is_routable_tier(name, cfg) and _is_callable_tier(name, cfg)
+                and not worker_admission.refusal(_account_of(name, cfg), name, cfg))
 
     chain = cfg.get("fallbacks") or {}
     seen, current = {target}, target
