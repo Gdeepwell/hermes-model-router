@@ -359,6 +359,13 @@ optional rather than a behaviour change. An escalation degrades to its tier's
 `explicit_<tier>_xhigh` means "no escalation configured" instead of silently
 capping the request.
 
+The Settings tab edits only the four plain routed-tier keys: `luna`, `spark`,
+`terra`, and `sol`. `opus5` is a route/log marker; Qwen has no dashboard effort
+control because the router strips reasoning; and Claude-only `haiku` / `sonnet5`
+are not routed here. The situational `sol_long` and `explicit_<tier>` /
+`explicit_<tier>_xhigh` keys remain file-only in `router_config.yaml` or its
+local overlay.
+
 ### Images force a vision-capable route
 
 Spark is text-only. An attached image routes to Terra as a policy decision, ahead
@@ -1217,6 +1224,14 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.17.0** — The Settings tab now edits the plain `effort` values for Luna,
+Spark, Terra and Sol. The picker offers the four shared provider levels — `low`,
+`medium`, `high` and `xhigh` — and writes only its changed tier into
+`router_config.local.yaml`; `router_config.yaml` remains the shipped default.
+Route markers and situational effort keys, including `opus5`, `sol_long` and the
+`explicit_*` keys, stay file-only because they do not mean one ordinary tier
+setting.
 
 **1.16.0** — The Luna and Sol tiers run GPT-6 Luna (`gpt-6-luna`) and GPT-6 Sol (`gpt-6-sol`) instead of GPT-5.6. The `models.luna` and `models.sol` defaults moved together, while the tier keys stay `luna` and `sol`; preference chains, fallbacks and existing logs need no rewrite. The dashboard still counts older GPT-5.6 Luna and Sol log lines under the same cards.
 

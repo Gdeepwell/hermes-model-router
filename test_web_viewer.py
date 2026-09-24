@@ -2547,3 +2547,144 @@ class RefreshButtonUsageTests(DashboardProbeMixin, unittest.TestCase):
         for wiring in ("$('last').addEventListener('change',", "$('refresh').addEventListener('click',"):
             line = HTML[HTML.index(wiring) + len(wiring):]
             self.assertTrue(line.startswith("()=>"), f"{wiring} passes the event through")
+
+
+class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
+    """The dashboard owns the four plain routed tiers, not route-marker or situational effort keys."""
+
+    CONFIG = {
+        "models": {
+            "luna": "gpt-6-luna", "spark": "gpt-5.3-codex-spark",
+            "terra": "gpt-5.6-terra", "sol": "gpt-6-sol",
+        },
+        "callable": {"luna": True, "spark": True, "terra": True, "sol": True},
+        "tier_providers": {"luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex", "sol": "openai-codex"},
+        "effort": {
+            "luna": "low", "spark": "medium", "terra": "medium", "sol": "medium",
+            "opus5": "external", "sol_long": "medium", "explicit_sol": "medium",
+            "explicit_sol_xhigh": "medium", "explicit_luna_xhigh": "high",
+            "explicit_spark_xhigh": "high", "explicit_terra_xhigh": "high",
+        },
+    }
+
+    def _write_config(self, directory):
+        target = Path(directory) / "router_config.yaml"
+        with open(target, "w", encoding="utf-8") as f:
+            web_viewer.yaml.dump(self.CONFIG, f)
+        return target
+
+    def _request(self, config_path, method, payload=None):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+             patch.object(web_viewer, "_router_module", return_value=None):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/api/config", data=data, method=method,
+                    headers={"Content-Type": "application/json"} if data is not None else {},
+                )
+                try:
+                    with urllib.request.urlopen(request) as response:
+                        return response.status, json.load(response)
+                except urllib.error.HTTPError as error:
+                    return error.code, json.load(error)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_get_serves_only_the_four_dashboard_managed_effort_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, payload = self._request(self._write_config(directory), "GET")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["effort"], {"luna": "low", "spark": "medium", "terra": "medium", "sol": "medium"})
+        self.assertNotIn("opus5", payload["effort"])
+
+    def test_a_valid_effort_save_writes_only_the_local_delta_and_preserves_the_shipped_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            shipped_before = config_path.read_bytes()
+            status, body = self._request(config_path, "POST", {"effort": {"terra": " HIGH "}})
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+            self.assertEqual(config_path.read_bytes(), shipped_before)
+        self.assertEqual((status, body), (200, {"success": True}))
+        self.assertEqual(written, {"effort": {"terra": "high"}})
+
+    def test_a_non_object_effort_payload_is_refused_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            shipped_before = config_path.read_bytes()
+            status, body = self._request(config_path, "POST", {"effort": ["high"]})
+            local = config_path.with_name("router_config.local.yaml")
+            self.assertFalse(local.exists())
+            self.assertEqual(config_path.read_bytes(), shipped_before)
+        self.assertEqual(status, 400)
+        self.assertIn("object", body["error"])
+
+    def test_unmanaged_effort_keys_are_refused_without_writing(self):
+        for key in ("opus5", "qwen", "haiku", "sonnet5", "sol_long", "explicit_sol", "explicit_spark_xhigh"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                config_path = self._write_config(directory)
+                shipped_before = config_path.read_bytes()
+                status, body = self._request(config_path, "POST", {"effort": {key: "high"}})
+                self.assertEqual(status, 400)
+                self.assertIn(key, body["error"])
+                self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
+                self.assertEqual(config_path.read_bytes(), shipped_before)
+
+    def test_non_string_and_blank_effort_values_are_refused_without_writing(self):
+        for value in (True, "   "):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                config_path = self._write_config(directory)
+                shipped_before = config_path.read_bytes()
+                status, body = self._request(config_path, "POST", {"effort": {"terra": value}})
+                self.assertEqual(status, 400)
+                self.assertIn("terra", body["error"])
+                self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
+                self.assertEqual(config_path.read_bytes(), shipped_before)
+
+    def test_external_and_unknown_effort_values_are_refused_without_writing(self):
+        for value in ("external", "max"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                config_path = self._write_config(directory)
+                shipped_before = config_path.read_bytes()
+                status, body = self._request(config_path, "POST", {"effort": {"terra": value}})
+                self.assertEqual(status, 400)
+                self.assertIn("low, medium, high, xhigh", body["error"])
+                self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
+                self.assertEqual(config_path.read_bytes(), shipped_before)
+
+    def test_an_unrelated_existing_local_override_survives_an_effort_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            local = config_path.with_name("router_config.local.yaml")
+            local.write_text("fallbacks:\n  sol: terra\n", encoding="utf-8")
+            status, _ = self._request(config_path, "POST", {"effort": {"spark": "xhigh"}})
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+        self.assertEqual(status, 200)
+        self.assertEqual(written, {"fallbacks": {"sol": "terra"}, "effort": {"spark": "xhigh"}})
+
+    def test_the_reasoning_effort_control_has_all_of_its_i18n_keys_in_both_languages(self):
+        for key in ("settings.effort.heading", "settings.effort.luna", "settings.effort.spark",
+                    "settings.effort.terra", "settings.effort.sol", "settings.effort.low",
+                    "settings.effort.medium", "settings.effort.high", "settings.effort.xhigh"):
+            self.i18n(key)
+
+    def test_the_control_offers_exactly_the_four_shared_effort_levels(self):
+        source = self.javascript_function("renderEffort") or ""
+        self.assertIn("for(const tier of ['luna','spark','terra','sol'])", source)
+        self.assertNotIn("opus5", source)
+        self.assertNotIn("sol_long", source)
+        for level in ("low", "medium", "high", "xhigh"):
+            self.assertEqual(self.i18n("settings.effort." + level), (level, level))
+
+    def test_a_later_invalid_effort_entry_leaves_earlier_entries_unchanged(self):
+        config = {"effort": {"luna": "low", "terra": "medium"}}
+        before = json.loads(json.dumps(config))
+        error = web_viewer._save_effort({"luna": "high", "opus5": "external"}, config)
+        self.assertIsNotNone(error)
+        self.assertIn("opus5", error)
+        self.assertEqual(config, before)
