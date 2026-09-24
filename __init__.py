@@ -3367,7 +3367,10 @@ def _force_shadow_delegation_if_eligible(kwargs: Dict[str, Any], cfg: Dict[str, 
     return _prepare_shadow_delegation(kwargs["request"], benchmark_id)
 
 
-_NOTE_TOOL_NAMES = frozenset({"delegate_task", "mcp__delegate_task", "delegate_claude", "mcp__delegate_claude"})
+_NOTE_TOOL_NAMES = frozenset({
+    "delegate_task", "mcp__delegate_task", "delegate_claude", "mcp__delegate_claude",
+    "tool_call", "mcp__tool_call",
+})
 # Hermes's Tool Search defers every plugin tool by default: the parent sees only
 # tool_search/tool_describe/tool_call plus a catalog stub, and a direct call to
 # delegate_claude is rejected as unknown until it is loaded once. Every place

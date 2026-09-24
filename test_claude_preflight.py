@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from model_router import claude_delegation, route_llm_request
+from model_router import _routing_note, claude_delegation, route_llm_request, usage_guard
 from model_router.test_model_router import CALLABLE, MODELS, chat_request
 
 REVIEW = "Review the last commit in ~/Repositories/hermes-model-router for correctness bugs and give me the top 3 findings."
@@ -138,6 +138,16 @@ class OfferedTests(unittest.TestCase):
 
     def test_a_request_with_neither_does_not(self):
         self.assertFalse(claude_delegation.offered(["mcp__delegate_task", "mcp__tool_search"]))
+
+    def test_deferred_only_parent_receives_balanced_routing_note(self):
+        with tempfile.TemporaryDirectory() as d, \
+             patch.object(claude_delegation, "_ACTIVE", True), \
+             patch("model_router._hermes_delegation_target_names", return_value=("sonnet5", "opus5")), \
+             patch.object(usage_guard, "peek", return_value=None):
+            request = _anthropic_request(REVIEW, ["mcp__tool_search", "mcp__tool_describe", "mcp__tool_call"])
+            note = _routing_note(request, {"api_call_count": 1, "turn_id": "review-turn", "platform": "cli"},
+                                 _cfg(d))
+        self.assertIn('sonnet5 → delegate_claude(tier="sonnet")', note)
 
 
 if __name__ == "__main__":
