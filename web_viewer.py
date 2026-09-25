@@ -1744,7 +1744,9 @@ function saveSettings(){
   settingsSaveQueue=settingsSaveQueue.then(async()=>{
     const statusEl=$('settings-status');
     try{
-      if(settingsSaveFailed)throw new Error(t('settings.reload'));
+      // A prior write failed. Keep its useful error visible until a fresh GET
+      // supplies a new revision; queued snapshots must not send stale writes.
+      if(settingsSaveFailed)return;
       statusEl.textContent=t('settings.saving');statusEl.style.color='#c4b5fd';
       payload.revision=currentConfig.revision;
       const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

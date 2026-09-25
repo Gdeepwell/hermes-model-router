@@ -342,6 +342,10 @@ states this distinction beside the worker fallback control.
 
 Settings saves validate both configuration documents before writing. The page
 queues edits and sends a revision token; conflicting saves require a reload.
+After a failed save, queued edits stop and the error stays visible until a
+successful reload supplies a fresh revision. API clients that omit `revision`
+retain the legacy last-write-wins behavior; integrations that need conflict
+protection must GET `/api/config` and send its `revision` on every POST.
 Each file is replaced atomically, and a failed router write restores the previous
 Hermes document unless another writer has changed it in the meantime. This
 protects ordinary save failures; it is not a cross-file crash transaction.
@@ -1228,6 +1232,9 @@ Usage step-down applies to workers only; it cannot change the parent model.
 The tests import the plugin as the `model_router` package (and a few modules by
 their bare name), and the Hermes venv ships neither pytest nor pip, so they run
 under `unittest` from a directory where the repo is linked as `model_router`.
+The full-page dashboard test requires Node.js and `jsdom`; CI must install them
+and expose `jsdom` through `NODE_PATH` before running the suite. Missing either
+dependency fails the test instead of silently skipping the visible-filter check.
 `HOME` and `HERMES_HOME` point at a scratch directory so the run never writes to
 the real Hermes logs; a copy of the Hermes config goes there because some tests
 read it. Both are needed: the plugin resolves `~/.hermes/...` through Hermes's

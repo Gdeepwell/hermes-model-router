@@ -2773,10 +2773,10 @@ class FullPageFilterTests(unittest.TestCase):
     def test_controls_update_visible_cards_and_counts_together(self):
         import shutil
         if not shutil.which("node"):
-            self.skipTest("node unavailable")
+            self.fail("Full-page dashboard test requires Node.js")
         probe = subprocess.run(["node", "-e", "require.resolve('jsdom')"], capture_output=True)
         if probe.returncode:
-            self.skipTest("jsdom unavailable; provide it through NODE_PATH")
+            self.fail("Full-page dashboard test requires jsdom; set NODE_PATH to its node_modules directory")
         script = r"""
 const {JSDOM,VirtualConsole}=require('jsdom');
 const assert=require('node:assert/strict');
@@ -2809,6 +2809,101 @@ assert.deepEqual(errors,[]);dom.window.close();
 
 
 class SettingsSaveQueueTests(DashboardProbeMixin, unittest.TestCase):
+    def test_failed_save_drops_queued_edits_without_hiding_error_then_reload_recovers(self):
+        script = r"""
+const assert=require('node:assert/strict');
+let currentConfig={revision:'r0',callable:{terra:true},accounts:{}};
+let settingsSaveQueue=Promise.resolve(),settingsPending=0,settingsSaveFailed=false,settingsLoadGeneration=0;
+const status={textContent:'',style:{}};
+const $=()=>status,t=k=>k,requests=[],releases=[];
+const fetch=(_url,options)=>{requests.push(JSON.parse(options.body));return new Promise(resolve=>releases.push(resolve))};
+const renderSettings=()=>{};
+""" + self.javascript_function('saveSettings') + 'async ' + self.javascript_function('loadSettings').replace(
+    "const response=await fetch('/api/config',{cache:'no-store'});", "const response={ok:true,json:async()=>({revision:'r2',callable:{terra:false},accounts:{}})};") + r"""
+(async()=>{
+ const first=saveSettings();currentConfig.callable.terra=false;const second=saveSettings();
+ await Promise.resolve();assert.equal(requests.length,1);
+ releases[0]({ok:false,status:409,json:async()=>({error:'Settings changed'})});
+ await first;const error=status.textContent;await second;
+ assert.match(error,/Settings changed/);assert.equal(status.textContent,error);
+ assert.equal(requests.length,1);assert.equal(settingsPending,0);assert.equal(settingsSaveFailed,true);
+ await loadSettings();assert.equal(settingsSaveFailed,false);
+ const third=saveSettings();await Promise.resolve();assert.equal(requests.length,2);
+ assert.equal(requests[1].revision,'r2');
+ releases[1]({ok:true,json:async()=>({success:true,revision:'r3'})});await third;
+ assert.equal(currentConfig.revision,'r3');
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_second_page_stale_revision_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'router_config.yaml'
+            hermes = root / 'config.yaml'
+            config.write_text('callable:\n  terra: true\n', encoding='utf-8')
+            hermes.write_text('model: gpt-terra\n', encoding='utf-8')
+            with patch.object(web_viewer, 'CONFIG_PATH', config), patch.object(web_viewer, 'HERMES_CONFIG_PATH', hermes):
+                stale = web_viewer._config_revision()
+                status, first = web_viewer._save_config_payload({'revision': stale, 'callable': {'terra': False}})
+                self.assertEqual(status, 200)
+                written = config.with_name('router_config.local.yaml').read_bytes()
+                status, second = web_viewer._save_config_payload({'revision': stale, 'callable': {'terra': True}})
+                self.assertEqual(status, 409)
+                self.assertIn('Reload', second['error'])
+                self.assertEqual(config.with_name('router_config.local.yaml').read_bytes(), written)
+                self.assertNotEqual(first['revision'], stale)
+
+    def test_external_hermes_write_after_first_file_preserves_external_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'router_config.yaml'
+            hermes = root / 'config.yaml'
+            config.write_text('default_model: terra\nmodels:\n  terra: gpt-terra\n  sol: gpt-sol\ncallable:\n  terra: true\n  sol: true\n', encoding='utf-8')
+            hermes.write_text('provider: openai-codex\nmodel: gpt-terra\n', encoding='utf-8')
+            original_write = web_viewer._atomic_write
+            def competing_write(path, content):
+                if path == config.with_name('router_config.local.yaml'):
+                    hermes.write_text('provider: anthropic\nmodel: claude-sonnet-5\n', encoding='utf-8')
+                    raise OSError('router disk write failed')
+                return original_write(path, content)
+            def change_default(_requested, _config, *, hermes, persist):
+                hermes['model'] = 'gpt-sol'
+                return None
+            with patch.object(web_viewer, 'CONFIG_PATH', config), patch.object(web_viewer, 'HERMES_CONFIG_PATH', hermes), \
+                 patch.object(web_viewer, '_atomic_write', side_effect=competing_write), \
+                 patch.object(web_viewer, '_save_default_model', side_effect=change_default):
+                with self.assertRaisesRegex(RuntimeError, 'automatic rollback refused'):
+                    web_viewer._save_config_payload({'default_model': 'sol', 'callable': {'terra': False, 'sol': True}})
+            self.assertIn('claude-sonnet-5', hermes.read_text(encoding='utf-8'))
+            self.assertFalse(config.with_name('router_config.local.yaml').exists())
+
+    def test_delayed_get_does_not_replace_a_newer_local_edit(self):
+        script = r"""
+const assert=require('node:assert/strict');
+let currentConfig={revision:'r0',callable:{terra:true},accounts:{}};
+let settingsSaveQueue=Promise.resolve(),settingsPending=0,settingsSaveFailed=false,settingsLoadGeneration=0;
+const status={textContent:'',style:{}};
+const $=()=>status,t=k=>k;let releaseGet,releaseSave,renders=0;
+const renderSettings=()=>{renders++};
+const fetch=(_url,options)=>options?.method==='POST'?new Promise(resolve=>releaseSave=resolve):
+  new Promise(resolve=>releaseGet=resolve);
+""" + self.javascript_function('saveSettings') + 'async ' + self.javascript_function('loadSettings') + r"""
+(async()=>{
+ const stale=loadSettings();currentConfig.callable.terra=false;const save=saveSettings();
+ await Promise.resolve();
+ releaseGet({ok:true,json:async()=>({revision:'old',callable:{terra:true}})});
+ await stale;assert.equal(currentConfig.callable.terra,false);assert.equal(currentConfig.revision,'r0');
+ assert.equal(renders,0);
+ releaseSave({ok:true,json:async()=>({success:true,revision:'r1'})});await save;
+ assert.equal(currentConfig.revision,'r1');
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rapid_edits_send_serial_snapshots_using_latest_revision(self):
         script = r"""
 const assert=require('node:assert/strict');
