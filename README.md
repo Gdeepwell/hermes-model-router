@@ -192,6 +192,17 @@ advice "quick lookups", and it can be named in a preference chain like any other
 target — typically for `explore`. With Claude delegation off it is never offered,
 whatever its `callable` switch says.
 
+When both are offered the contract used to add "use `sonnet5` by default and
+reserve `opus5` for consequential or hard work". That sentence dates from the
+commit that made these targets reachable at all, when no preference mechanism
+existed and a bare list of two names told the conductor nothing. One arrived 23
+hours later and the older answer was never withdrawn, so two contradictory
+instructions sat in the same paragraph — and the unconditional one beat the
+hedged one every time. It is now emitted **only where the operator has configured
+nothing**, and the check reads the configured chain rather than its currently
+available winner, so a cooling `opus5` cannot revive the built-in default at the
+one moment the operator's own order needs to be what speaks.
+
 ### Claude reasoning effort
 
 `claude_delegation.reasoning_effort.sonnet` and `.opus` (`low`, `medium`, `high`
@@ -223,17 +234,6 @@ the dashboard's answer never diverges from the bridge's own.
 If the dashboard reports the Claude reasoning-effort control unavailable with a
 `ModuleNotFoundError`, this host's Hermes venv install map is stale after a
 Hermes update; re-running Hermes's own update/install step resolves it.
-
-When both are offered the contract used to add "use `sonnet5` by default and
-reserve `opus5` for consequential or hard work". That sentence dates from the
-commit that made these targets reachable at all, when no preference mechanism
-existed and a bare list of two names told the conductor nothing. One arrived 23
-hours later and the older answer was never withdrawn, so two contradictory
-instructions sat in the same paragraph — and the unconditional one beat the
-hedged one every time. It is now emitted **only where the operator has configured
-nothing**, and the check reads the configured chain rather than its currently
-available winner, so a cooling `opus5` cannot revive the built-in default at the
-one moment the operator's own order needs to be what speaks.
 
 A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
 `coding_agent.delegated_review`). It replaces a single call rather than running
