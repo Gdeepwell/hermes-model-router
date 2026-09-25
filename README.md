@@ -474,9 +474,10 @@ optional rather than a behaviour change. An escalation degrades to its tier's
 `explicit_<tier>_xhigh` means "no escalation configured" instead of silently
 capping the request.
 
-The Settings tab edits only the four plain routed-tier keys: `luna`, `spark`,
-`terra`, and `sol`, in dropdowns beside their switches in the Codex account
-card's **Models** block. `opus5` is a route/log marker; Qwen has no dashboard effort
+The Settings tab edits the five plain routed-tier keys: `luna`, `spark`,
+`terra`, `sol`, and `grok`, in dropdowns beside their switches in the Codex and
+Grok account cards' **Models** blocks. `effort.grok` reaches Grok the same way
+as the Codex tiers' effort. `opus5` is a route/log marker; Qwen has no dashboard effort
 control because the router strips reasoning; and Claude-only `haiku` / `sonnet5`
 are not routed here — this `effort:` map cannot reach a delegated Claude child at
 all, since the router never runs on that call. Sonnet and Opus have their own
@@ -646,8 +647,9 @@ card per account**, with Models, Limits and Delegation side by side, then the
 weekly and 5-hour usage bars, whose last line carries the read age, the Refresh
 button and the account's recent call count for the same window the conductor
 is given. Inside Models, each switch and title has its effort dropdown immediately
-beside it: Codex shows its four plain-tier controls; Claude shows Sonnet and Opus,
-plus a disabled “no reasoning allowed” select for Haiku. When the host seam is
+beside it: Codex shows its four plain-tier controls; Grok shows its `effort.grok`
+control; Claude shows Sonnet and Opus, plus a disabled “no reasoning allowed”
+select for Haiku. When the host seam is
 incompatible, Claude's disabled selects carry the escaped reason as a tooltip
 (see [Claude reasoning effort](#claude-reasoning-effort)). Qwen has no effort
 select. A tier switched off keeps its switch there, so it can be
@@ -1370,6 +1372,11 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.19.2** — The Grok account card now has the same beside-switch reasoning-effort
+picker as the Codex tiers. It edits `effort.grok` (`low`, `medium`, `high`, or
+`xhigh`), which the router forwards to Grok 4.7; an older config's effective
+`medium` is not pinned into `router_config.local.yaml` by an unrelated save.
 
 **1.19.1** — Reasoning-effort dropdowns live beside model switches in the
 Settings account cards' Models blocks. The Codex card edits Luna, Spark,

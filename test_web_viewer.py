@@ -1644,6 +1644,20 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         },
     }
 
+    GROK_INFO = {
+        "label": "Grok",
+        "tiers": ["grok"],
+        "state": "unknown",
+        "usage": None,
+        "usage_age_seconds": None,
+        "has_usage_source": False,
+        "guard": False,
+        "soft_percent": None,
+        "hard_percent": None,
+        "step_down": {},
+        "delegation": {"tool": "delegate_task", "always_on": True},
+    }
+
     NO_USAGE_SOURCE_INFO = {
         "label": "Qwen",
         "tiers": ["qwen"],
@@ -1659,7 +1673,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
     }
 
     def _account_functions(self):
-        return "\n".join(self.javascript_function(name)
+        return "const ROUTER_EFFORT_TIERS=['luna','spark','terra','sol','grok'];\n" + "\n".join(self.javascript_function(name)
                           for name in ("ageText", "resetText", "usageRow", "shortModelName",
                                        "escapeHtml", "renderEffort", "renderClaudeReasoningEffort", "accountCard"))
 
@@ -1705,6 +1719,9 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_effort_controls_follow_account_models_and_do_not_appear_in_qwen(self):
         codex = self._card("openai-codex", self.CODEX_INFO, {"effort": {"luna": "low", "terra": "high", "sol": "xhigh"}})
+        grok = self._card("xai-oauth", self.GROK_INFO, {
+            "callable": {"grok": False}, "effort": {"grok": "xhigh"},
+        })
         claude = self._card("anthropic", self.CLAUDE_INFO, {
             "claude_reasoning_effort": {"available": True, "levels": {"sonnet": "low", "opus": "high"}},
         })
@@ -1713,6 +1730,12 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
             self.assertIn(f'data-effort="{model}"', codex)
         self.assertLess(codex.index('data-effort="luna"'), codex.index('data-effort="terra"'))
         self.assertIn('<option value="high" selected>', codex)
+        self.assertIn('data-effort="grok"', grok)
+        grok_switch = grok[grok.index('class="model-switch disabled"'):grok.index('</div>', grok.index('class="model-switch disabled"'))]
+        self.assertIn('data-effort="grok"', grok_switch)
+        self.assertIn('<option value="xhigh" selected>', grok_switch)
+        self.assertNotIn(' disabled', grok_switch[grok_switch.index('data-effort="grok"'):])
+        self.assertNotIn('model-list no-effort', grok)
         self.assertIn('data-claude-effort="sonnet"', claude)
         self.assertIn('data-claude-effort="opus"', claude)
         self.assertNotIn('data-claude-effort="haiku"', claude)
@@ -1888,8 +1911,10 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_save_payload_includes_usage_limits_and_claude_delegation(self):
         source = self.javascript_function("saveSettings")
+        listener = HTML[HTML.index("document.getElementById('account-cards').addEventListener('change'"):HTML.index("document.getElementById('workflow-switch')")]
         self.assertIn("usage_limits:", source)
         self.assertIn("claude_delegation:", source)
+        self.assertIn("currentConfig.effort=Object.assign({},currentConfig.effort,{[el.dataset.effort]:el.value})", listener)
 
     def test_every_model_control_is_the_same_slider_toggle_as_the_delegation_switch(self):
         """Live check finding: a model on/off switch must look like the Claude
@@ -2812,12 +2837,12 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
     CONFIG = {
         "models": {
             "luna": "gpt-6-luna", "spark": "gpt-5.3-codex-spark",
-            "terra": "gpt-5.6-terra", "sol": "gpt-6-sol",
+            "terra": "gpt-5.6-terra", "sol": "gpt-6-sol", "grok": "grok-4.7",
         },
-        "callable": {"luna": True, "spark": True, "terra": True, "sol": True},
-        "tier_providers": {"luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex", "sol": "openai-codex"},
+        "callable": {"luna": True, "spark": True, "terra": True, "sol": True, "grok": False},
+        "tier_providers": {"luna": "openai-codex", "spark": "openai-codex", "terra": "openai-codex", "sol": "openai-codex", "grok": "xai-oauth"},
         "effort": {
-            "luna": "low", "spark": "medium", "terra": "medium", "sol": "medium",
+            "luna": "low", "spark": "medium", "terra": "medium", "sol": "medium", "grok": "medium",
             "opus5": "external", "sol_long": "medium", "explicit_sol": "medium",
             "explicit_sol_xhigh": "medium", "explicit_luna_xhigh": "high",
             "explicit_spark_xhigh": "high", "explicit_terra_xhigh": "high",
@@ -2852,25 +2877,66 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=2)
 
-    def test_get_serves_only_the_four_dashboard_managed_effort_keys(self):
+    def test_get_serves_only_the_dashboard_managed_effort_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             status, payload = self._request(self._write_config(directory), "GET")
         self.assertEqual(status, 200)
-        self.assertEqual(payload["effort"], {"luna": "low", "spark": "medium", "terra": "medium", "sol": "medium"})
+        self.assertEqual(payload["effort"], {"luna": "low", "spark": "medium", "terra": "medium", "sol": "medium", "grok": "medium"})
         self.assertNotIn("opus5", payload["effort"])
 
     def test_a_valid_effort_save_writes_only_the_local_delta_and_preserves_the_shipped_file(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = self._write_config(directory)
             shipped_before = config_path.read_bytes()
-            status, body = self._request(config_path, "POST", {"effort": {"terra": " HIGH "}})
+            status, body = self._request(config_path, "POST", {"effort": {"grok": " HIGH "}})
             local = config_path.with_name("router_config.local.yaml")
             written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
             self.assertEqual(config_path.read_bytes(), shipped_before)
         self.assertEqual(status, 200)
         self.assertTrue(body["success"])
         self.assertIn("revision", body)
-        self.assertEqual(written, {"effort": {"terra": "high"}})
+        self.assertEqual(written, {"effort": {"grok": "high"}})
+
+    def test_an_invalid_grok_effort_is_refused_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            shipped_before = config_path.read_bytes()
+            status, body = self._request(config_path, "POST", {"effort": {"grok": "external"}})
+            self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
+            self.assertEqual(config_path.read_bytes(), shipped_before)
+        self.assertEqual(status, 400)
+        self.assertIn("effort.grok must be one of: low, medium, high, xhigh", body["error"])
+
+    def test_a_full_page_save_does_not_pin_absent_grok_at_its_effective_default(self):
+        """Older shipped configs lack ``effort.grok`` while the frontend posts all
+        visible levels. An unrelated switch must not turn the effective medium
+        default into a permanent local override."""
+        older = json.loads(json.dumps(self.CONFIG))
+        for key in ("models", "callable", "tier_providers", "effort"):
+            older[key].pop("grok", None)
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "router_config.yaml"
+            config_path.write_text(web_viewer.yaml.safe_dump(older), encoding="utf-8")
+            payload = {
+                "callable": {**older["callable"], "luna": False},
+                "workflow": "claude_delegation",
+                "default_model": "terra",
+                "effort": {"luna": "low", "spark": "medium", "terra": "medium", "sol": "medium", "grok": "medium"},
+                "claude_reasoning_effort": {},
+                "preferences": {},
+                "hermes_fallback": {},
+                "usage_limits": {},
+            }
+            with patch.object(web_viewer, "_read_hermes_snapshot", return_value=(None, {
+                "model": {"default": "gpt-5.6-terra", "provider": "openai-codex"},
+            })), patch.object(web_viewer, "_hermes_chain", return_value=[]):
+                status, body = self._request(config_path, "POST", payload)
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else {}
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["success"])
+        self.assertEqual(written.get("callable"), {"luna": False})
+        self.assertNotIn("grok", written.get("effort", {}))
 
     def test_a_non_object_effort_payload_is_refused_without_writing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2932,7 +2998,8 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_the_control_offers_exactly_the_four_shared_effort_levels(self):
         source = self.javascript_function("renderEffort") or ""
-        self.assertIn("tiers.filter(tier=>['luna','spark','terra','sol'].includes(tier))", source)
+        self.assertIn("const ROUTER_EFFORT_TIERS=['luna','spark','terra','sol','grok']", HTML)
+        self.assertIn("tiers.filter(tier=>ROUTER_EFFORT_TIERS.includes(tier))", source)
         self.assertNotIn("opus5", source)
         self.assertNotIn("sol_long", source)
         for level in ("low", "medium", "high", "xhigh"):

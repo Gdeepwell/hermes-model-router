@@ -738,12 +738,13 @@ def _save_usage_limits(raw, config: dict):
     return None
 
 
-MANAGED_EFFORT_TIERS = ("luna", "spark", "terra", "sol")
+MANAGED_EFFORT_TIERS = ("luna", "spark", "terra", "sol", "grok")
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+_DEFAULT_MANAGED_EFFORT = {"grok": "medium"}
 
 
 def _save_effort(raw, config: dict):
-    """Update only the four plain routed-tier effort levels from the Settings tab.
+    """Update only dashboard-managed routed-tier effort levels from Settings.
 
     Every submitted key and value is checked before ``config`` changes, so a
     partial payload cannot leave an earlier tier changed after a later one fails.
@@ -763,10 +764,26 @@ def _save_effort(raw, config: dict):
     if not cleaned:
         # Leave an absent effort block absent when a client posts no changes.
         return None
+    existing_effort = config.get("effort")
+    existing_effort = existing_effort if isinstance(existing_effort, dict) else {}
+    router = _router_module()
+    router_defaults = getattr(router, "_DEFAULT_CONFIG", {}) if router is not None else {}
+    effective_defaults = dict(_DEFAULT_MANAGED_EFFORT)
+    if isinstance(router_defaults, dict) and isinstance(router_defaults.get("effort"), dict):
+        effective_defaults.update(router_defaults["effort"])
+    to_write = {}
+    for tier, value in cleaned.items():
+        if tier not in existing_effort and value == effective_defaults.get(tier):
+            # The frontend posts every visible level. Do not pin an effective
+            # default that an older shipped config did not explicitly contain.
+            continue
+        to_write[tier] = value
+    if not to_write:
+        return None
     effort = config.get("effort")
     if not isinstance(effort, dict):
         effort = config["effort"] = {}
-    for tier, value in cleaned.items():
+    for tier, value in to_write.items():
         effort[tier] = value
     return None
 
@@ -1676,8 +1693,9 @@ async function loadAccounts(){try{const r=await fetch('/api/config',{cache:'no-s
 // "Claude "/"GPT-" prefix: "GPT-5.6 Luna" -> "Luna 5.6", "Claude Opus 5.5" -> "Opus 5.5".
 function shortModelName(label){const gpt=/^GPT-(\S+)\s+(.+)$/.exec(label);return gpt?`${gpt[2]} ${gpt[1]}`:label.replace(/^Claude\s+/,'')}
 function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
+const ROUTER_EFFORT_TIERS=['luna','spark','terra','sol','grok'];
 function renderEffort(tiers){const effort=currentConfig.effort||{},levels=['low','medium','high','xhigh'];
-  return tiers.filter(tier=>['luna','spark','terra','sol'].includes(tier)).map(tier=>`<select data-effort="${tier}">${levels.map(level=>`<option value="${level}"${effort[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`).join('')}
+  return tiers.filter(tier=>ROUTER_EFFORT_TIERS.includes(tier)).map(tier=>`<select data-effort="${tier}">${levels.map(level=>`<option value="${level}"${effort[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`).join('')}
 function renderClaudeReasoningEffort(tiers){const state=currentConfig.claude_reasoning_effort||{available:false,levels:{}},levels=state.levels||{},options=['low','medium','high','xhigh'],disabled=state.available?'':' disabled',title=state.available?'':` title="${escapeHtml(state.reason||'')}"`;
   return tiers.map(model=>{const tier={sonnet5:'sonnet',opus5:'opus'}[model];
     if(!tier)return model==='haiku'?`<select class="effort-none" disabled><option>${t('settings.claude_effort.haiku_no_reasoning')}</option></select>`:'';
@@ -1685,8 +1703,8 @@ function renderClaudeReasoningEffort(tiers){const state=currentConfig.claude_rea
   }).join('')}
 function accountCard(account,info){const callable=currentConfig.callable||{},cooldowns=currentConfig.cooldowns||{},load=(currentConfig.load||{})[account]||0,d=info.delegation||{};
   const loadText=`<span class="usage-load">${t('account.load')}: ${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</span>`;
-  const hasEffort=account==='openai-codex'||account==='anthropic';
-  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m],effort=account==='openai-codex'?renderEffort([m]):account==='anthropic'?renderClaudeReasoningEffort([m]):'';return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${effort}${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
+  const hasEffort=info.tiers.some(m=>ROUTER_EFFORT_TIERS.includes(m))||account==='anthropic';
+  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m],effort=ROUTER_EFFORT_TIERS.includes(m)?renderEffort([m]):account==='anthropic'?renderClaudeReasoningEffort([m]):'';return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${effort}${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
   const modelControls=`<div class="account-row models"><span>${t('account.models')}</span><div class="model-list${hasEffort?'':' no-effort'}">${models}</div></div>`;
   const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${loadText}</div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${loadText}</div>`):`<div class="usage-none">${t('account.usage.none')}</div><div class="usage-age">${loadText}</div>`;
   const off=info.guard?'':'disabled',step=Object.entries(info.step_down||{}).map(([a,b])=>`${a} → ${b}`).join(', ');
