@@ -567,6 +567,16 @@ class ForcedReadTests(unittest.TestCase):
             usage_guard.read("anthropic", _cfg(), now=1003.0, force=True)
         self.assertEqual(usage_guard.last_failure("anthropic"), "")
 
+    def test_a_module_missing_from_the_install_map_is_found_in_the_hermes_checkout(self):
+        import sys
+        checkout = Path(tempfile.mkdtemp())
+        (checkout / "hermes_yaml_probe.py").write_text("VALUE = 1\n")
+        self.addCleanup(lambda: sys.modules.pop("hermes_yaml_probe", None))
+        self.addCleanup(lambda: sys.path.remove(str(checkout)) if str(checkout) in sys.path else None)
+        with patch.object(usage_guard, "hermes_path", return_value=checkout):
+            usage_guard._import_hermes("hermes_yaml_probe")
+        self.assertIn("hermes_yaml_probe", sys.modules)
+
     def test_an_account_without_a_fetcher_is_still_nothing_to_force(self):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0, force=True))
 

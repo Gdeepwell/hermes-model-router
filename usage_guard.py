@@ -210,6 +210,27 @@ def last_failure(account: str) -> str:
     return _LAST_FAILURE.get(account, "")
 
 
+def _import_hermes(module: str) -> None:
+    """Import a Hermes module, retrying with the Hermes checkout on ``sys.path``.
+
+    A Hermes update can add a top-level module (``hermes_yaml``) that this venv's
+    editable-install map does not list yet, so ``agent.*`` imports fail until the
+    install step is re-run. The checkout itself always has the module.
+    """
+    import importlib
+    import sys
+
+    try:
+        importlib.import_module(module)
+    except ModuleNotFoundError:
+        checkout = str(hermes_path("~/.hermes/hermes-agent"))
+        if checkout in sys.path or not Path(checkout).is_dir():
+            raise
+        sys.path.append(checkout)
+        importlib.invalidate_caches()
+        importlib.import_module(module)
+
+
 def _import_failed(account: str, exc: BaseException) -> None:
     _LAST_FAILURE[account] = f"Hermes usage code could not be imported: {type(exc).__name__}: {exc}"
 
@@ -218,8 +239,9 @@ def _fetch_anthropic() -> Optional[Reading]:
     """Read raw: the endpoint reports utilization as a percentage (live 2026-09-18:
     5.0 / 13.0), and Hermes's fetch_account_usage scales any value <= 1 by 100."""
     try:
+        _import_hermes("agent.anthropic_credentials")  # _anthropic_tokens needs it
+        _import_hermes("agent.account_usage")
         from agent.account_usage import _get_json
-        import agent.anthropic_credentials  # noqa: F401  -- _anthropic_tokens needs it
     except Exception as exc:
         _import_failed("anthropic", exc)
         return None
@@ -250,6 +272,7 @@ def _fetch_anthropic() -> Optional[Reading]:
 def _fetch_codex() -> Optional[Reading]:
     """Hermes's reader: Codex reports used_percent already as a percentage."""
     try:
+        _import_hermes("agent.account_usage")
         from agent.account_usage import fetch_account_usage
     except Exception as exc:
         _import_failed("openai-codex", exc)
