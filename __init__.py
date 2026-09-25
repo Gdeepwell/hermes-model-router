@@ -47,6 +47,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "terra": "gpt-5.6-terra",
         "sol": "gpt-6-sol",
         "qwen": "qwen3.7-plus",
+        "grok": "grok-4.7",
     },
     # Which tiers are callable — togglable from the web dashboard.
     # When a tier is disabled, any route that selected it falls back
@@ -58,6 +59,9 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "sol": True,
         "opus5": True,
         "qwen": True,
+        # Needs a SuperGrok subscription (`hermes auth add xai-oauth`), so it
+        # ships off; switch it on from the dashboard once logged in.
+        "grok": False,
     },
     # When a callable tier is disabled, routes that selected it fall back here.
     "fallbacks": {
@@ -66,6 +70,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "sol": "terra",
         "opus5": "sol",
         "qwen": "terra",
+        "grok": "terra",
     },
     # The default model is both the general-purpose route destination and the
     # orchestration owner. Changing it rewrites this file and the Hermes config.
@@ -82,6 +87,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     # degrade to the plain tier, so adding a tier here is optional.
     "effort": {
         "luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium",
+        "grok": "medium",
         "explicit_sol": "xhigh",
         "explicit_luna_xhigh": "high", "explicit_spark_xhigh": "high",
         "explicit_terra_xhigh": "high", "explicit_sol_xhigh": "xhigh",
@@ -94,6 +100,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "sol": "openai-codex",
         "opus5": "openai-codex",
         "qwen": "qwen-token",
+        "grok": "xai-oauth",
     },
     "quota_fallbacks": {"spark": {"model": "luna", "effort": "medium"}},
     "logging": {
@@ -156,7 +163,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     # looked loaded -- implementation leaves on the 700-char, low-effort tier.
     # Luna's real peer is Spark; sonnet5's are the heavy implementation targets.
     "peer_groups": {
-        "heavy": ["terra", "opus5", "qwen", "sonnet5"],
+        "heavy": ["terra", "opus5", "grok", "qwen", "sonnet5"],
         "light": ["luna", "spark"],
     },
     "shadow": {
@@ -700,7 +707,7 @@ _CLAUDE_REVIEW_LABEL = re.compile(r"^\s*\[(opus|sonnet)5?-review\](?:\s|$)")
 # the four tiers of the default provider -- so the leaf runs on whatever the
 # classifier makes of the rest of the text. The bracket closes on the name, so
 # the legitimate [opus5-review] / [sonnet-review] labels do not match.
-_EXTERNAL_TARGET_LABEL = re.compile(r"^\s*\[(opus5?|sonnet5?|qwen)\](?:\s|$)", re.I)
+_EXTERNAL_TARGET_LABEL = re.compile(r"^\s*\[(opus5?|sonnet5?|qwen|grok)\](?:\s|$)", re.I)
 
 
 def _misdispatched_external_label(text: str, active_model: str, cfg: Dict[str, Any]) -> str:
@@ -721,7 +728,7 @@ def _misdispatched_external_label(text: str, active_model: str, cfg: Dict[str, A
     if name.startswith(("opus", "sonnet")) and not name.endswith("5"):
         name = f"{name}5"
     models = (cfg.get("models") or {})
-    # Qwen is the case that made "not one of ours" the wrong test: it is a tier
+    # Qwen (and Grok) are the case that made "not one of ours" the wrong test: a tier
     # in ``models`` on a separate provider, unlike the Claude targets, so a
     # correctly dispatched [qwen] leaf would otherwise read as misdispatched.
     if active_model == str(models.get(name, "")):
@@ -1287,7 +1294,7 @@ def _kind_for_goal(goal: str, cfg: Dict[str, Any]) -> str:
     never associated with it.
     """
     # A route label describes the stopped worker, not the semantic work kind.
-    goal = re.sub(r"^\s*\[(?:luna|spark|terra|sol|opus5|sonnet5|haiku|qwen)(?::xhigh)?\]\s*",
+    goal = re.sub(r"^\s*\[(?:luna|spark|terra|sol|opus5|sonnet5|haiku|qwen|grok)(?::xhigh)?\]\s*",
                   "", goal, flags=re.I)
     if not goal.strip():
         return "default"
@@ -1517,7 +1524,8 @@ def _current_turn_has_tool_activity(items: list, last_user_index: int) -> bool:
 
 # Default effort per tier. ``.get`` rather than ``[]``: a preference list may name a
 # tier this map never anticipated, and an unknown tier must not raise inside routing.
-_DEFAULT_EFFORT = {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium"}
+_DEFAULT_EFFORT = {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "qwen": "medium",
+                   "grok": "medium"}
 
 
 def _decision(

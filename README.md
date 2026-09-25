@@ -2,7 +2,7 @@
 
 Routing and delegation for Hermes Agent. It keeps the user-facing conversation on one durable parent model, lets that parent's plan choose which model runs each delegated worker, and records every decision in a privacy-safe audit log.
 
-The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, and a Claude subscription (Opus 5.5/Sonnet 5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
+The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, a SuperGrok subscription (Grok 4.7), and a Claude subscription (Opus 5.5/Sonnet 5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
 
 ## Install
 
@@ -31,20 +31,49 @@ is what keeps a single quota from carrying everything.
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
 | `sol` | GPT-6 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
+| `grok` | Grok 4.7 | SuperGrok subscription (`xai-oauth`) | Delegation target, heavy peer of Terra/Opus/Sonnet; ships switched off |
 | `opus5` | Claude Opus 5.5 | Claude subscription | Delegation target for hard or consequential work (see below) |
 | `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
 | `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude`, so offered only under Claude delegation |
 
-`qwen`, `opus5`, `sonnet5` and `haiku` are delegation targets rather than routable
+`qwen`, `grok`, `opus5`, `sonnet5` and `haiku` are delegation targets rather than routable
 tiers: the middleware cannot move a call across providers, so they are reached by a
 plan choosing them, not by the router switching to them mid-turn. Under
-`workflow: codex` the first three are chosen with `model:` on `delegate_task`.
+`workflow: codex` the first four are chosen with `model:` on `delegate_task`.
 Under `workflow: claude_delegation` the three Claude targets are reached with
 `delegate_claude(tier=...)` instead, and `haiku` only that way, since it has no
 `delegate_task` target (see [Workflow switch](#workflow-switch) and
 [Claude targets](#claude-targets)).
 Any tier in `models` can hold the orchestrator role, including one on another
 account — that choice is made at spawn time, where the provider is still open.
+
+### Grok (SuperGrok)
+
+A SuperGrok subscription reaches Grok through Hermes's own `xai-oauth` provider
+(the Codex Responses API at `api.x.ai`, billed to the subscription, no API key;
+X Premium+ does not include this access). The tier ships **switched off**. To
+enable it:
+
+1. `hermes auth add xai-oauth --type oauth --no-browser` — adds the login to the
+   credential pool without touching the main agent's model (`hermes model` would
+   switch the parent onto Grok).
+2. Add the delegation target to `~/.hermes/config.yaml`:
+   ```yaml
+   delegation:
+     targets:
+       grok:
+         provider: xai-oauth
+         model: grok-4.7
+   ```
+3. Switch `grok` on in the dashboard (or `callable.grok: true` in
+   `router_config.local.yaml`).
+
+Grok is then a `delegate_task(model="grok")` target, a preference-chain entry, a
+fallback for the main agent or the workers, and a `heavy` peer next to Terra,
+Opus and Sonnet. It takes the same `reasoning.effort` levels as the Codex tiers
+(`low` to `xhigh`, default `medium`). xAI publishes no usage endpoint, so its card
+shows no usage bars; a quota refusal still benches the tier through the ordinary
+cooldown. A Grok parent is written with `api_mode: codex_responses`.
 
 ### Substitution groups
 
@@ -669,6 +698,7 @@ tier_providers:
   sonnet5: anthropic
   haiku: anthropic
   qwen: qwen-token
+  grok: xai-oauth
 
 # Default parent model (the shipped file has qwen)
 default_model: terra
@@ -1300,6 +1330,11 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.18.0** — A `grok` tier (Grok 4.7) on a SuperGrok subscription through Hermes's
+`xai-oauth` provider: a delegation target and `heavy` peer, with its own dashboard
+card, colour and account. It ships switched off. A Grok parent is written with the
+Responses API instead of `chat_completions`.
 
 **1.17.1** — A `pre_tool_call` gate refuses a `delegate_task` that names a target
 switched off in the dashboard (or cooling down with no worker fallback chain) and

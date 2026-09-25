@@ -358,7 +358,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34,
-             "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0},
+             "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0, "grok": 0},
         )
         renderer = HTML[HTML.rindex("function render(){"):]
         self.assertIn("const summary=executionSummary(runData.map(run=>run.scope.calls))", renderer)
