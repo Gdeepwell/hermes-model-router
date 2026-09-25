@@ -4383,17 +4383,19 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     text = _last_user_text_and_index(_request_items(source_request))[0]
 
     from .claude_opus_bridge import review_model_alias
-    alias = review_model_alias(text) or "opus"
-    target = {"opus": "opus5", "sonnet": "sonnet5"}[alias]
-    if not _is_callable_tier(target, cfg):
-        return None
-    if usage_guard.guarded("anthropic", cfg):
+    requested_alias = review_model_alias(text) or "opus"
+
+    def admitted_alias() -> Optional[str]:
+        """Check Claude only after a real bridge route has been established."""
+        target = {"opus": "opus5", "sonnet": "sonnet5"}[requested_alias]
+        if not _is_callable_tier(target, cfg):
+            return None
+        if not usage_guard.guarded("anthropic", cfg):
+            return requested_alias
         outcome = usage_guard.apply("anthropic", target, cfg, usage_guard.read("anthropic", cfg))
         if outcome.refused or not _is_callable_tier(outcome.tier, cfg):
             return None
-        alias = {"opus5": "opus", "sonnet5": "sonnet"}.get(outcome.tier)
-        if alias is None:
-            return None
+        return {"opus5": "opus", "sonnet5": "sonnet"}.get(outcome.tier)
 
     # A delegated review leaf runs on Claude and returns its verdict as the
     # leaf's answer. Restricted to delegated workers: the documented hazard of
@@ -4406,6 +4408,9 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         delegated = _verified_delegated_claude_review(text, cfg)
         if delegated is not None:
             repo, _requested_alias = delegated
+            alias = admitted_alias()
+            if alias is None:
+                return None
             allowed = (coding_cfg.get("delegated_review") or {}).get("models")
             if isinstance(allowed, list) and alias not in allowed:
                 return None
@@ -4427,6 +4432,9 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         return None
     review_repo = _verified_explicit_opus5_review_repo(text, cfg)
     if review_repo is not None:
+        alias = admitted_alias()
+        if alias is None:
+            return None
         result = _run_opus5_bridge(
             repo=str(review_repo),
             task=text,
@@ -4442,6 +4450,9 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         return _opus5_response(result)
     explicit_ui_repo = _verified_explicit_opus5_ui_repo(text, cfg)
     if explicit_ui_repo is not None:
+        alias = admitted_alias()
+        if alias is None:
+            return None
         result = _run_opus5_bridge(
             repo=str(explicit_ui_repo),
             task=f"[opus5] {text}",
@@ -4467,6 +4478,9 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     repo = str(coding_cfg.get("default_repo") or "").strip()
     repo_path = Path(repo).expanduser() if repo else None
     if repo_path is None or not repo_path.is_dir():
+        return None
+    alias = admitted_alias()
+    if alias is None:
         return None
 
     result = _run_opus5_bridge(
@@ -4501,15 +4515,23 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     cfg = _load_config()
     provider = str(kwargs.get("provider", "")).casefold()
     configured_provider = str(cfg.get("provider", "openai-codex")).casefold()
-    if (cfg.get("enabled", True) and isinstance(request, dict)
-            and (str(kwargs.get("platform", "")).casefold() == "subagent"
-                 or ":sa-" in str(kwargs.get("turn_id", "")))):
-        refused = worker_admission.refusal(provider, str(request.get("model", "")), cfg)
-        if refused:
-            return worker_admission.stopped_response(refused, request.get("model", ""))
+    worker = (cfg.get("enabled", True) and isinstance(request, dict)
+              and (str(kwargs.get("platform", "")).casefold() == "subagent"
+                   or ":sa-" in str(kwargs.get("turn_id", ""))))
+
+    def stop_if_closed() -> Optional[Any]:
+        if worker:
+            refused = worker_admission.refusal(provider, str(request.get("model", "")), cfg)
+            if refused:
+                return worker_admission.stopped_response(refused, request.get("model", ""))
+        return None
+
     if not isinstance(request, dict) or not callable(next_call) or provider != configured_provider:
         if not isinstance(request, dict) or not callable(next_call):
             return next_call(request)
+        stopped = stop_if_closed()
+        if stopped is not None:
+            return stopped
         # The guard below exists because this middleware rewrites request["model"]
         # within one provider. Noticing that an account just refused a call needs
         # none of that, and skipping it here is why a Qwen weekly-quota 429 left
@@ -4540,6 +4562,10 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
         opus_response = None
     if opus_response is not None:
         return opus_response
+
+    stopped = stop_if_closed()
+    if stopped is not None:
+        return stopped
 
     try:
         return next_call(request)

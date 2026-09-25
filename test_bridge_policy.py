@@ -30,3 +30,68 @@ class BridgePolicyTests(unittest.TestCase):
         bridge = self.run_bridge("opus", {"sonnet5": True, "opus5": True}, weekly=75)
         self.assertEqual(bridge.call_args.kwargs["model"], "sonnet")
         self.run_bridge("opus", {"sonnet5": False, "opus5": True}, weekly=75).assert_not_called()
+
+
+class AccountOfExecutionTests(unittest.TestCase):
+    def _route(self, *, codex, claude, bridge_error=None, label='sonnet', worker=True, eligible=True):
+        from unittest.mock import Mock
+        from model_router import run_llm_with_transient_failover
+        cfg = {
+            'enabled': True, 'provider': 'openai-codex',
+            'callable': {'opus5': True, 'sonnet5': True},
+            'coding_agent': {'enabled': False, 'delegated_review': {'enabled': True}},
+            'usage_guard': {'accounts': {
+                'anthropic': {'soft_percent': 70, 'hard_percent': 90},
+                'openai-codex': {'soft_percent': 70, 'hard_percent': 90},
+            }},
+        }
+        reading = lambda weekly: usage_guard.Reading(weekly, 10, None, None, time.time())
+        downstream = Mock(return_value='Codex ran')
+        bridge = Mock(return_value={'result': 'Claude reviewed', 'effective_model':
+                                    'claude-sonnet-5' if label == 'sonnet' else 'claude-opus-5-5'})
+        if bridge_error:
+            bridge.side_effect = bridge_error
+        request = {'model': 'gpt-terra', 'messages': [{'role': 'user', 'content':
+                   f'[{label}-review] Review parser'}]}
+        with patch('model_router._load_config', return_value=cfg), \
+             patch('model_router._verified_delegated_claude_review',
+                   return_value=(Path('/tmp'), label) if eligible else None), \
+             patch('model_router.usage_guard.read', return_value=reading(claude)) as claude_read, \
+             patch('model_router.usage_guard.peek', return_value=reading(codex)), \
+             patch('model_router._run_opus5_bridge', bridge):
+            result = run_llm_with_transient_failover(
+                request=request, original_request=request, next_call=downstream,
+                provider='openai-codex', api_mode='codex_responses', api_call_count=1,
+                platform='subagent' if worker else 'cli', turn_id='s:sa-1' if worker else 'root')
+        return result, downstream, bridge, claude_read
+
+    def test_closed_codex_does_not_block_healthy_claude(self):
+        result, codex, bridge, _ = self._route(codex=95, claude=10)
+        self.assertEqual(result.model, 'claude-sonnet-5')
+        bridge.assert_called_once()
+        codex.assert_not_called()
+
+    def test_closed_claude_can_fall_back_only_to_open_codex(self):
+        result, codex, bridge, _ = self._route(codex=10, claude=95)
+        self.assertEqual(result, 'Codex ran')
+        codex.assert_called_once()
+        bridge.assert_not_called()
+
+    def test_both_closed_or_failed_bridge_never_reach_codex(self):
+        for claude, error in ((95, None), (10, RuntimeError('CLI failed'))):
+            result, codex, bridge, _ = self._route(codex=95, claude=claude, bridge_error=error)
+            self.assertIn('ROUTER WORKER STOPPED', result.output_text)
+            codex.assert_not_called()
+            self.assertEqual(bridge.call_count, 0 if claude == 95 else 1)
+
+    def test_no_eligible_bridge_does_not_probe_claude(self):
+        result, codex, bridge, read = self._route(codex=10, claude=10, eligible=False)
+        self.assertEqual(result, 'Codex ran')
+        codex.assert_called_once()
+        bridge.assert_not_called()
+        read.assert_not_called()
+
+    def test_root_is_not_stopped_by_worker_account_limit(self):
+        result, codex, _, _ = self._route(codex=95, claude=95, worker=False)
+        self.assertEqual(result, 'Codex ran')
+        codex.assert_called_once()
