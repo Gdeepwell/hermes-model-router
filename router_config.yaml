@@ -137,8 +137,6 @@ logging:
   redact_prompt_preview: true
 session_policy:
   pin_root_parent: true
-  handoff_capsule_version: v1
-  max_workers_per_turn: 2
 delegation:
   preserve_spark_subagents: true
 orchestration:

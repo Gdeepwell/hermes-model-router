@@ -120,7 +120,6 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     # a cold planner/model handoff.
     "session_policy": {
         "pin_root_parent": True,
-        "handoff_capsule_version": "v1",
     },
     "orchestration": {
         # Automatic planner fan-out is opt-in.  Parent agents delegate only
