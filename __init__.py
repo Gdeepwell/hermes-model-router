@@ -3859,7 +3859,10 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     # preflight to a Sol request that never got Sol's, and would skip the
     # Sol/Opus preflight the request was actually entitled to. Usage only
     # touches the *dispatched* tier, once those gates have already run.
-    decision = _usage_step_down(decision, cfg)
+    # Account savings apply to workers. A root's durable identity survives every
+    # later rewrite, including an explicit root tier selection.
+    if subagent_marker:
+        decision = _usage_step_down(decision, cfg)
     # Hermes middleware cannot switch the underlying provider/transport. If a
     # rule selects a tier owned by another provider, changing only `model`
     # produces invalid calls such as `gpt-5.6-terra` at the Qwen Anthropic

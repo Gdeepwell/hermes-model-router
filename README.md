@@ -1208,6 +1208,7 @@ Hard usage limits refuse new workers on both accounts. Running workers return a
 router stop without a provider call once a fresh reading closes their account;
 parent continuation remains available. Same-account model step-down is only a
 soft-limit policy, never a remedy for an account's hard limit.
+Usage step-down applies to workers only; it cannot change the parent model.
 
 The tests import the plugin as the `model_router` package (and a few modules by
 their bare name), and the Hermes venv ships neither pytest nor pip, so they run

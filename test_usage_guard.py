@@ -559,3 +559,16 @@ class ForcedReadTests(unittest.TestCase):
 
     def test_an_account_without_a_fetcher_is_still_nothing_to_force(self):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0, force=True))
+
+class ParentUsageIdentityTests(unittest.TestCase):
+    def test_usage_changes_worker_tier_without_changing_pinned_parent(self):
+        cfg = {**ROUTER_CFG, 'enabled': True, 'provider': 'openai-codex', 'default_model': 'terra',
+               'session_policy': {'pin_root_parent': True}, 'orchestration': {'enabled': False},
+               'logging': {'enabled': False}}
+        for platform, expected in (('cli', 'sol'), ('subagent', 'terra')):
+            with self.subTest(platform=platform), patch.object(model_router_module, '_load_config', return_value=cfg), \
+                 _peek(**{'openai-codex': 75.0}):
+                routed = model_router_module.route_llm_request(
+                    request={'model': 'gpt-sol', 'messages': [{'role': 'user', 'content': '[sol] Implement parser'}]},
+                    model='gpt-sol', provider='openai-codex', platform=platform, turn_id='identity', api_call_count=1)
+            self.assertEqual(routed['metadata']['tier'], expected)
