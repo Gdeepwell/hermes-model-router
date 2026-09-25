@@ -506,10 +506,10 @@ class ContractTextTests(unittest.TestCase):
         self.assertNotIn("Set the delegate_task 'model' parameter", contract)
         self.assertTrue(contract.startswith("Route choice for delegated workers"))
 
-    def test_an_inactive_wing_keeps_todays_opening_even_without_a_model_parameter(self):
+    def test_an_inactive_wing_respects_the_absent_model_parameter(self):
         contract = _contract(_cfg(), active=False, model_param=False)
-        self.assertTrue(contract.startswith("Set the delegate_task 'model' parameter"))
-        self.assertNotIn("Route choice for delegated workers", contract)
+        self.assertTrue(contract.startswith("Route choice for delegated workers"))
+        self.assertNotIn("Set the delegate_task 'model' parameter", contract)
 
     def test_the_dispatch_phrase_names_the_goal_prefix_route_while_active(self):
         with patch.object(claude_delegation, "_ACTIVE", True):
@@ -594,18 +594,16 @@ class ContractTextTests(unittest.TestCase):
             text,
         )
 
-    def test_the_preflight_keeps_todays_text_while_the_wing_is_off(self):
+    def test_the_preflight_only_advertises_reachable_routes_while_the_wing_is_off(self):
         cfg = _cfg(orchestration={"enabled": True, "max_tasks": 2})
         with patch.object(claude_delegation, "_ACTIVE", False), \
              patch("model_router._delegation_target_names", return_value=CONTRACT_TARGETS), \
              patch("model_router._recent_account_load", return_value={}):
             routed = _prepare_orchestration_delegation(_delegating_request(), "plan-x", 2, cfg=cfg)
         text = routed["messages"][-1]["content"]
-        self.assertIn(
-            "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered.",
-            text,
-        )
-        self.assertIn("Set the delegate_task 'model' parameter", text)
+        self.assertIn("Cross-account targets cannot be reached", text)
+        self.assertNotIn("Set the delegate_task 'model' parameter", text)
+        self.assertNotIn("model:opus5", text)
         self.assertNotIn("delegate_claude", text)
 
 
