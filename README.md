@@ -381,8 +381,8 @@ one chain whose first entry is `default_model` (the model Hermes starts on) and
 whose remaining entries are `fallback_providers`. Setting the default and its
 fallbacks in two places let the primary sit in its own fallback list — a step
 that can never help, since when its provider is out so is that entry — so a save
-drops the parent from `fallback_providers`. An entry whose tier is switched off
-is shown greyed out as *switched off*, not removed.
+drops the parent from `fallback_providers`. A route whose tier is switched off is
+dropped from both chains on save, since Hermes does not consult the router's switches.
 
 The **Workers** section holds the worker defaults side by side: the
 `delegate_task` model (`delegation.provider`/`delegation.model`, Codex tiers only,
@@ -1330,6 +1330,11 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.18.1** — A tier switched off in Settings leaves the Model Router overview (and
+its account box once no tier is left), and it is dropped from Hermes's fallback
+chains on save and no longer offered there: Hermes fails over without consulting
+the router's switches, so a switched-off Qwen stayed a live fallback.
 
 **1.18.0** — A `grok` tier (Grok 4.7) on a SuperGrok subscription through Hermes's
 `xai-oauth` provider: a delegation target and `heavy` peer, with its own dashboard
