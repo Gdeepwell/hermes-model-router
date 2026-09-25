@@ -969,6 +969,19 @@ CLAUDE_REASONING_TIERS = ("sonnet", "opus")
 _CLAUDE_REASONING_DEFAULT_LEVELS = {"sonnet": "medium", "opus": "medium"}
 
 
+def _haiku_reasoning_supported(delegation) -> bool:
+    """Whether Haiku is one of this router's editable reasoning-effort tiers.
+
+    Derived from ``claude_delegation.EDITABLE_REASONING_TIERS`` rather than a
+    hardcoded literal, so a future tier change is reflected here automatically
+    instead of silently drifting. False whenever the router module (or the
+    tuple on it) isn't available -- the safe default the fallback branches
+    already use.
+    """
+    tiers = getattr(delegation, "EDITABLE_REASONING_TIERS", ()) if delegation is not None else ()
+    return "haiku" in tiers
+
+
 def _claude_reasoning_status(config: dict) -> dict:
     """``claude_reasoning_effort`` for ``GET /api/config``: levels plus bridge availability.
 
@@ -998,7 +1011,7 @@ def _claude_reasoning_status(config: dict) -> dict:
         "available": bool(available),
         "reason": str(reason or ""),
         "levels": {tier: levels[tier] for tier in CLAUDE_REASONING_TIERS},
-        "haiku_supported": False,
+        "haiku_supported": _haiku_reasoning_supported(delegation),
     }
 
 

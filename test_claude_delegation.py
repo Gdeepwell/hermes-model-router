@@ -379,6 +379,43 @@ class ReasoningBridgeTests(unittest.TestCase):
         self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
 
 
+class ReasoningBridgeCompatibilityTests(unittest.TestCase):
+    """The side-effect-free probe a separate dashboard process can call safely."""
+
+    def setUp(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_the_probe_reports_compatible_on_the_real_host_without_installing(self):
+        import tools.delegate_tool as delegate_tool
+
+        before = delegate_tool._resolve_child_runtime
+        ok, reason = claude_delegation.reasoning_bridge_compatibility()
+        self.assertEqual((ok, reason), (True, ""))
+        # Never installs: the real host's resolver is untouched and the module's
+        # own bridge-installed state stays False, unlike install_reasoning_bridge().
+        self.assertIs(delegate_tool._resolve_child_runtime, before)
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_INSTALLED)
+
+    def test_the_probe_reports_incompatible_for_a_fake_module_missing_the_resolver(self):
+        fake = types.ModuleType("tools.delegate_tool")
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake}):
+            ok, reason = claude_delegation.reasoning_bridge_compatibility()
+        self.assertFalse(ok)
+        self.assertIn("_resolve_child_runtime", reason)
+
+    def test_status_reports_available_on_the_real_host_before_any_install(self):
+        # A fresh, uninstalled state (e.g. a standalone dashboard process that
+        # never calls install_reasoning_bridge()) must still see the seam as
+        # available whenever it is compatible: "available" means "the host
+        # seam is compatible", not "this process installed the wrapper".
+        # Force a clean start: another test elsewhere in the suite may have
+        # installed the real bridge without resetting it afterward, and this
+        # test's whole point is to observe the state BEFORE any install.
+        claude_delegation._reset_reasoning_bridge_for_tests()
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_INSTALLED)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+
 class RegisterTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(setattr, claude_delegation, "_ACTIVE", False)

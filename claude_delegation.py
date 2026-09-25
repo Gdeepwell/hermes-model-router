@@ -163,6 +163,78 @@ def _wrap_resolve_child_runtime(original: Callable[..., Any]) -> Callable[..., A
     return wrapper
 
 
+def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optional[Callable[..., Any]]]:
+    """Check whether the host seam this bridge wraps still looks the way it must.
+
+    Side-effect-free: only imports and inspects ``tools.delegate_tool`` /
+    ``tools.delegate_tool_config`` (both cheap and side-effect-free on this
+    host -- see the module docstring above), never assigns anything. Returns
+    ``(ok, reason, delegate_tool_module_or_None, current_resolver_or_None)``;
+    the last two let a caller that wants to actually install reuse the same
+    lookup instead of re-importing.
+
+    This is the single source of truth for "is the seam compatible" -- both
+    ``install_reasoning_bridge()`` (which then also wraps it) and
+    ``reasoning_bridge_compatibility()`` (which never does) call this, so the
+    two validations cannot drift apart.
+    """
+    try:
+        import sys as _sys
+
+        # Read back through sys.modules rather than `import ... as name`: once a
+        # submodule has been imported, a plain dotted import can bind through the
+        # parent package's cached attribute instead of a swapped-in sys.modules
+        # entry (as tests do via unittest.mock.patch.dict(sys.modules, ...)).
+        import tools.delegate_tool  # noqa: F401  (ensures it's importable / triggers ImportError)
+        import tools.delegate_tool_config  # noqa: F401
+        delegate_tool = _sys.modules["tools.delegate_tool"]
+        delegate_tool_config = _sys.modules["tools.delegate_tool_config"]
+    except Exception as exc:
+        return False, f"Hermes delegation API not importable ({type(exc).__name__}: {exc})", None, None
+
+    current = getattr(delegate_tool, "_resolve_child_runtime", None)
+    if current is None:
+        return False, "tools.delegate_tool has no _resolve_child_runtime to wrap", delegate_tool, None
+
+    already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _wrapped_marker_target()
+    if already_wrapped:
+        return True, "", delegate_tool, current
+
+    original_from_config = getattr(delegate_tool_config, "_resolve_child_runtime", None)
+    if current is not original_from_config:
+        return False, (
+            "tools.delegate_tool._resolve_child_runtime is not the same callable as "
+            "tools.delegate_tool_config._resolve_child_runtime; the host seam has moved"
+        ), delegate_tool, current
+
+    try:
+        signature = inspect.signature(current)
+    except (TypeError, ValueError) as exc:
+        return False, f"could not inspect _resolve_child_runtime's signature: {exc}", delegate_tool, current
+
+    required = ("parent_agent", "model", "override_provider")
+    missing = [name for name in required if name not in signature.parameters]
+    if missing:
+        return False, "_resolve_child_runtime lacks " + ", ".join(missing), delegate_tool, current
+
+    return True, "", delegate_tool, current
+
+
+def reasoning_bridge_compatibility() -> Tuple[bool, str]:
+    """Whether THIS host's seam is compatible with the reasoning-effort bridge.
+
+    Side-effect-free: never installs, wraps or mutates anything, including the
+    bridge's own module globals -- safe to call from a process (e.g. the
+    standalone dashboard) that must never construct agents or otherwise touch
+    Hermes's delegation machinery. Runs exactly the same checks
+    ``install_reasoning_bridge()`` does, via ``_validate_reasoning_bridge_seam()``,
+    so "the seam is compatible" and "the wrapper installed cleanly" cannot
+    silently diverge.
+    """
+    ok, reason, _delegate_tool, _current = _validate_reasoning_bridge_seam()
+    return ok, reason
+
+
 def install_reasoning_bridge() -> Tuple[bool, str]:
     """Idempotently install the reasoning-effort bridge onto the real host seam.
 
@@ -172,26 +244,10 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
     """
     global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL
     with _REASONING_BRIDGE_LOCK:
-        try:
-            import sys as _sys
-
-            # Read back through sys.modules rather than `import ... as name`: once a
-            # submodule has been imported, a plain dotted import can bind through the
-            # parent package's cached attribute instead of a swapped-in sys.modules
-            # entry (as tests do via unittest.mock.patch.dict(sys.modules, ...)).
-            import tools.delegate_tool  # noqa: F401  (ensures it's importable / triggers ImportError)
-            import tools.delegate_tool_config  # noqa: F401
-            delegate_tool = _sys.modules["tools.delegate_tool"]
-            delegate_tool_config = _sys.modules["tools.delegate_tool_config"]
-        except Exception as exc:
+        ok, reason, delegate_tool, current = _validate_reasoning_bridge_seam()
+        if not ok:
             _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = f"Hermes delegation API not importable ({type(exc).__name__}: {exc})"
-            return False, _REASONING_BRIDGE_REASON
-
-        current = getattr(delegate_tool, "_resolve_child_runtime", None)
-        if current is None:
-            _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = "tools.delegate_tool has no _resolve_child_runtime to wrap"
+            _REASONING_BRIDGE_REASON = reason
             return False, _REASONING_BRIDGE_REASON
 
         already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _wrapped_marker_target()
@@ -199,29 +255,6 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
             _REASONING_BRIDGE_INSTALLED = True
             _REASONING_BRIDGE_REASON = ""
             return True, ""
-
-        original_from_config = getattr(delegate_tool_config, "_resolve_child_runtime", None)
-        if current is not original_from_config:
-            _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = (
-                "tools.delegate_tool._resolve_child_runtime is not the same callable as "
-                "tools.delegate_tool_config._resolve_child_runtime; the host seam has moved"
-            )
-            return False, _REASONING_BRIDGE_REASON
-
-        try:
-            signature = inspect.signature(current)
-        except (TypeError, ValueError) as exc:
-            _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = f"could not inspect _resolve_child_runtime's signature: {exc}"
-            return False, _REASONING_BRIDGE_REASON
-
-        required = ("parent_agent", "model", "override_provider")
-        missing = [name for name in required if name not in signature.parameters]
-        if missing:
-            _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = "_resolve_child_runtime lacks " + ", ".join(missing)
-            return False, _REASONING_BRIDGE_REASON
 
         try:
             wrapper = _wrap_resolve_child_runtime(current)
@@ -243,8 +276,18 @@ def _wrapped_marker_target() -> Any:
 
 
 def reasoning_bridge_status() -> Tuple[bool, str]:
-    """Whether the reasoning-effort bridge is installed, and why not when it isn't."""
-    return _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON
+    """Whether the reasoning-effort bridge is usable right now, and why not when it isn't.
+
+    ``(True, "")`` when THIS process already installed it. Otherwise falls
+    back to ``reasoning_bridge_compatibility()``'s side-effect-free probe, so
+    a process that queries status before ever installing (the standalone
+    dashboard) still reports "available" whenever the host seam this bridge
+    needs is actually compatible -- "available" means "the host seam is
+    compatible", not "this process installed the wrapper".
+    """
+    if _REASONING_BRIDGE_INSTALLED:
+        return True, ""
+    return reasoning_bridge_compatibility()
 
 
 def _reset_reasoning_bridge_for_tests() -> None:

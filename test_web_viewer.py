@@ -3155,3 +3155,75 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
             "settings.claude_effort.unavailable",
         ):
             self.i18n(key)
+
+    def test_get_reports_available_when_uninstalled_but_the_host_seam_is_compatible(self):
+        """A standalone dashboard process never calls install_reasoning_bridge() itself.
+
+        Availability must mean "the host seam is compatible", not "this
+        process installed the wrapper" -- otherwise a separate dashboard
+        process permanently disables the Sonnet/Opus selects. This test uses
+        the real router module (not the None-patched fallback) so the real
+        reasoning_bridge_status()/reasoning_bridge_compatibility() path runs.
+        """
+        from model_router import claude_delegation
+
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        claude_delegation._reset_reasoning_bridge_for_tests()
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_INSTALLED)
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            data = None
+            with patch.object(web_viewer, "CONFIG_PATH", config_path):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/config", data=data, method="GET",
+                    )
+                    with urllib.request.urlopen(request) as response:
+                        status, payload = response.status, json.load(response)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["claude_reasoning_effort"]["available"])
+        self.assertEqual(payload["claude_reasoning_effort"]["reason"], "")
+
+    def test_get_reports_unavailable_with_a_reason_when_the_probe_is_incompatible(self):
+        """When the host seam itself is incompatible, the dashboard must still refuse.
+
+        Patches reasoning_bridge_compatibility() (what reasoning_bridge_status()
+        falls back to when uninstalled) directly, rather than sys.modules, so
+        this test is independent of the real host's actual compatibility.
+        """
+        from model_router import claude_delegation
+
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        claude_delegation._reset_reasoning_bridge_for_tests()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            with patch.object(
+                claude_delegation, "reasoning_bridge_compatibility",
+                return_value=(False, "the host seam has moved"),
+            ), patch.object(web_viewer, "CONFIG_PATH", config_path):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/config", method="GET",
+                    )
+                    with urllib.request.urlopen(request) as response:
+                        status, payload = response.status, json.load(response)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["claude_reasoning_effort"]["available"])
+        self.assertEqual(payload["claude_reasoning_effort"]["reason"], "the host seam has moved")
+        # The renderer disables both selects whenever available is false --
+        # already covered by test_renderClaudeReasoningEffort_disables_selects_and_shows_reason_when_unavailable,
+        # which asserts on the JS source directly rather than re-deriving a DOM here.
