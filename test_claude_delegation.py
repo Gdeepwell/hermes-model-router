@@ -598,35 +598,84 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
             result = self._resolve(parent_agent=parent, model="claude-sonnet-5")
         self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
 
+    def _stub_original_resolver(self, sentinel):
+        """Re-point the *real* host's ``_resolve_child_runtime`` at a stub returning
+        ``sentinel``, then reinstall the bridge so the wrapper's ``original`` closure
+        captures that stub instead of the real Hermes resolver -- restored on cleanup.
+
+        ``install_reasoning_bridge()``'s wrapper closes over its ``original`` argument
+        directly (see ``_wrap_resolve_child_runtime``); it does not re-read
+        ``_REASONING_BRIDGE_ORIGINAL`` on every call. So proving identity passthrough
+        requires the stub to be the thing the wrapper actually calls, not just a
+        bookkeeping global -- otherwise this test would pass against a real resolver's
+        freshly built dict and never catch a wrapper bug that returns a copy.
+        """
+        import sys
+        delegate_tool = sys.modules["tools.delegate_tool"]
+        delegate_tool_config = sys.modules["tools.delegate_tool_config"]
+        real_original = claude_delegation._REASONING_BRIDGE_ORIGINAL
+        self.assertIsNotNone(real_original, "bridge must already be installed")
+
+        def stub(*, parent_agent=None, delegation_cfg=None, parent_api_key=None, model=None,
+                 override_provider=None, override_base_url=None, override_api_key=None,
+                 override_api_mode=None, override_acp_command=None, override_acp_args=None,
+                 routing_cfg=None):
+            return sentinel
+
+        # Uninstall first so install_reasoning_bridge() sees an unwrapped resolver and
+        # is willing to wrap again (it treats an already-wrapped current as a no-op).
+        claude_delegation._reset_reasoning_bridge_for_tests()
+        delegate_tool._resolve_child_runtime = stub
+        delegate_tool_config._resolve_child_runtime = stub
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+        self.resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+
+        def _restore():
+            claude_delegation._reset_reasoning_bridge_for_tests()
+            delegate_tool._resolve_child_runtime = real_original
+            delegate_tool_config._resolve_child_runtime = real_original
+            ok2, reason2 = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok2, reason2)
+            self.resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+
+        self.addCleanup(_restore)
+
     def test_an_unscoped_call_returns_the_original_result_object(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
         parent = SimpleNamespace()
-        original = self._resolve(parent_agent=parent, model="claude-sonnet-5")
-        result = self._resolve(parent_agent=parent, model="claude-sonnet-5")
-        self.assertIsNot(result, original)  # each call to the real resolver builds a fresh dict
-        # No scope active: the wrapper must not touch reasoning_config at all.
-        self.assertNotIn("reasoning_config", result) if "reasoning_config" not in original else \
-            self.assertEqual(result.get("reasoning_config"), original.get("reasoning_config"))
+        # No scope active: the wrapper must pass the host's object straight through,
+        # unchanged, not a copy of it.
+        returned = self._resolve(parent_agent=parent, model="claude-sonnet-5")
+        self.assertIs(returned, sentinel)
 
     def test_a_different_parent_object_is_not_substituted(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
         scoped_parent, other_parent = SimpleNamespace(), SimpleNamespace()
         with claude_delegation.reasoning_scope(scoped_parent, "sonnet", "claude-sonnet-5",
                                                 {"enabled": True, "effort": "high"}):
-            result = self._resolve(parent_agent=other_parent, model="claude-sonnet-5")
-        self.assertNotEqual(result.get("reasoning_config"), {"enabled": True, "effort": "high"})
+            returned = self._resolve(parent_agent=other_parent, model="claude-sonnet-5")
+        self.assertIs(returned, sentinel)
 
     def test_a_non_anthropic_override_provider_is_not_substituted(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
         parent = SimpleNamespace()
         with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
                                                 {"enabled": True, "effort": "high"}):
-            result = self._resolve(parent_agent=parent, model="claude-sonnet-5", override_provider="openai-codex")
-        self.assertNotEqual(result.get("reasoning_config"), {"enabled": True, "effort": "high"})
+            returned = self._resolve(parent_agent=parent, model="claude-sonnet-5", override_provider="openai-codex")
+        self.assertIs(returned, sentinel)
 
     def test_a_different_model_is_not_substituted(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
         parent = SimpleNamespace()
         with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
                                                 {"enabled": True, "effort": "high"}):
-            result = self._resolve(parent_agent=parent, model="claude-opus-5-5")
-        self.assertNotEqual(result.get("reasoning_config"), {"enabled": True, "effort": "high"})
+            returned = self._resolve(parent_agent=parent, model="claude-opus-5-5")
+        self.assertIs(returned, sentinel)
 
     def test_two_threads_each_get_their_own_scoped_effort(self):
         import threading
