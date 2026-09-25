@@ -1788,7 +1788,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('grid-template-columns:44px max-content 190px', HTML)
         # Descenders ('g' in 'no reasoning allowed') need an explicit line box and a taller row.
         self.assertRegex(HTML, r'\.account-card \.model-switch select\{[^}]*line-height:20px;[^}]*padding:7px 8px[^}]*\}')
-        self.assertRegex(HTML, r'\.account-card \.model-switch\{[^}]*min-height:44px[^}]*\}')
+        self.assertRegex(HTML, r'\.account-card \.model-switch\{[^}]*min-height:50px[^}]*\}')
         # Haiku's placeholder is greyed out beyond the ordinary disabled look.
         self.assertRegex(HTML, r'\.account-card \.model-switch select\.effort-none\{[^}]*opacity:[^}]*\}')
         self.assertIn('grid-template-columns:subgrid', HTML)
