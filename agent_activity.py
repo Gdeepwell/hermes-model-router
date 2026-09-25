@@ -5,8 +5,9 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -118,19 +119,31 @@ def _requested_read_only(goal: Any, context: Any) -> bool:
     return any(marker in text for marker in ("read-only", "read only", "csak olvas", "csak kiolvas"))
 
 
-def _router_calls_by_session(router_log_path: Path | None) -> Dict[str, List[Dict[str, Any]]]:
-    """Read retained router records once to associate child sessions with routes."""
+_ROUTER_SNAPSHOT_LOCK = threading.Lock()
+_ROUTER_SNAPSHOTS: OrderedDict[tuple, Dict[str, List[Dict[str, Any]]]] = OrderedDict()
+_ROUTER_SNAPSHOT_LIMIT = 2
+
+
+def _copy_router_calls(snapshot: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    # Entries contain only strings; a one-level copy isolates callers without
+    # paying deepcopy's object-graph traversal cost on every dashboard refresh.
+    return {session: [dict(call) for call in calls] for session, calls in snapshot.items()}
+
+
+def _router_file_key(path: Path) -> tuple:
+    stat = path.stat()
+    return (str(path.resolve()), stat.st_dev, stat.st_ino, stat.st_size,
+            stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _parse_router_calls(router_log_path: Path) -> Dict[str, List[Dict[str, Any]]]:
     by_session: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    if not router_log_path or not router_log_path.exists():
-        return by_session
-    try:
-        lines = router_log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return by_session
-    for line in lines:
+    for line in router_log_path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             entry = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(entry, dict):
             continue
         turn_id = str(entry.get("turn_id", ""))
         session_id = turn_id.split(":", 1)[0] if ":" in turn_id else ""
@@ -145,6 +158,40 @@ def _router_calls_by_session(router_log_path: Path | None) -> Dict[str, List[Dic
             **({"reason": _redact_sensitive(str(entry["reason"]))} if entry.get("reason") else {}),
         })
     return by_session
+
+
+def _router_calls_by_session(router_log_path: Path | None) -> Dict[str, List[Dict[str, Any]]]:
+    """Reuse unchanged retained route history across both dashboard endpoints."""
+    if not router_log_path:
+        return {}
+    with _ROUTER_SNAPSHOT_LOCK:
+        try:
+            key = _router_file_key(router_log_path)
+        except OSError:
+            # A rotated/disappeared path must not resurrect an old snapshot.
+            _ROUTER_SNAPSHOTS.clear()
+            return {}
+        cached = _ROUTER_SNAPSHOTS.get(key)
+        if cached is not None:
+            _ROUTER_SNAPSHOTS.move_to_end(key)
+            return _copy_router_calls(cached)
+        try:
+            parsed = _parse_router_calls(router_log_path)
+            after = _router_file_key(router_log_path)
+            if after != key:
+                # An append/replacement during the read gets one fresh scan.
+                retry_key = after
+                parsed = _parse_router_calls(router_log_path)
+                if _router_file_key(router_log_path) != retry_key:
+                    return parsed
+                key = retry_key
+        except OSError:
+            return {}
+        _ROUTER_SNAPSHOTS[key] = parsed
+        _ROUTER_SNAPSHOTS.move_to_end(key)
+        while len(_ROUTER_SNAPSHOTS) > _ROUTER_SNAPSHOT_LIMIT:
+            _ROUTER_SNAPSHOTS.popitem(last=False)
+        return _copy_router_calls(parsed)
 
 
 def _stored_description(value: Any) -> str:

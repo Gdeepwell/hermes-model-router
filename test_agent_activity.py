@@ -9,6 +9,52 @@ from unittest.mock import patch
 from agent_activity import load_agent_activity
 
 
+class RouterSnapshotTests(unittest.TestCase):
+    def test_unchanged_reads_reuse_parse_and_return_independent_records(self):
+        from agent_activity import _router_calls_by_session
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "router.jsonl"
+            path.write_text(json.dumps({"turn_id": "older:1", "tier": "terra", "model": "gpt-terra"}) + "\n")
+            with patch("agent_activity._parse_router_calls", wraps=__import__(
+                    "agent_activity")._parse_router_calls) as parse:
+                first = _router_calls_by_session(path)
+                first["older"][0]["tier"] = "corrupted"
+                second = _router_calls_by_session(path)
+                self.assertEqual(second["older"][0]["tier"], "terra")
+                self.assertEqual(parse.call_count, 1)
+                with path.open("a") as stream:
+                    stream.write(json.dumps({"turn_id": "newer:1", "tier": "sol", "model": "gpt-sol"}) + "\n")
+                self.assertIn("older", _router_calls_by_session(path))
+                self.assertIn("newer", _router_calls_by_session(path))
+                self.assertEqual(parse.call_count, 2)
+                path.write_text(json.dumps({"turn_id": "truncated:1", "model": "gpt-terra"}) + "\n")
+                self.assertEqual(set(_router_calls_by_session(path)), {"truncated"})
+                replacement = path.with_suffix(".new")
+                replacement.write_text(json.dumps({"turn_id": "replacement:1", "model": "gpt-sol"}) + "\n")
+                replacement.replace(path)
+                self.assertEqual(set(_router_calls_by_session(path)), {"replacement"})
+                path.unlink()
+                self.assertEqual(_router_calls_by_session(path), {})
+                path.write_text(json.dumps({"turn_id": "reborn:1", "model": "gpt-terra"}) + "\n")
+                self.assertEqual(set(_router_calls_by_session(path)), {"reborn"})
+
+    def test_concurrent_first_reads_parse_once_and_cache_stays_bounded(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import agent_activity
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "router.jsonl"
+            with patch("agent_activity._parse_router_calls", wraps=agent_activity._parse_router_calls) as parse:
+                for version in range(4):
+                    path.write_text(json.dumps({"turn_id": f"old:{version}", "model": "gpt-terra"}) + "\n")
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        results = list(pool.map(agent_activity._router_calls_by_session, [path] * 8))
+                    self.assertEqual(len(results), 8)
+                    self.assertTrue(all(len(result["old"]) == 1 for result in results))
+                self.assertEqual(parse.call_count, 4)
+                self.assertLessEqual(len(agent_activity._ROUTER_SNAPSHOTS), 2)
+
+
+
 class AgentActivityTests(unittest.TestCase):
     def test_started_external_bridge_with_matching_process_identity_is_running(self):
         with tempfile.TemporaryDirectory() as directory:
