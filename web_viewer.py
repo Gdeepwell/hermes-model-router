@@ -893,6 +893,7 @@ const $=id=>document.getElementById(id);
 // ── i18n ──────────────────────────────────────────────────────────
 const I18N = {
   en: {
+    'settings.worker.limits': 'Effective worker limits: depth {depth}, concurrent children {children}, iterations {iterations}.',
     // Header
     'lab.kicker': 'HERMES · LOCAL OBSERVABILITY',
     'lab.title': 'AI Home Lab',
@@ -1130,6 +1131,7 @@ const I18N = {
     'th.time.short': 'Time',
   },
   hu: {
+    'settings.worker.limits': 'Érvényes munkáskorlátok: mélység {depth}, párhuzamos gyermekek {children}, iterációk {iterations}.',
     'lab.kicker': 'HERMES · LOCAL OBSERVABILITY',
     'lab.title': 'AI Home Lab',
     'lab.sub': 'Modellek, háttéragentek és élő munkafolyamatok egy helyen',
@@ -1403,7 +1405,8 @@ function renderSettings(){
   const models=['luna','spark','terra','sol','opus5','sonnet5','haiku','qwen'];
   const modelLabels={luna:t('card.luna'),spark:t('card.spark'),terra:t('card.terra'),sol:t('card.sol'),opus5:t('card.opus5'),sonnet5:t('card.sonnet5'),haiku:t('card.haiku'),qwen:t('card.qwen')};
   const modelDescriptions={luna:t('model.desc.luna'),spark:t('model.desc.spark'),terra:t('model.desc.terra'),sol:t('model.desc.sol'),opus5:t('model.desc.opus5'),sonnet5:t('model.desc.sonnet5'),haiku:t('model.desc.haiku'),qwen:t('model.desc.qwen')};
-  $('workflow-switch').innerHTML=workflowControl(currentConfig.workflow,currentConfig.balance);
+    $('workflow-switch').innerHTML=workflowControl(currentConfig.workflow,currentConfig.balance);
+  if(currentConfig.delegation_limits){const limits=currentConfig.delegation_limits,note=document.createElement('div');note.className='pref-note';note.textContent=t('settings.worker.limits').replace('{depth}',limits.max_spawn_depth??'—').replace('{children}',limits.max_concurrent_children??'—').replace('{iterations}',limits.max_iterations??'—');$('workflow-switch').append(note)}
   renderAccounts();
   renderEffort();
   renderPreferences(modelLabels);
@@ -2088,6 +2091,7 @@ class Handler(BaseHTTPRequestHandler):
                 response = {
                     "callable": config.get("callable", {}),
                     "workflow": _workflow_name(config),
+                    "delegation_limits": router._host_delegation_limits() if router else {},
                     "balance": _balance_status(config),
                     "default_model": config.get("default_model", "terra"),
                     "effort": {tier: (config.get("effort") or {}).get(tier) for tier in MANAGED_EFFORT_TIERS},

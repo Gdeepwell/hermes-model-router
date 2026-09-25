@@ -92,9 +92,9 @@ The user-facing conversation stays on one durable parent model. Classifier resul
 
 ### Bounded Delegation
 
-- Max 2 concurrent child agents
-- Max 2 spawn depth: the parent delegates a conductor, the conductor delegates leaves, and leaves cannot delegate further
-- Max 16 child iterations
+- Concurrency, spawn depth, and iteration budgets come from Hermes’s `delegation` settings and are shown in Settings.
+- A forced conductor requires `max_spawn_depth >= 2` and `orchestrator_enabled: true`. With one level, the parent delegates workers directly and keeps integration ownership.
+- The router does not raise host limits.
 - Handoff capsule required for every worker task
 
 ### Claude targets

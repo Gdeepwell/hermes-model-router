@@ -105,3 +105,29 @@ class QwenMisdispatchTests(unittest.TestCase):
         self.assertEqual(
             _misdispatched_external_label("[sol] implement", self.models["terra"], self.cfg), ""
         )
+
+class HostCapabilityTests(unittest.TestCase):
+    def test_flat_host_skips_forced_conductor(self):
+        from unittest.mock import patch
+        import model_router as router
+        from model_router.test_external_orchestrator import _cfg, _delegating_request
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            cfg = _cfg(d)
+            kwargs = {'request': _delegating_request(), 'api_call_count': 1, 'turn_id': 'flat-host'}
+            decision = router.RouteDecision('sonnet5', 'claude-sonnet-5', 'external', 'external')
+            with patch.object(router, '_delegation_target_names', return_value=('sonnet5',)), \
+                 patch.object(router, '_host_delegation_limits', return_value={'conductor_available': False}):
+                self.assertIn('host_has_no_conductor_depth', router._orchestration_skip_reason(kwargs, cfg, decision))
+            with patch.object(router, '_delegation_target_names', return_value=('sonnet5',)), \
+                 patch.object(router, '_host_delegation_limits', return_value={'conductor_available': True}):
+                self.assertIsNone(router._orchestration_skip_reason(kwargs, cfg, decision))
+
+    def test_limits_follow_host_capability_not_legacy_role(self):
+        from unittest.mock import patch
+        import model_router as router
+        with patch('tools.delegate_tool_config._get_max_spawn_depth', return_value=1):
+            self.assertFalse(router._host_delegation_limits()['conductor_available'])
+        with patch('tools.delegate_tool_config._get_max_spawn_depth', return_value=2), \
+             patch('tools.delegate_tool_config._get_orchestrator_enabled', return_value=False):
+            self.assertFalse(router._host_delegation_limits()['conductor_available'])

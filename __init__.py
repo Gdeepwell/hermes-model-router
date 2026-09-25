@@ -3126,6 +3126,23 @@ def _orchestration_forced_event(cfg: Dict[str, Any], parent_turn_id: str) -> Opt
     return None
 
 
+def _host_delegation_limits() -> Dict[str, Any]:
+    """Read effective host limits; unknown capabilities never justify fan-out."""
+    try:
+        from tools.delegate_tool_config import (
+            _get_max_spawn_depth, _get_max_concurrent_children,
+            _get_orchestrator_enabled, _load_config as host_config,
+        )
+        from tools.delegate_tool import DEFAULT_MAX_ITERATIONS
+        depth = _get_max_spawn_depth()
+        return {"max_spawn_depth": depth,
+                "max_concurrent_children": _get_max_concurrent_children(),
+                "max_iterations": host_config().get("max_iterations", DEFAULT_MAX_ITERATIONS),
+                "conductor_available": _get_orchestrator_enabled() and depth >= 2}
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return {"conductor_available": False}
+
+
 def _orchestration_skip_reason(
     kwargs: Dict[str, Any], cfg: Dict[str, Any], decision: RouteDecision
 ) -> Optional[str]:
@@ -3228,6 +3245,8 @@ def _orchestration_skip_reason(
     # constrain their scopes and hard-risk requests route to Sol first.
     if not text:
         return "empty_normalised_text"
+    if not sol_preflight and not _host_delegation_limits()["conductor_available"]:
+        return "host_has_no_conductor_depth; parent_delegates_direct_workers"
     return None
 
 
