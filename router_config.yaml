@@ -187,6 +187,9 @@ claude_delegation:
     opus: claude-opus-5-5
   default_tier: sonnet
   log_path: ~/.hermes/logs/claude-delegation.jsonl
+  # reasoning_effort:
+  #   sonnet: medium
+  #   opus: medium
 
 # Weekly usage guard, the same for every delegation account. From soft_percent the
 # account's heaviest tier steps down (step_down, router target names); from

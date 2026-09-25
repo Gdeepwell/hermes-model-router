@@ -192,6 +192,38 @@ advice "quick lookups", and it can be named in a preference chain like any other
 target — typically for `explore`. With Claude delegation off it is never offered,
 whatever its `callable` switch says.
 
+### Claude reasoning effort
+
+`claude_delegation.reasoning_effort.sonnet` and `.opus` (`low`, `medium`, `high`
+or `xhigh`; default `medium`) set the thinking effort `delegate_claude` gives its
+Sonnet or Opus child. Hermes copies a delegating parent's own `reasoning_config`
+into every child verbatim, which would give a Claude worker whatever effort the
+parent happens to be running at rather than its own configured tier. Instead
+this plugin installs a narrow bridge over Hermes's private
+`tools.delegate_tool._resolve_child_runtime` seam: for the exact duration of one
+`delegate_claude` call it substitutes that call's configured effort, and only for
+the matching child of the same parent, same provider (`anthropic`) and same
+model — any other concurrent delegation, any non-Anthropic child, is untouched.
+When usage guard steps a busy Opus request down to Sonnet mid-call, the
+substituted effort is Sonnet's own setting, not Opus's, since it follows the
+final tier that actually runs. Haiku has no entry here: Hermes's Anthropic
+adapter sends no thinking configuration for Haiku models, so there is nothing
+for the bridge to override.
+
+If the host's private seam has moved in a way this bridge does not recognise,
+`delegate_claude` is refused outright with "Claude reasoning effort is
+unavailable: `<reason>`" rather than silently running at the wrong effort;
+Haiku calls, which never touch the bridge, are unaffected. The dashboard's
+**Claude reasoning effort** control (next to Codex's own **Reasoning effort**,
+see [Settings](#settings-tab)) edits only `sonnet` and `opus`, shows Haiku as
+unsupported, and disables its selects with the same reason when the host seam
+is incompatible — the same side-effect-free probe the bridge itself uses, so
+the dashboard's answer never diverges from the bridge's own.
+
+If the dashboard reports the Claude reasoning-effort control unavailable with a
+`ModuleNotFoundError`, this host's Hermes venv install map is stale after a
+Hermes update; re-running Hermes's own update/install step resolves it.
+
 When both are offered the contract used to add "use `sonnet5` by default and
 reserve `opus5` for consequential or hard work". That sentence dates from the
 commit that made these targets reachable at all, when no preference mechanism
@@ -417,9 +449,11 @@ capping the request.
 The Settings tab edits only the four plain routed-tier keys: `luna`, `spark`,
 `terra`, and `sol`. `opus5` is a route/log marker; Qwen has no dashboard effort
 control because the router strips reasoning; and Claude-only `haiku` / `sonnet5`
-are not routed here. The situational `sol_long` and `explicit_<tier>` /
-`explicit_<tier>_xhigh` keys remain file-only in `router_config.yaml` or its
-local overlay.
+are not routed here — this `effort:` map cannot reach a delegated Claude child at
+all, since the router never runs on that call. Sonnet and Opus have their own
+setting instead: see [Claude reasoning effort](#claude-targets) below. The
+situational `sol_long` and `explicit_<tier>` / `explicit_<tier>_xhigh` keys
+remain file-only in `router_config.yaml` or its local overlay.
 
 ### Images force a vision-capable route
 
@@ -588,7 +622,12 @@ pill with the remaining time and the reason, since the switch alone would not
 explain why traffic went elsewhere. Then come the main agent chain and the worker defaults (see
 [Hermes fallback chains](#hermes-fallback-chains)), the per-work-kind preference
 chains described above (each entry shows its account and that account's
-soft/closed state), and the interface language. Everything is read through the router's own helpers rather than
+soft/closed state), and the interface language. Codex's plain-tier **Reasoning
+effort** control sits beside a **Claude reasoning effort** control for the
+delegated Sonnet and Opus children (see
+[Claude reasoning effort](#claude-reasoning-effort)); Haiku shows as
+unsupported there, and the selects disable with the bridge's own reason when
+the host seam is incompatible. Everything is read through the router's own helpers rather than
 recomputed, so the panel and the routing decision cannot disagree.
 
 The server binds to `127.0.0.1` only, so it is not reachable from the local
@@ -1300,6 +1339,14 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.18.0** — `delegate_claude` children get their own per-tier reasoning effort.
+`claude_delegation.reasoning_effort.sonnet` / `.opus` (default `medium`) reach the
+delegated Sonnet or Opus child through a guarded bridge over Hermes's private
+child-runtime resolver; Haiku is unaffected since Hermes's adapter sends it no
+thinking config, and a host whose seam has moved refuses `delegate_claude`
+rather than silently dropping the setting. The Settings tab gained a matching
+**Claude reasoning effort** control next to Codex's **Reasoning effort**.
 
 **1.17.1** — A `pre_tool_call` gate refuses a `delegate_task` that names a target
 switched off in the dashboard (or cooling down with no worker fallback chain) and
