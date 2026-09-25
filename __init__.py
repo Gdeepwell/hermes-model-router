@@ -2341,9 +2341,8 @@ def _external_target_for_model(model: str) -> Optional[str]:
     for name, spec in _delegation_targets_detail().items():
         if spec.get("model") == model:
             return name
-    if claude_delegation.is_active():
-        return claude_delegation.target_for_model(model, _load_config())
-    return None
+    # Observing an existing worker must not depend on whether this request can spawn one.
+    return claude_delegation.target_for_model(model, _load_config())
 
 
 def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:

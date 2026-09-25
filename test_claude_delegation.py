@@ -412,12 +412,13 @@ class OfferedNamesTests(unittest.TestCase):
         )
         return path
 
-    def test_an_inactive_wing_adds_nothing(self):
+    def test_an_inactive_wing_observes_models_without_offering_them(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(model_router, "_HERMES_CONFIG_PATH", self._hermes_config(directory)), \
-             patch.object(claude_delegation, "_ACTIVE", False):
+             patch.object(claude_delegation, "_ACTIVE", False), \
+             patch("model_router._load_config", return_value=_cfg()):
             self.assertEqual(model_router._delegation_target_names(), ("opus5", "sonnet5"))
-            self.assertIsNone(model_router._external_target_for_model("claude-haiku-4-5-20251001"))
+            self.assertEqual(model_router._external_target_for_model("claude-haiku-4-5-20251001"), "haiku")
 
     def test_an_active_wing_offers_and_counts_haiku(self):
         with tempfile.TemporaryDirectory() as directory, \
