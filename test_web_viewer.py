@@ -602,8 +602,8 @@ class RouterStatusTests(unittest.TestCase):
         self.assertNotIn("opus5", status["routable"])
         self.assertNotIn("sonnet5", status["routable"])
         self.assertIn("terra", status["routable"])
-        renderer = HTML[HTML.index("const select=$('default-model-select');"):]
-        self.assertIn("currentConfig.routable", renderer.split("}")[0] + renderer[:400])
+        renderer = HTML[HTML.index("function renderMainChain("):]
+        self.assertIn("currentConfig.routable", renderer[:renderer.index('id="default-model-select"')])
 
     def test_router_status_reports_cooling_tiers_and_account_load(self):
         """Read through the router's own helpers rather than recomputed here, so
@@ -856,6 +856,43 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             self.assertEqual(written["delegation"]["fallback_providers"][0]["model"], "claude-opus-5-5")
             self.assertEqual(written["fallback_providers"][0]["model"], "qwen3.7-plus")
 
+    def test_the_primary_is_dropped_from_its_own_fallback_chain(self):
+        """The page shows the main agent as one chain whose first entry is the
+        model Hermes starts on; that model repeated as a fallback can never help."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text("model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n", encoding="utf-8")
+            options = self.OPTIONS + [{"key": "terra", "provider": "openai-codex", "model": "gpt-5.6-terra"}]
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_fallback_chain_options", return_value=options):
+                error = web_viewer._save_hermes_fallback({"orchestrator": [
+                    {"provider": "openai-codex", "model": "gpt-5.6-terra"},
+                    {"provider": "qwen-token", "model": "qwen3.7-plus"}]}, {})
+            self.assertIsNone(error)
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["fallback_providers"], [{"provider": "qwen-token", "model": "qwen3.7-plus"}])
+
+    def test_the_worker_model_writes_the_hermes_delegation_block(self):
+        import tempfile
+
+        router_cfg = {"models": {"terra": "gpt-5.6-terra", "sol": "gpt-5.6-sol", "qwen": "qwen3.7-plus"},
+                      "tier_providers": {"terra": "openai-codex", "sol": "openai-codex", "qwen": "qwen-token"}}
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text("delegation:\n  model: gpt-5.6-terra\n  provider: openai-codex\n"
+                              "  max_iterations: 40\n", encoding="utf-8")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_worker_model("sol", router_cfg))
+                self.assertIn("cannot be", web_viewer._save_worker_model("qwen", router_cfg))
+                status = web_viewer._worker_model_status(router_cfg)
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["delegation"]["model"], "gpt-5.6-sol")
+            self.assertEqual(written["delegation"]["max_iterations"], 40, "the rest of the block survives")
+            self.assertEqual(status["tier"], "sol")
+            self.assertEqual(status["options"], ["terra", "sol"])
+
     def test_an_unreadable_config_is_never_overwritten(self):
         import tempfile
 
@@ -1034,7 +1071,7 @@ class SettingsLabelTests(DashboardProbeMixin, unittest.TestCase):
     def test_the_default_model_says_what_only_it_controls(self):
         """It reads as redundant next to the preference chains unless it names the
         one thing a chain cannot change: the model Hermes itself starts on."""
-        english, hungarian = self.i18n("settings.default.desc")
+        english, hungarian = self.i18n("settings.main.sub")
         self.assertIn("starts on", english)
         self.assertIn("indul", hungarian)
 
@@ -1602,7 +1639,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
     def _account_functions(self):
         return "\n".join(self.javascript_function(name)
-                          for name in ("ageText", "resetText", "usageRow", "accountCard"))
+                          for name in ("ageText", "resetText", "usageRow", "shortModelName", "accountCard"))
 
     def _run(self, script):
         # 'status.locale' must resolve to a real BCP-47 tag: toLocaleString throws
@@ -1633,18 +1670,30 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
         codex_card = self._card("openai-codex", self.CODEX_INFO)
         claude_card = self._card("anthropic", self.CLAUDE_INFO)
-        expected = ["models", "usage", "limits", "delegation", "load"]
+        # Models | Limits | Delegation on the first line, Usage underneath;
+        # the load count lives in Usage's last line, next to Refresh.
+        expected = ["models", "limits", "delegation", "usage"]
         self.assertEqual(re.findall(r'class="account-row (\w+)"', codex_card), expected)
         self.assertEqual(re.findall(r'class="account-row (\w+)"', claude_card), expected)
+        for card in (codex_card, claude_card):
+            usage_row = card[card.index('class="account-row usage"'):]
+            self.assertIn("account.load.calls", usage_row)
+        claude_footer = claude_card[claude_card.index('class="usage-age"'):]
+        self.assertLess(claude_footer.index("data-refresh-usage"), claude_footer.index("account.load.calls"))
+
+    def test_model_switches_drop_the_repeated_vendor_prefix(self):
+        script = ("console.log(JSON.stringify(['GPT-5.6 Luna','GPT-5.3 Spark','Claude Opus 5.5',"
+                  "'Claude Haiku 4.5','Qwen 3.7 Plus'].map(shortModelName)));")
+        self.assertEqual(json.loads(self._run("let currentConfig={};" + script)),
+                         ["Luna 5.6", "Spark 5.3", "Opus 5.5", "Haiku 4.5", "Qwen 3.7 Plus"])
 
     def test_claude_card_specifics(self):
         registered = self._card("anthropic", self.CLAUDE_INFO)
         # The Workflow switch owns delegate_claude being on; the card only reports it.
         self.assertNotIn("data-account-toggle", registered)
         self.assertIn("account.delegation.via", registered)
-        self.assertIn('<select data-default-tier', registered)
-        for tier in ("haiku", "sonnet", "opus"):
-            self.assertIn(f'value="{tier}"', registered)
+        # The default tier moved to the Workers section (renderWorkers).
+        self.assertNotIn('<select data-default-tier', registered)
         self.assertIn("account.delegation.live", registered)
 
         restart_info = dict(self.CLAUDE_INFO,
@@ -1720,7 +1769,11 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
             "account.delegation.via", "account.delegation.always",
             "account.delegation.default_tier", "account.delegation.live",
             "account.delegation.restart", "account.load", "account.load.calls",
-            "settings.routing.heading",
+            "settings.main.heading", "settings.main.sub", "settings.main.primary",
+            "settings.main.off", "settings.main.external", "settings.workers.heading",
+            "settings.workers.sub", "settings.workers.codex", "settings.workers.codex.desc",
+            "settings.workers.claude", "settings.workers.claude.desc",
+            "settings.workers.fallback", "settings.workers.fallback.desc",
         ]:
             self.i18n(key)
 
@@ -2374,7 +2427,7 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertNotIn("data-account-toggle", card)
         self.assertIn("account.delegation.off", card)
         self.assertNotIn("account.delegation.live", card, "registered but switched off is not live")
-        self.assertIn("<select data-default-tier", card_tests._card("anthropic", AccountCardTests.CLAUDE_INFO))
+        self.assertIn("data-default-tier", self.javascript_function("renderWorkers"))
 
     def test_saving_posts_the_workflow_and_no_longer_the_delegation_flag(self):
         source = self.javascript_function("saveSettings")
@@ -2809,6 +2862,37 @@ assert.deepEqual(errors,[]);dom.window.close();
 
 
 class SettingsSaveQueueTests(DashboardProbeMixin, unittest.TestCase):
+    def test_worker_model_joins_the_two_file_settings_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router = root / 'router_config.yaml'
+            hermes = root / 'config.yaml'
+            router.write_text('default_model: terra\nprovider: openai-codex\nmodels:\n  terra: gpt-terra\n  sol: gpt-sol\ntier_providers:\n  terra: openai-codex\n  sol: openai-codex\ncallable:\n  terra: true\n  sol: true\n', encoding='utf-8')
+            original = 'model:\n  provider: openai-codex\n  default: gpt-terra\ndelegation:\n  provider: openai-codex\n  model: gpt-terra\n'
+            hermes.write_text(original, encoding='utf-8')
+            local = root / 'router_config.local.yaml'
+            with patch.object(web_viewer, 'CONFIG_PATH', router), patch.object(web_viewer, 'HERMES_CONFIG_PATH', hermes):
+                status, result = web_viewer._save_config_payload({
+                    'revision': web_viewer._config_revision(), 'worker_model': 'sol',
+                    'callable': {'terra': True, 'sol': False}})
+                self.assertEqual(status, 200, result)
+                self.assertEqual(web_viewer.yaml.safe_load(hermes.read_text())['delegation']['model'], 'gpt-sol')
+                self.assertIn('sol: false', local.read_text())
+                self.assertEqual(result['revision'], web_viewer._config_revision())
+                hermes.write_text(original, encoding='utf-8')
+                local.unlink()
+                original_write = web_viewer._atomic_write
+                def fail_local(path, content):
+                    if path == local:
+                        raise OSError('local write failed')
+                    return original_write(path, content)
+                with patch.object(web_viewer, '_atomic_write', side_effect=fail_local), \
+                     self.assertRaisesRegex(OSError, 'local write failed'):
+                    web_viewer._save_config_payload({'worker_model': 'sol',
+                        'callable': {'terra': True, 'sol': False}})
+                self.assertEqual(hermes.read_text(), original)
+                self.assertFalse(local.exists())
+
     def test_failed_save_drops_queued_edits_without_hiding_error_then_reload_recovers(self):
         script = r"""
 const assert=require('node:assert/strict');

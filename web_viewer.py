@@ -138,6 +138,11 @@ def _save_hermes_fallback(payload, router_cfg: dict, *, hermes=None, persist=Tru
     """Persist the orchestrator and delegated-child chains; an error string, or None.
 
     Absent keys are left alone, so saving one chain never clears the other.
+
+    The Settings page shows the main agent as ONE chain: the model Hermes starts
+    on, then its fallbacks. The primary is therefore dropped from its own
+    fallback list -- it used to sit there as a second entry, a step that can
+    never help, because when the primary's provider is out so is that entry.
     """
     if not isinstance(payload, dict):
         return "hermes_fallback must be an object"
@@ -162,6 +167,10 @@ def _save_hermes_fallback(payload, router_cfg: dict, *, hermes=None, persist=Tru
         chain, error = _clean_fallback_chain(payload[key], allowed)
         if error:
             return f"{label}: {error}"
+        if key == "orchestrator":
+            primary = _hermes_parent(config)
+            chain = [e for e in chain
+                     if (e["provider"], e["model"]) != (primary["provider"], primary["model"])]
         chains[key] = chain
     if not chains:
         return None
@@ -289,6 +298,69 @@ def _save_default_model(requested: str, config: dict, *, hermes=None, persist=Tr
 
 def _tier_provider(tier: str, config: dict) -> str:
     return str((config.get("tier_providers") or {}).get(tier) or "openai-codex")
+
+
+def _hermes_parent(hermes: dict) -> dict:
+    """The model Hermes itself starts on, as {provider, model}."""
+    model = hermes.get("model") if isinstance(hermes, dict) else None
+    model = model if isinstance(model, dict) else {}
+    return {"provider": str(model.get("provider") or ""), "model": str(model.get("default") or "")}
+
+
+def _router_tier_for(provider: str, model: str, config: dict) -> str:
+    """The router tier serving exactly this provider/model, or ''."""
+    for tier, name in (config.get("models") or {}).items():
+        if name == model and (not provider or _tier_provider(tier, config) == provider):
+            return str(tier)
+    return ""
+
+
+def _worker_model_options(config: dict) -> list:
+    """Tiers a ``delegate_task`` worker may default to: the Codex account's own.
+
+    The Hermes delegation block carries only provider and model -- no base URL or
+    key -- so only the provider Hermes already authenticates natively is offered.
+    """
+    return [str(t) for t in (config.get("models") or {})
+            if _tier_provider(str(t), config) == "openai-codex"]
+
+
+def _worker_model_status(config: dict, hermes: dict | None = None) -> dict:
+    hermes = hermes if hermes is not None else _read_hermes_config()
+    delegation = hermes.get("delegation") if isinstance(hermes, dict) else None
+    delegation = delegation if isinstance(delegation, dict) else {}
+    provider, model = str(delegation.get("provider") or ""), str(delegation.get("model") or "")
+    return {"provider": provider, "model": model, "tier": _router_tier_for(provider, model, config),
+            "options": _worker_model_options(config)}
+
+
+def _save_worker_model(tier, config: dict, *, hermes=None, persist=True):
+    """Point Hermes's ``delegation`` block (the ``delegate_task`` default) at a tier.
+
+    It used to be invisible on the page, so switching the default model left every
+    Codex worker on the old one. An error string, or None.
+    """
+    tier = str(tier or "")
+    if tier not in _worker_model_options(config):
+        return f"'{tier}' cannot be the delegate_task worker model"
+    stamp, hermes = _read_hermes_snapshot() if hermes is None else (None, hermes)
+    if not hermes:
+        return "The Hermes config could not be read; refusing to overwrite it"
+    delegation = hermes.get("delegation")
+    if not isinstance(delegation, dict):
+        delegation = {}
+        hermes["delegation"] = delegation
+    model = str((config.get("models") or {}).get(tier) or "")
+    provider = _tier_provider(tier, config)
+    if (delegation.get("provider"), delegation.get("model")) == (provider, model):
+        return None
+    delegation["provider"], delegation["model"] = provider, model
+    if persist:
+        try:
+            _write_hermes_config(hermes, stamp)
+        except Exception as exc:
+            return f"Could not write the Hermes config: {exc}"
+    return None
 
 
 def _parent_is_router_model(config: dict, hermes: dict | None = None) -> bool:
@@ -894,7 +966,7 @@ main{max-width:1500px;margin:auto;padding:28px}h1{font-size:26px;margin:0}.sub{c
 label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button{background:#0b111c;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font:inherit}input[type=search]{min-width:260px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{cursor:wait;opacity:.72}.status.refreshing{color:#c4b5fd}.check{display:flex;align-items:center;gap:7px;padding:9px 2px}.check input{accent-color:var(--accent)}
 .card{min-width:135px;flex:1;background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.card .n{font-size:25px;font-weight:750}.card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.luna .n{color:var(--luna)}.spark .n{color:var(--spark)}.terra .n{color:var(--terra)}.sol .n{color:var(--sol)}.opus5 .n{color:var(--opus5)}.sonnet5 .n{color:var(--sonnet5)}.haiku .n{color:var(--haiku)}.qwen .n{color:var(--qwen)}
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:14px;background:rgba(13,18,29,.92)}table{border-collapse:collapse;table-layout:fixed;width:1405px;min-width:100%}th{position:sticky;top:0;background:#161e2c;color:var(--muted);font-size:11px;letter-spacing:.07em;text-align:left;text-transform:uppercase;user-select:none}th,td{padding:11px 13px;border-bottom:1px solid #1e2838;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.prompt-text{min-width:0}.word-wrap .prompt-text{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}.resizer{position:absolute;z-index:2;top:0;right:-4px;width:9px;height:100%;cursor:col-resize;touch-action:none}.resizer::after{content:'';position:absolute;left:4px;top:20%;width:1px;height:60%;background:#3b4a62}.resizer:hover::after,.resizer.dragging::after{width:2px;background:var(--accent)}body.resizing{cursor:col-resize;user-select:none}tbody tr:hover{background:#151d2b}code{color:#b9c5d8}.pill{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:2px 8px;font-size:12px;font-weight:700;margin-right:4px}.pill.luna{color:var(--luna)}.pill.spark{color:var(--spark)}.pill.terra{color:var(--terra)}.pill.sol{color:var(--sol)}.pill.opus5{color:var(--opus5)}.pill.sonnet5{color:var(--sonnet5)}.pill.haiku{color:var(--haiku)}.pill.qwen{color:var(--qwen)}.route{white-space:nowrap}.reason{color:#c2ccdb}.running-agent-pill{display:inline-block;margin-left:8px;padding:2px 7px;border:1px solid #88e36f;border-radius:99px;color:#88e36f;font-size:10px;font-weight:800;letter-spacing:.06em;vertical-align:middle;animation:agentPulse 1.4s ease-in-out infinite}@keyframes agentPulse{50%{box-shadow:0 0 11px rgba(136,227,111,.7)}}.play-indicator{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;margin-left:8px;border-radius:50%;background:#54d66a;color:#07110b;font-size:10px;font-weight:900;vertical-align:middle;box-shadow:0 0 12px rgba(84,214,106,.75);animation:agentPulse 1.4s ease-in-out infinite}.active-router-row{background:rgba(84,214,106,.055)}.calls,.expand{text-align:center}.prompt-toggle{border:0;background:transparent;padding:0;color:var(--accent);font-size:15px;line-height:1}.prompt-toggle:hover{border:0;color:#c4b5fd}.detail>td{padding:10px 13px 14px;background:#0b111c;overflow:visible}.details-table{width:calc(100% - 28px);min-width:0;margin-left:28px;border:1px solid #253044;border-radius:8px;table-layout:fixed}.details-table th{position:static;background:#111927}.details-table th,.details-table td{padding:8px 10px;font-size:12px}.details-table tbody tr:last-child td{border-bottom:0}.status{margin-left:auto;color:var(--muted);padding:9px 4px}.empty{text-align:center;color:#8997ad;padding:40px}.error{color:#ff6b7a} @media(max-width:700px){main{padding:16px}input[type=search]{min-width:180px}.status{width:100%;margin:0}}
-.account-cards{display:grid;gap:14px}.account-card{background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.account-card.anthropic{border-color:var(--opus5)}.account-card.openai-codex{border-color:var(--terra)}.account-card.qwen-token{border-color:var(--qwen)}.account-row{display:grid;grid-template-columns:110px 1fr;gap:10px;padding:8px 0;border-top:1px solid #1e2838}.usage-bar{position:relative;height:10px;border-radius:99px;background:#1e2838;overflow:hidden}.usage-fill{height:100%}.usage-tick{position:absolute;top:0;width:2px;height:100%;background:#8997ad}.state-badge.open{color:#88e36f}.state-badge.soft{color:#ffb454}.state-badge.closed{color:#ff6b7a}.state-badge.unknown{color:#8997ad}.account-card.stale .usage-bar{opacity:.45}
+.account-cards{display:grid;gap:14px}.account-card{background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.account-card.anthropic{border-color:var(--opus5)}.account-card.openai-codex{border-color:var(--terra)}.account-card.qwen-token{border-color:var(--qwen)}.account-row{display:grid;grid-template-columns:110px 1fr;gap:10px;padding:8px 0;border-top:1px solid #1e2838}.pref-chip.primary select{padding:3px 6px;margin-right:4px}.pref-chip.off{opacity:.6}.panel-heading .settings-status{font-size:12px;font-weight:400;margin-left:10px}.account-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));column-gap:22px;margin-top:8px}.account-grid .account-row{display:flex;flex-direction:column;gap:6px;min-width:0}.account-grid .account-row>span{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.account-grid .account-row.usage{grid-column:1/-1}.account-card .model-switch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0}.account-card .model-switch.disabled>span{color:var(--muted)}.account-card .limits label{display:inline-flex;align-items:center;gap:6px;margin-right:10px}.account-card .limits input{width:64px;padding:5px 7px}.account-card .stepdown{margin-top:6px;font-size:12px;color:var(--muted)}.account-card .usage-line{display:grid;grid-template-columns:60px minmax(0,1fr) 42px 150px;align-items:center;gap:10px;padding:2px 0}.account-card .usage-value{text-align:right}.account-card .usage-reset{font-size:12px;color:var(--muted)}.account-card .usage-age{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--muted)}.account-card .usage-load{margin-left:auto}@media (max-width:760px){.account-grid{grid-template-columns:1fr}.account-card .usage-line{grid-template-columns:50px minmax(0,1fr) 40px}.account-card .usage-reset{grid-column:2/-1}}.usage-bar{position:relative;height:10px;border-radius:99px;background:#1e2838;overflow:hidden}.usage-fill{height:100%}.usage-tick{position:absolute;top:0;width:2px;height:100%;background:#8997ad}.state-badge.open{color:#88e36f}.state-badge.soft{color:#ffb454}.state-badge.closed{color:#ff6b7a}.state-badge.unknown{color:#8997ad}.account-card.stale .usage-bar{opacity:.45}
 .account-groups{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}.account-group{flex:1;min-width:280px;border:1px solid var(--border);border-radius:14px;padding:10px}.account-group.anthropic{border-color:var(--opus5)}.account-group.openai-codex{border-color:var(--terra)}.account-group.qwen-token{border-color:var(--qwen)}.account-group-head{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}.account-group-cards{display:flex;gap:8px;flex-wrap:wrap}.account-group-usage{margin-top:8px}.account-usage{font-size:12px}.account-usage.none{color:var(--muted)}.account-usage.stale .usage-bar{opacity:.45}
 .delegation-chips{display:inline-flex;flex-wrap:wrap;gap:4px;margin-left:8px;vertical-align:middle}.delegation-chip{border:1px solid currentColor;border-radius:99px;padding:1px 7px;font-size:11px}.delegation-chip.openai-codex{color:var(--terra)}.delegation-chip.anthropic{color:var(--opus5)}.delegation-chip.qwen-token{color:var(--qwen)}.delegation-chip.marked{font-weight:700}
 </style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:0 0 44px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:normal;overflow-wrap:anywhere;max-width:100%}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip.anthropic{border-color:var(--opus5)}.pref-chip.openai-codex{border-color:var(--terra)}.pref-chip.qwen-token{border-color:var(--qwen)}.chain-account{color:var(--muted);font-weight:600}.chain-account-mark{color:#ffb454;font-weight:700}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}.workflow-options{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden}.workflow-options button{border:0;border-radius:0;background:#0b111c;color:var(--muted)}.workflow-options button+button{border-left:1px solid var(--border)}.workflow-options button.active{background:#241b3d;color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}.workflow-desc{margin-top:10px;color:var(--text)}.balance-row{margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.balance-row .pref-note{margin-top:0;flex-basis:100%}.balance-row .balance-field{display:inline-flex;align-items:center;gap:6px;margin-left:6px}.balance-field input{width:64px;padding:5px 7px}.pref-kinds.paused .pref-kind{opacity:.5}.pref-paused{padding:8px 10px;border:1px dashed var(--accent);border-radius:8px;color:#c4b5fd;font-size:12px}.fb-file{display:block;margin-top:6px;color:#ffbe8a;font-size:11px;font-weight:700}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
@@ -914,7 +986,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 <div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5.5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card haiku"><div class="n" id="haiku">0</div><div class="k" data-i18n="card.haiku">Claude Haiku 4.5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
 <div class="account-groups" id="account-groups"></div>
 <div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.workflow.heading">Munkafolyamat</h3><div class="workflow-switch" id="workflow-switch"></div></div><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.routing.heading">Útválasztás</h3><h3 data-i18n="settings.default.heading">Alapértelmezett modell (Orchestrator)</h3><div class="default-model-row"><label><span data-i18n="settings.default.desc">Ez a modell látja el az alapértelmezett routingot és az orchestrator szerepkört</span><select id="default-model-select"></select></label><span class="settings-status" id="settings-status"></span></div></div><div class="settings-section"><h3 data-i18n="settings.effort.heading">Gondolkodási erőfeszítés</h3><div class="pref-kinds" id="effort-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.fb.heading">Hermes tartaléklánc</h3><div class="sub"><span data-i18n="settings.fb.sub">Ha az elsődleges fiók nem tud kiszolgálni, ezek jönnek sorban.</span> <b class="fb-file" data-i18n="settings.fb.file">Ez a ~/.hermes/config.yaml fájlt írja, nem a routerét — minden mentés előtt másolat készül róla.</b></div><div class="pref-kinds" id="fb-chains"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
+<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span> <span class="settings-status" id="settings-status"></span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.workflow.heading">Munkafolyamat</h3><div class="workflow-switch" id="workflow-switch"></div></div><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.main.heading">Fő agent</h3><div class="sub"><span data-i18n="settings.main.sub"></span> <b class="fb-file" data-i18n="settings.fb.file"></b></div><div class="pref-kinds" id="main-chain"></div></div><div class="settings-section"><h3 data-i18n="settings.workers.heading">Workerek</h3><div class="sub" data-i18n="settings.workers.sub"></div><div class="pref-kinds" id="worker-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.effort.heading">Gondolkodási erőfeszítés</h3><div class="pref-kinds" id="effort-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
 <section id="command-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="tab.command">Hermes Command Center</span></h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
 </main>
 <script>
@@ -1003,10 +1075,21 @@ const I18N = {
     'agents.requested.ro.title': 'The main agent explicitly requested this sub-agent for read-only/verification only.',
     // Settings panel
     'settings.heading': 'Settings',
-    'settings.sub': 'Model callability and default model',
-    'settings.callable': 'Model callability',
+    'settings.sub': 'Workflow, accounts, main agent, workers and routing',
+    'settings.main.heading': 'Main agent',
+    'settings.main.sub': 'Hermes starts on the first model; when its provider is out, the rest take over in order. The first one also takes the default route and coordinates (conductor).',
+    'settings.main.primary': 'starts here',
+    'settings.main.off': 'switched off',
+    'settings.main.external': 'Hermes currently starts on {model}, set outside the router: the first entry here only sets the default route and the conductor.',
+    'settings.workers.heading': 'Workers',
+    'settings.workers.sub': 'Delegated agents: which model they get when the call names none, and where they go when it is out.',
+    'settings.workers.codex': 'Codex workers',
+    'settings.workers.codex.desc': 'delegate_task, when the goal names no tier',
+    'settings.workers.claude': 'Claude workers',
+    'settings.workers.claude.desc': 'delegate_claude, when the call names no tier',
+    'settings.workers.fallback': 'Worker fallback',
+    'settings.workers.fallback.desc': 'A leaf pinned to a target never inherits the main agent chain',
     'settings.accounts.heading': 'Accounts',
-    'settings.routing.heading': 'Routing',
     'settings.workflow.heading': 'Workflow',
     'settings.workflow.codex': 'Codex only',
     'settings.workflow.claude': 'Codex + Claude',
@@ -1062,7 +1145,7 @@ const I18N = {
     'settings.effort.medium': 'medium',
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
-    'settings.prefs.heading': 'Preferred models per kind of work',
+    'settings.prefs.heading': 'Routing: preferred models per kind of work',
     'settings.prefs.sub': 'In order, best first. The router takes the first callable entry. This re-routes a turn; it does not change the model Hermes starts on.',
     'settings.prefs.add': 'add model...',
     'settings.prefs.empty': 'No preference — the built-in route applies.',
@@ -1080,8 +1163,6 @@ const I18N = {
     'kind.long': 'Long requests',
     'kind.chat': 'Short conversation',
     'kind.default': 'Everything else',
-    'settings.fb.heading': 'Hermes fallback chain',
-    'settings.fb.sub': 'Tried in order when the primary account cannot serve.',
     'settings.fb.file': 'This writes ~/.hermes/config.yaml, not the router config — a copy is kept before every save.',
     'settings.fb.orchestrator': 'Orchestrator',
     'settings.fb.orchestrator.desc': 'The main agent, when its own provider is out',
@@ -1234,10 +1315,21 @@ const I18N = {
     'agents.requested.ro': 'KÉRT READ-ONLY',
     'agents.requested.ro.title': 'A fő agent kifejezetten csak olvasási/ellenőrzési feladatra kérte ezt a mellékszálat.',
     'settings.heading': 'Beállítások',
-    'settings.sub': 'Modellek hívhatósága és alapértelmezett modell',
-    'settings.callable': 'Modellek hívhatósága',
+    'settings.sub': 'Munkafolyamat, fiókok, fő agent, workerek és útválasztás',
+    'settings.main.heading': 'Fő agent',
+    'settings.main.sub': 'A Hermes az első modellen indul; ha annak a szolgáltatója kiesik, a többi sorban átveszi. Az első viszi az alapértelmezett routingot és a koordinálást (conductor) is.',
+    'settings.main.primary': 'itt indul',
+    'settings.main.off': 'kikapcsolva',
+    'settings.main.external': 'A Hermes most a(z) {model} modellen indul, amit a routeren kívül állítottak be: az első elem itt csak az alapértelmezett routingot és a conductort állítja.',
+    'settings.workers.heading': 'Workerek',
+    'settings.workers.sub': 'Delegált agentek: melyik modellt kapják, ha a hívás nem nevez meg egyet, és hová mennek, ha az kiesik.',
+    'settings.workers.codex': 'Codex workerek',
+    'settings.workers.codex.desc': 'delegate_task, ha a cél nem nevez meg tiert',
+    'settings.workers.claude': 'Claude workerek',
+    'settings.workers.claude.desc': 'delegate_claude, ha a hívás nem nevez meg tiert',
+    'settings.workers.fallback': 'Worker tartaléklánc',
+    'settings.workers.fallback.desc': 'A célhoz rögzített levél soha nem örökli a fő agent láncát',
     'settings.accounts.heading': 'Fiókok',
-    'settings.routing.heading': 'Útválasztás',
     'settings.workflow.heading': 'Munkafolyamat',
     'settings.workflow.codex': 'Csak Codex',
     'settings.workflow.claude': 'Codex + Claude',
@@ -1293,7 +1385,7 @@ const I18N = {
     'settings.effort.medium': 'medium',
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
-    'settings.prefs.heading': 'Preferált modellek munkatípusonként',
+    'settings.prefs.heading': 'Útválasztás: preferált modellek munkatípusonként',
     'settings.prefs.sub': 'Sorrendben, a legjobb elöl. A router az első hívható elemet választja. Ez egy fordulót irányít át; a Hermes indulási modelljét nem változtatja meg.',
     'settings.prefs.add': 'modell hozzáadása...',
     'settings.prefs.empty': 'Nincs preferencia — a beépített útvonal érvényes.',
@@ -1311,8 +1403,6 @@ const I18N = {
     'kind.long': 'Hosszú kérések',
     'kind.chat': 'Rövid beszélgetés',
     'kind.default': 'Minden más',
-    'settings.fb.heading': 'Hermes tartaléklánc',
-    'settings.fb.sub': 'Ha az elsődleges fiók nem tud kiszolgálni, ezek jönnek sorban.',
     'settings.fb.file': 'Ez a ~/.hermes/config.yaml fájlt írja, nem a routerét — minden mentés előtt másolat készül róla.',
     'settings.fb.orchestrator': 'Orchestrator',
     'settings.fb.orchestrator.desc': 'A fő ügynök, amikor a saját szolgáltatója kifogyott',
@@ -1437,7 +1527,6 @@ async function loadSettings(){
 
 function renderSettings(){
   if(!currentConfig)return;
-  const defaultModel=currentConfig.default_model||'terra';
   const models=['luna','spark','terra','sol','opus5','sonnet5','haiku','qwen'];
   const modelLabels={luna:t('card.luna'),spark:t('card.spark'),terra:t('card.terra'),sol:t('card.sol'),opus5:t('card.opus5'),sonnet5:t('card.sonnet5'),haiku:t('card.haiku'),qwen:t('card.qwen')};
   const modelDescriptions={luna:t('model.desc.luna'),spark:t('model.desc.spark'),terra:t('model.desc.terra'),sol:t('model.desc.sol'),opus5:t('model.desc.opus5'),sonnet5:t('model.desc.sonnet5'),haiku:t('model.desc.haiku'),qwen:t('model.desc.qwen')};
@@ -1446,19 +1535,8 @@ function renderSettings(){
   renderAccounts();
   renderEffort();
   renderPreferences(modelLabels);
-  renderFallbackChains();
-  const select=$('default-model-select');
-  select.innerHTML='';
-  // Only a routable tier can be the orchestrator; a delegation-only target has
-  // no model entry in the router and raises on the first decision.
-  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m));
-  for(const model of (orchestrators.length?orchestrators:models)){
-    const option=document.createElement('option');
-    option.value=model;
-    option.textContent=modelLabels[model];
-    if(model===defaultModel)option.selected=true;
-    select.appendChild(option);
-  }
+  renderMainChain(modelLabels,models);
+  renderWorkers(modelLabels);
 }
 function ageText(seconds){if(seconds==null)return '';const m=Math.round(seconds/60);return t('account.usage.age').replace('{n}',m<60?`${m} min`:`${Math.round(m/60)} h`)}
 function resetText(iso){if(!iso)return '';const d=new Date(iso);return Number.isNaN(d.getTime())?'':`${t('account.usage.resets')} ${d.toLocaleString(t('status.locale'),{weekday:'short',hour:'2-digit',minute:'2-digit'})}`}
@@ -1477,13 +1555,18 @@ let accountsState={accounts:{},tier_accounts:{}};
 function groupModelCards(){const host=$('account-groups');if(!host)return;const groups=accountGroupsFor(accountsState.tier_accounts,accountsState.accounts);for(const g of groups){let box=host.querySelector(`.account-group[data-account="${g.account}"]`);if(!box){box=document.createElement('div');box.className=`account-group ${g.account}`;box.dataset.account=g.account;box.innerHTML=`<div class="account-group-head">${g.label}</div><div class="account-group-cards"></div><div class="account-group-usage"></div>`;host.append(box)}const cards=box.querySelector('.account-group-cards');for(const tier of g.tiers){const card=document.querySelector(`.cards .card.${tier}`)||host.querySelector(`.card.${tier}`);if(card&&card.parentElement!==cards)cards.append(card)}box.querySelector('.account-group-usage').innerHTML=compactUsage(accountsState.accounts[g.account])}}
 function renderTierFilter(){const select=$('tier'),current=select.value,groups=accountGroupsFor(accountsState.tier_accounts,accountsState.accounts);select.innerHTML=`<option value="">${t('router.tier.all')}</option>`+tierFilterOptions(groups);select.value=current}
 async function loadAccounts(){try{const r=await fetch('/api/config',{cache:'no-store'});if(!r.ok)return;const body=await r.json();accountsState={accounts:body.accounts||{},tier_accounts:body.tier_accounts||{}};groupModelCards();renderTierFilter()}catch(e){}}
+// The card header already names the vendor, so the switches drop the repeated
+// "Claude "/"GPT-" prefix: "GPT-5.6 Luna" -> "Luna 5.6", "Claude Opus 5.5" -> "Opus 5.5".
+function shortModelName(label){const gpt=/^GPT-(\S+)\s+(.+)$/.exec(label);return gpt?`${gpt[2]} ${gpt[1]}`:label.replace(/^Claude\s+/,'')}
 function accountCard(account,info){const callable=currentConfig.callable||{},cooldowns=currentConfig.cooldowns||{},load=(currentConfig.load||{})[account]||0,d=info.delegation||{};
-  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m];return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span>${t('card.'+m)}</span>${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
-  const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button></div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button></div>`):`<div class="usage-none">${t('account.usage.none')}</div>`;
+  const loadText=`<span class="usage-load">${t('account.load')}: ${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</span>`;
+  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m];return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
+  const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${loadText}</div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${loadText}</div>`):`<div class="usage-none">${t('account.usage.none')}</div><div class="usage-age">${loadText}</div>`;
   const off=info.guard?'':'disabled',step=Object.entries(info.step_down||{}).map(([a,b])=>`${a} → ${b}`).join(', ');
-  const limits=`<label>${t('account.limits.soft')} <input type="number" min="1" max="99" data-limit="soft" data-account="${account}" value="${info.soft_percent??''}" ${off}>%</label> <label>${t('account.limits.hard')} <input type="number" min="2" max="100" data-limit="hard" data-account="${account}" value="${info.hard_percent??''}" ${off}>%</label>${step?` <span class="stepdown">${t('account.limits.stepdown')}: ${step}</span>`:''}`;
+  const limits=`<label>${t('account.limits.soft')} <input type="number" min="1" max="99" data-limit="soft" data-account="${account}" value="${info.soft_percent??''}" ${off}>%</label> <label>${t('account.limits.hard')} <input type="number" min="2" max="100" data-limit="hard" data-account="${account}" value="${info.hard_percent??''}" ${off}>%</label>${step?`<div class="stepdown">${t('account.limits.stepdown')}: ${step}</div>`:''}`;
   // The Workflow switch owns delegate_claude being on; the card only reports it.
-  const delegation=d.tool==='delegate_claude'?`${d.enabled?t('account.delegation.via').replace('{tool}','delegate_claude'):t('account.delegation.off')} · ${t('account.delegation.default_tier')} <select data-default-tier="${account}">${(d.tiers||[]).map(x=>`<option value="${x}" ${x===d.default_tier?'selected':''}>${x}</option>`).join('')}</select>`:`${t('account.delegation.via').replace('{tool}',d.tool||'delegate_task')} · ${t('account.delegation.always')}`;
+  // The default tier is chosen under Workers, next to the other worker defaults.
+  const delegation=d.tool==='delegate_claude'?`${d.enabled?t('account.delegation.via').replace('{tool}','delegate_claude'):t('account.delegation.off')}`:`${t('account.delegation.via').replace('{tool}',d.tool||'delegate_task')} · ${t('account.delegation.always')}`;
   // M7: the live/restart badge moved out of the Delegation row and into the
   // card header, next to the state badge -- the other at-a-glance status.
   const liveBadge=d.tool!=='delegate_claude'?'':d.restart_needed?` <span class="restart">${t('account.delegation.restart')}</span>`:(d.enabled&&d.registered?` <span class="live">${t('account.delegation.live')}</span>`:'');
@@ -1491,11 +1574,12 @@ function accountCard(account,info){const callable=currentConfig.callable||{},coo
   // actually served, not a hardcoded ten minutes.
   const stale=info.usage_age_seconds!=null&&info.usage_age_seconds>2*(info.cache_seconds||300);
   return `<div class="account-card ${account}${stale?' stale':''}"><div class="account-head"><b>${info.label}</b> <span class="state-badge ${info.state}">${t('account.state.'+info.state)}</span>${liveBadge}</div>`
+    +`<div class="account-grid">`
     +`<div class="account-row models"><span>${t('account.models')}</span><div>${models}</div></div>`
-    +`<div class="account-row usage"><span>${t('account.usage')}</span><div>${usage}</div></div>`
     +`<div class="account-row limits"><span>${t('account.limits')}</span><div>${limits}</div></div>`
     +`<div class="account-row delegation"><span>${t('account.delegation')}</span><div>${delegation}</div></div>`
-    +`<div class="account-row load"><span>${t('account.load')}</span><div>${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</div></div></div>`}
+    +`<div class="account-row usage"><span>${t('account.usage')}</span><div>${usage}</div></div>`
+    +`</div></div>`}
 function workflowControl(workflow,balance){const current=workflow==='codex'?'codex':'claude_delegation';
   const option=(name,label)=>`<button type="button" data-workflow="${name}"${name===current?' class="active"':''}>${t(label)}</button>`;
   return `<div class="workflow-options">${option('codex','settings.workflow.codex')}${option('claude_delegation','settings.workflow.claude')}</div>`
@@ -1549,21 +1633,29 @@ function setWordWrap(){const enabled=$('word-wrap').checked;$('log-table').class
 
 
 // Settings event listeners
-document.getElementById('fb-chains').addEventListener('click',(e)=>{
-  const btn=e.target.closest('button[data-act]');
-  if(!btn||!currentConfig)return;
-  mutateFallback(btn.dataset.fb,Number(btn.dataset.index),btn.dataset.act);
-});
-
-document.getElementById('fb-chains').addEventListener('change',(e)=>{
-  const select=e.target.closest('select.pref-add');
-  if(!select||!select.value||!currentConfig)return;
-  const [provider,model]=select.value.split('|');
-  const chains=currentConfig.hermes_fallback=currentConfig.hermes_fallback||{};
-  chains[select.dataset.fb]=(chains[select.dataset.fb]||[]).concat([{provider,model}]);
-  renderSettings();
-  saveSettings();
-});
+for(const id of ['main-chain','worker-settings']){
+  document.getElementById(id).addEventListener('click',(e)=>{
+    const btn=e.target.closest('button[data-act]');
+    if(!btn||!currentConfig)return;
+    mutateFallback(btn.dataset.fb,Number(btn.dataset.index),btn.dataset.act);
+  });
+  document.getElementById(id).addEventListener('change',async(e)=>{
+    if(!currentConfig)return;const el=e.target;
+    if(el.matches('select.pref-add')){
+      if(!el.value)return;
+      const [provider,model]=el.value.split('|');
+      const chains=currentConfig.hermes_fallback=currentConfig.hermes_fallback||{};
+      chains[el.dataset.fb]=(chains[el.dataset.fb]||[]).concat([{provider,model}]);
+      renderSettings();await saveSettings();return;
+    }
+    if(el.id==='default-model-select')currentConfig.default_model=el.value;
+    else if(el.matches('[data-worker-model]'))currentConfig.worker_model=Object.assign({},currentConfig.worker_model,{tier:el.value});
+    else if(el.dataset.defaultTier)currentConfig.accounts[el.dataset.defaultTier].delegation.default_tier=el.value;
+    else return;
+    // Reload: a new primary moves Hermes's parent and leaves its own fallbacks.
+    await saveSettings();await loadSettings();
+  });
+}
 
 document.getElementById('pref-kinds').addEventListener('click',(e)=>{
   const btn=e.target.closest('button[data-act]');
@@ -1583,7 +1675,6 @@ document.getElementById('pref-kinds').addEventListener('change',(e)=>{
 
 document.getElementById('account-cards').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
   if(el.dataset.model){currentConfig.callable[el.dataset.model]=el.checked}
-  else if(el.dataset.defaultTier){currentConfig.accounts[el.dataset.defaultTier].delegation.default_tier=el.value}
   else if(el.dataset.limit){const info=currentConfig.accounts[el.dataset.account];info[el.dataset.limit==='soft'?'soft_percent':'hard_percent']=Number(el.value)}
   else return;await saveSettings();await loadSettings()});
 document.getElementById('workflow-switch').addEventListener('click',async(e)=>{const b=e.target.closest('[data-workflow]');
@@ -1598,11 +1689,6 @@ document.getElementById('effort-settings').addEventListener('change',async(e)=>{
   currentConfig.effort=Object.assign({},currentConfig.effort,{[el.dataset.effort]:el.value});
   await saveSettings();await loadSettings()});
 document.getElementById('account-cards').addEventListener('click',e=>{const b=e.target.closest('[data-refresh-usage]');if(b)refreshUsage(b.dataset.refreshUsage)});
-document.getElementById('default-model-select').addEventListener('change',async(e)=>{
-  if(!currentConfig)return;
-  currentConfig.default_model=e.target.value;
-  await saveSettings();
-});
 document.getElementById('language-select').addEventListener('change',async(e)=>{
   currentLang=e.target.value;
   localStorage.setItem('model-router-lang',currentLang);
@@ -1671,43 +1757,59 @@ function renderPreferences(modelLabels){
   box.appendChild(note);
 }
 
-function renderFallbackChains(){
-  const box=$('fb-chains');
-  if(!box)return;
-  const chains=currentConfig.hermes_fallback||{orchestrator:[],children:[]};
-  const options=currentConfig.fallback_options||[];
-  const label=o=>`${o.key} · ${o.provider}/${o.model}`;
-  const find=(p,m)=>options.find(o=>o.provider===p&&o.model===m);
-  box.innerHTML='';
-  for(const which of ['orchestrator','children']){
-    const chain=chains[which]||[];
-    const row=document.createElement('div');
-    row.className='pref-kind';
-    const chips=chain.map((e,i)=>{
-      const known=find(e.provider,e.model);
-      return `<span class="pref-chip external">`
-        +`<span class="rank">${i+1}.</span>${known?label(known):e.provider+'/'+e.model}`
-        +`<button data-fb="${which}" data-index="${i}" data-act="up" title="${t('settings.prefs.up')}">&#9650;</button>`
-        +`<button data-fb="${which}" data-index="${i}" data-act="down" title="${t('settings.prefs.down')}">&#9660;</button>`
-        +`<button data-fb="${which}" data-index="${i}" data-act="del" title="${t('settings.prefs.remove')}">&times;</button>`
-        +`</span>`;
-    }).join('');
-    const free=options.filter(o=>!chain.some(e=>e.provider===o.provider&&e.model===o.model));
-    const picker=free.length
-      ?`<select class="pref-add" data-fb="${which}"><option value="">${t('settings.prefs.add')}</option>`
-        +free.map(o=>`<option value="${o.provider}|${o.model}">${label(o)}</option>`).join('')+`</select>`
-      :'';
-    row.innerHTML=`<div class="pref-kind-head"><div>`
-      +`<div class="pref-kind-name">${t('settings.fb.'+which)}</div>`
-      +`<div class="pref-kind-desc">${t('settings.fb.'+which+'.desc')}</div></div></div>`
-      +`<div class="pref-chain">${chips||`<span class="pref-empty">${t('settings.fb.empty')}</span>`}${picker}</div>`;
-    box.appendChild(row);
-  }
-  const note=document.createElement('div');
-  note.className='pref-note';
-  note.textContent=t('settings.fb.inherit');
-  box.appendChild(note);
-}
+function fallbackOptionLabel(o,modelLabels){return o.key&&modelLabels[o.key]?modelLabels[o.key]:`${o.key||o.provider} · ${o.model}`}
+// One fallback chip per entry; `rankFrom` lets the main chain start at 2, after its primary.
+function fallbackChips(which,chain,modelLabels,rankFrom){
+  const options=currentConfig.fallback_options||[],callable=currentConfig.callable||{};
+  return chain.map((e,i)=>{
+    const known=options.find(o=>o.provider===e.provider&&o.model===e.model);
+    const off=known&&known.key&&callable[known.key]===false;
+    return `<span class="pref-chip external${off?' off':''}">`
+      +`<span class="rank">${i+rankFrom}.</span>${known?fallbackOptionLabel(known,modelLabels):e.provider+'/'+e.model}`
+      +(off?`<span class="chain-account-mark">${t('settings.main.off')}</span>`:'')
+      +`<button data-fb="${which}" data-index="${i}" data-act="up" title="${t('settings.prefs.up')}">&#9650;</button>`
+      +`<button data-fb="${which}" data-index="${i}" data-act="down" title="${t('settings.prefs.down')}">&#9660;</button>`
+      +`<button data-fb="${which}" data-index="${i}" data-act="del" title="${t('settings.prefs.remove')}">&times;</button>`
+      +`</span>`}).join('')}
+function fallbackPicker(which,chain,modelLabels,exclude){
+  const free=(currentConfig.fallback_options||[]).filter(o=>!chain.some(e=>e.provider===o.provider&&e.model===o.model)&&!(exclude&&exclude.provider===o.provider&&exclude.model===o.model));
+  return free.length?`<select class="pref-add" data-fb="${which}"><option value="">${t('settings.prefs.add')}</option>`
+    +free.map(o=>`<option value="${o.provider}|${o.model}">${fallbackOptionLabel(o,modelLabels)}</option>`).join('')+`</select>`:''}
+function chainRow(name,desc,body){return `<div class="pref-kind">${name?`<div class="pref-kind-head"><div><div class="pref-kind-name">${name}</div>${desc?`<div class="pref-kind-desc">${desc}</div>`:''}</div></div>`:''}<div class="pref-chain">${body}</div></div>`}
+// The pair the main agent starts on: Hermes's own parent when this router serves
+// it, else the router tier picked as first entry.
+function mainPrimary(){const parent=currentConfig.hermes_parent||{};if(parent.model&&!parent.router_model)return parent;const o=(currentConfig.fallback_options||[]).find(x=>x.key===currentConfig.default_model);return o?{provider:o.provider,model:o.model}:parent}
+// Main agent: ONE chain. Entry 1 is default_model (the model Hermes starts on,
+// the default route and the conductor); the rest is Hermes's fallback_providers.
+// It used to be two settings, and the primary kept showing up as its own fallback.
+function renderMainChain(modelLabels,models){
+  const box=$('main-chain');if(!box)return;
+  const chains=currentConfig.hermes_fallback=currentConfig.hermes_fallback||{};
+  const primary=mainPrimary(),parent=currentConfig.hermes_parent||{};
+  chains.orchestrator=(chains.orchestrator||[]).filter(e=>!(e.provider===primary.provider&&e.model===primary.model));
+  const chain=chains.orchestrator,defaultModel=currentConfig.default_model||'terra';
+  // Only a routable tier can start Hermes; a delegation-only target has no model
+  // entry in the router and raises on the first decision.
+  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m));
+  const first=`<span class="pref-chip primary"><span class="rank">1.</span><select id="default-model-select">`
+    +(orchestrators.length?orchestrators:models).map(m=>`<option value="${m}"${m===defaultModel?' selected':''}>${modelLabels[m]}</option>`).join('')
+    +`</select><span class="chain-account">${t('settings.main.primary')}</span></span>`;
+  box.innerHTML=chainRow('','',first+fallbackChips('orchestrator',chain,modelLabels,2)+fallbackPicker('orchestrator',chain,modelLabels,primary))
+    +(parent.model&&!parent.router_model?`<div class="pref-note">${t('settings.main.external').replace('{model}',parent.model)}</div>`:'')}
+function renderWorkers(modelLabels){
+  const box=$('worker-settings');if(!box)return;
+  const worker=currentConfig.worker_model||{},options=worker.options||[];
+  const codex=`<select data-worker-model>${worker.tier?'':`<option value="" selected>${worker.model||'—'}</option>`}`
+    +options.map(m=>`<option value="${m}"${m===worker.tier?' selected':''}>${modelLabels[m]||m}</option>`).join('')+`</select>`;
+  const d=((currentConfig.accounts||{}).anthropic||{}).delegation||{};
+  const claude=d.tool!=='delegate_claude'?`<span class="pref-empty">—</span>`:d.enabled
+    ?`<select data-default-tier="anthropic">${(d.tiers||[]).map(x=>`<option value="${x}" ${x===d.default_tier?'selected':''}>${x}</option>`).join('')}</select>`
+    :`<span class="pref-empty">${t('account.delegation.off')}</span>`;
+  const chain=(currentConfig.hermes_fallback||{}).children||[];
+  box.innerHTML=chainRow(t('settings.workers.codex'),t('settings.workers.codex.desc'),codex)
+    +chainRow(t('settings.workers.claude'),t('settings.workers.claude.desc'),claude)
+    +chainRow(t('settings.workers.fallback'),t('settings.workers.fallback.desc'),(fallbackChips('children',chain,modelLabels,1)||`<span class="pref-empty">${t('settings.fb.empty')}</span>`)+fallbackPicker('children',chain,modelLabels))
+    +`<div class="pref-note">${t('settings.fb.inherit')}</div>`}
 
 function mutateFallback(which,index,act){
   const chains=currentConfig.hermes_fallback=currentConfig.hermes_fallback||{};
@@ -1739,7 +1841,7 @@ function mutatePreference(kind,index,act){
 
 function saveSettings(){
   if(!currentConfig)return Promise.resolve();
-  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
   settingsPending++;settingsLoadGeneration++;
   settingsSaveQueue=settingsSaveQueue.then(async()=>{
     const statusEl=$('settings-status');
@@ -1966,12 +2068,16 @@ def _save_config_payload(data):
                 error = save(data[key], config)
                 if error:
                     return 400, {"success": False, "error": error}
+        if "default_model" in data:
+            error = _save_default_model(str(data["default_model"]), config, hermes=hermes, persist=False)
+            if error:
+                return 400, {"success": False, "error": error}
         if "hermes_fallback" in data:
             error = _save_hermes_fallback(data["hermes_fallback"], config, hermes=hermes, persist=False)
             if error:
                 return 400, {"success": False, "error": error}
-        if "default_model" in data:
-            error = _save_default_model(str(data["default_model"]), config, hermes=hermes, persist=False)
+        if "worker_model" in data:
+            error = _save_worker_model(data["worker_model"], config, hermes=hermes, persist=False)
             if error:
                 return 400, {"success": False, "error": error}
         delta = _overlay(shipped, config)
@@ -2123,6 +2229,9 @@ class Handler(BaseHTTPRequestHandler):
                             "children": _hermes_chain("delegation", "fallback_providers"),
                         },
                         "fallback_options": _fallback_chain_options(config),
+                        "hermes_parent": dict(_hermes_parent(_read_hermes_config()),
+                                              router_model=_parent_is_router_model(config)),
+                        "worker_model": _worker_model_status(config),
                         "accounts": _accounts_status(config),
                         "tier_accounts": _tier_accounts(config),
                         # ``routable`` (which names the router can serve itself, as opposed to
