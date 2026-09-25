@@ -215,7 +215,7 @@ If the host's private seam has moved in a way this bridge does not recognise,
 unavailable: `<reason>`" rather than silently running at the wrong effort;
 Haiku calls, which never touch the bridge, are unaffected. The dashboard's
 **Claude reasoning effort** control (next to Codex's own **Reasoning effort**,
-see [Settings](#settings-tab)) edits only `sonnet` and `opus`, shows Haiku as
+see [Key Settings](#key-settings)) edits only `sonnet` and `opus`, shows Haiku as
 unsupported, and disables its selects with the same reason when the host seam
 is incompatible — the same side-effect-free probe the bridge itself uses, so
 the dashboard's answer never diverges from the bridge's own.
@@ -451,7 +451,7 @@ The Settings tab edits only the four plain routed-tier keys: `luna`, `spark`,
 control because the router strips reasoning; and Claude-only `haiku` / `sonnet5`
 are not routed here — this `effort:` map cannot reach a delegated Claude child at
 all, since the router never runs on that call. Sonnet and Opus have their own
-setting instead: see [Claude reasoning effort](#claude-targets) below. The
+setting instead: see [Claude reasoning effort](#claude-reasoning-effort) below. The
 situational `sol_long` and `explicit_<tier>` / `explicit_<tier>_xhigh` keys
 remain file-only in `router_config.yaml` or its local overlay.
 
