@@ -334,11 +334,19 @@ class HandlerTests(unittest.TestCase):
 
     def test_a_non_haiku_call_is_refused_when_the_bridge_is_unavailable(self):
         self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
-        with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(False, "host seam moved")):
-            payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"})
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(False, "host seam moved")):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertIn("Claude reasoning effort is unavailable", payload["error"])
         self.assertIn("host seam moved", payload["error"])
         self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertIn("Claude reasoning effort is unavailable", entry["message"])
+        self.assertIn("host seam moved", entry["message"])
 
 
 class ClaudeReasoningConfigTests(unittest.TestCase):
@@ -377,6 +385,36 @@ class ReasoningBridgeTests(unittest.TestCase):
         ok2, reason2 = claude_delegation.install_reasoning_bridge()
         self.assertTrue(ok2, reason2)
         self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+    def test_install_survives_a_second_module_copy_wrapping_the_seam_first(self):
+        """A second import of this module (plugin reload, or importing it both as
+        ``claude_delegation`` and ``model_router.claude_delegation``) must not
+        permanently disable the bridge for either copy.
+
+        Simulated here by hand-installing a foreign wrapper that carries
+        ``__model_router_original__`` -- exactly what this module's own wrapper
+        looks like from a second copy's point of view -- directly onto the real
+        host seam, bypassing this module's own bookkeeping.
+        """
+        import tools.delegate_tool as delegate_tool
+
+        real_original = delegate_tool._resolve_child_runtime
+
+        def foreign_wrapper(*args, **kwargs):
+            return real_original(*args, **kwargs)
+
+        foreign_wrapper.__model_router_original__ = real_original
+        delegate_tool._resolve_child_runtime = foreign_wrapper
+        try:
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            self.assertEqual(reason, "")
+            installed = delegate_tool._resolve_child_runtime
+            self.assertIs(installed.__model_router_original__, real_original)
+        finally:
+            claude_delegation._reset_reasoning_bridge_for_tests()
+            delegate_tool._resolve_child_runtime = real_original
+        self.assertIs(delegate_tool._resolve_child_runtime, real_original)
 
 
 class ReasoningBridgeCompatibilityTests(unittest.TestCase):

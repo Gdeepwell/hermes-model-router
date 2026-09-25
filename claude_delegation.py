@@ -123,7 +123,10 @@ _REASONING_BRIDGE_ORIGINAL: Optional[Callable[..., Any]] = None
 def reasoning_scope(parent: Any, tier: str, model: str, reasoning_config: Dict[str, Any]) -> Iterator[None]:
     """Claim the next matching Anthropic child's reasoning_config for this call.
 
-    Task 2 sets this around the delegate_task call inside ``_dispatch``.
+    Held for the duration of the ``delegate_task`` call inside ``_dispatch``:
+    the wrapped ``_resolve_child_runtime`` only applies ``reasoning_config``
+    when it sees a call whose ``parent_agent``/``model``/provider match this
+    scope, so the claim cannot leak onto some other concurrent delegation.
     """
     token = _REASONING_SCOPE.set(_ReasoningScope(parent, tier, model, dict(reasoning_config)))
     try:
@@ -160,6 +163,7 @@ def _wrap_resolve_child_runtime(original: Callable[..., Any]) -> Callable[..., A
             return dict(result, reasoning_config=dict(scope.reasoning_config))
         return result
 
+    wrapper.__model_router_original__ = original
     return wrapper
 
 
@@ -167,8 +171,8 @@ def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optiona
     """Check whether the host seam this bridge wraps still looks the way it must.
 
     Side-effect-free: only imports and inspects ``tools.delegate_tool`` /
-    ``tools.delegate_tool_config`` (both cheap and side-effect-free on this
-    host -- see the module docstring above), never assigns anything. Returns
+    ``tools.delegate_tool_config`` (both cheap and side-effect-free imports on
+    this host), never assigns anything. Returns
     ``(ok, reason, delegate_tool_module_or_None, current_resolver_or_None)``;
     the last two let a caller that wants to actually install reuse the same
     lookup instead of re-importing.
@@ -200,15 +204,22 @@ def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optiona
     if already_wrapped:
         return True, "", delegate_tool, current
 
+    # A foreign wrapper -- e.g. installed by an earlier copy of this same module
+    # after a reload/re-import -- carries its own claim on the seam via
+    # ``__model_router_original__``. Unwrap it before comparing: the underlying
+    # original, not the foreign wrapper, is the real host function, so install
+    # can re-wrap that original with THIS module's wrapper.
+    current_original = getattr(current, "__model_router_original__", current)
+
     original_from_config = getattr(delegate_tool_config, "_resolve_child_runtime", None)
-    if current is not original_from_config:
+    if current_original is not original_from_config:
         return False, (
             "tools.delegate_tool._resolve_child_runtime is not the same callable as "
             "tools.delegate_tool_config._resolve_child_runtime; the host seam has moved"
         ), delegate_tool, current
 
     try:
-        signature = inspect.signature(current)
+        signature = inspect.signature(current_original)
     except (TypeError, ValueError) as exc:
         return False, f"could not inspect _resolve_child_runtime's signature: {exc}", delegate_tool, current
 
@@ -241,6 +252,13 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
     Safe to call repeatedly (e.g. once per registration): a prior successful
     install is a no-op, and a prior failure is retried since the host may have
     changed (mainly relevant to tests that swap ``sys.modules`` entries).
+
+    Also safe across a second import of this module (plugin reload, or this
+    module imported under two different names): the wrapper installed on the
+    seam carries the real original on ``__model_router_original__``, so a
+    fresh copy of this module recognizes it as "the host seam, already wrapped
+    by someone" and re-wraps the SAME underlying original with its own
+    wrapper (reading its own ``_REASONING_SCOPE``) instead of refusing.
     """
     global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL
     with _REASONING_BRIDGE_LOCK:
@@ -256,15 +274,16 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
             _REASONING_BRIDGE_REASON = ""
             return True, ""
 
+        original = getattr(current, "__model_router_original__", current)
         try:
-            wrapper = _wrap_resolve_child_runtime(current)
+            wrapper = _wrap_resolve_child_runtime(original)
             setattr(delegate_tool, "_resolve_child_runtime", wrapper)
         except Exception as exc:
             _REASONING_BRIDGE_INSTALLED = False
             _REASONING_BRIDGE_REASON = f"installing the reasoning bridge failed: {type(exc).__name__}: {exc}"
             return False, _REASONING_BRIDGE_REASON
 
-        _REASONING_BRIDGE_ORIGINAL = current
+        _REASONING_BRIDGE_ORIGINAL = original
         globals()["_reasoning_bridge_wrapper_marker"] = wrapper
         _REASONING_BRIDGE_INSTALLED = True
         _REASONING_BRIDGE_REASON = ""
@@ -712,13 +731,17 @@ def _dispatch(args: Dict[str, Any]) -> str:
     else:
         bridge_ok, bridge_reason = install_reasoning_bridge()
         if not bridge_ok:
-            return _error(f"Claude reasoning effort is unavailable: {bridge_reason}")
+            message = f"Claude reasoning effort is unavailable: {bridge_reason}"
+            _audit(cfg, parent, requested, tier, outcome, "refused", message)
+            return _error(message)
         from hermes_constants import parse_reasoning_effort
 
         level = reasoning_effort_config(cfg)[tier]
         reasoning_config = parse_reasoning_effort(level)
         if reasoning_config is None:
-            return _error(f"Claude reasoning effort for {tier} is invalid")
+            message = f"Claude reasoning effort for {tier} is invalid"
+            _audit(cfg, parent, requested, tier, outcome, "refused", message)
+            return _error(message)
         with reasoning_scope(parent, tier, model, reasoning_config):
             raw = delegate_task(
                 goal=args.get("goal"),
