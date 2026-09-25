@@ -1734,7 +1734,8 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         grok_switch = grok[grok.index('class="model-switch disabled"'):grok.index('</div>', grok.index('class="model-switch disabled"'))]
         self.assertIn('data-effort="grok"', grok_switch)
         self.assertIn('<option value="xhigh" selected>', grok_switch)
-        self.assertNotIn(' disabled', grok_switch[grok_switch.index('data-effort="grok"'):])
+        # A switched-off model's effort cannot be changed until it is switched back on.
+        self.assertRegex(grok_switch, r'<select data-effort="grok" disabled>')
         self.assertNotIn('model-list no-effort', grok)
         self.assertIn('data-claude-effort="sonnet"', claude)
         self.assertIn('data-claude-effort="opus"', claude)
@@ -1773,6 +1774,39 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn("3 failures within 60s", switch_for(codex, "luna"))
         for model, effort in (("sonnet5", "sonnet"), ("opus5", "opus")):
             self.assertIn(f'data-claude-effort="{effort}"', switch_for(claude, model))
+
+    def test_a_switched_off_models_effort_dropdown_is_disabled(self):
+        import re
+
+        def select_for(card, model):
+            switch = re.search(r'<div class="model-switch[^"]*">(?:(?!</div>).)*data-model="'
+                               + model + r'"(?:(?!</div>).)*</div>', card, re.DOTALL)
+            self.assertIsNotNone(switch, f"{model} has no model switch")
+            found = re.search(r'<select[^>]*>', switch.group(0))
+            self.assertIsNotNone(found, f"{model} has no effort select")
+            return found.group(0)
+
+        codex = self._card("openai-codex", self.CODEX_INFO, {
+            "callable": {"terra": False}, "effort": {"luna": "low", "terra": "high"},
+        })
+        self.assertRegex(select_for(codex, "terra"), r'^<select data-effort="terra" disabled>$')
+        self.assertEqual(select_for(codex, "luna"), '<select data-effort="luna">')
+
+        claude = self._card("anthropic", self.CLAUDE_INFO, {
+            "callable": {"opus5": False},
+            "claude_reasoning_effort": {"available": True, "levels": {"sonnet": "low", "opus": "high"}},
+        })
+        self.assertRegex(select_for(claude, "opus5"), r'^<select data-claude-effort="opus" disabled>$')
+        self.assertEqual(select_for(claude, "sonnet5"), '<select data-claude-effort="sonnet">')
+
+        # Switched off and unavailable at once: one disabled attribute, the reason still shown.
+        both = self._card("anthropic", self.CLAUDE_INFO, {
+            "callable": {"sonnet5": False},
+            "claude_reasoning_effort": {"available": False, "reason": "No module named 'x'", "levels": {}},
+        })
+        sonnet = select_for(both, "sonnet5")
+        self.assertEqual(sonnet.count(" disabled"), 1)
+        self.assertIn("title=", sonnet)
 
     def test_haiku_has_a_disabled_unsaved_placeholder(self):
         import re
