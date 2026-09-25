@@ -2187,7 +2187,9 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
     def test_a_workflow_save_round_trips_and_keeps_the_files_comments(self):
         with tempfile.TemporaryDirectory() as directory:
             text, results = self._serve(directory, [("POST", {"workflow": "codex"}), ("GET", None)])
-        self.assertEqual(results[0], (200, {"success": True}))
+        self.assertEqual(results[0][0], 200)
+        self.assertTrue(results[0][1]["success"])
+        self.assertIn("revision", results[0][1])
         self.assertEqual(results[1][1]["workflow"], "codex")
         self.assertIn("# Router settings -- this comment must survive a dashboard save.", text)
         self.assertIn("# Claude-tuned chain", text)
@@ -2610,7 +2612,9 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
             local = config_path.with_name("router_config.local.yaml")
             written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
             self.assertEqual(config_path.read_bytes(), shipped_before)
-        self.assertEqual((status, body), (200, {"success": True}))
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+        self.assertIn("revision", body)
         self.assertEqual(written, {"effort": {"terra": "high"}})
 
     def test_a_non_object_effort_payload_is_refused_without_writing(self):
@@ -2726,4 +2730,34 @@ assert.equal(cards(),1);assert.equal(d.getElementById('total').textContent,'1');
 assert.deepEqual(errors,[]);dom.window.close();
 """
         result = subprocess.run(["node", "-e", script], input=HTML, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class SettingsSaveQueueTests(DashboardProbeMixin, unittest.TestCase):
+    def test_rapid_edits_send_serial_snapshots_using_latest_revision(self):
+        script = r"""
+const assert=require('node:assert/strict');
+let currentConfig={revision:'r0',callable:{terra:true},accounts:{}};
+let settingsSaveQueue=Promise.resolve(),settingsPending=0,settingsSaveFailed=false,settingsLoadGeneration=0;
+const $=()=>({style:{}}),t=k=>k,requests=[],releases=[];
+const fetch=(_url,options)=>{requests.push(JSON.parse(options.body));return new Promise(resolve=>releases.push(resolve))};
+""" + self.javascript_function('saveSettings') + r"""
+(async()=>{
+ const first=saveSettings();
+ currentConfig.callable.terra=false;
+ const second=saveSettings();
+ await Promise.resolve();
+ assert.equal(requests.length,1);
+ assert.equal(requests[0].callable.terra,true);
+ releases[0]({ok:true,json:async()=>({success:true,revision:'r1'})});
+ await first;await Promise.resolve();
+ assert.equal(requests.length,2);
+ assert.equal(requests[1].revision,'r1');
+ assert.equal(requests[1].callable.terra,false);
+ releases[1]({ok:true,json:async()=>({success:true,revision:'r2'})});
+ await second;
+ assert.equal(currentConfig.revision,'r2');assert.equal(settingsPending,0);
+})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

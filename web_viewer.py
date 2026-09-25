@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
+import tempfile
+import threading
 import json
 import os
 import time
@@ -33,6 +37,7 @@ CONFIG_PATH = Path(__file__).resolve().parent / "router_config.yaml"
 
 
 HERMES_CONFIG_PATH = hermes_path("~/.hermes/config.yaml")
+_CONFIG_LOCK = threading.RLock()
 
 
 def _read_hermes_config() -> dict:
@@ -88,10 +93,32 @@ def _write_hermes_config(config: dict, stamp=None) -> None:
     if HERMES_CONFIG_PATH.exists():
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         shutil.copy2(HERMES_CONFIG_PATH, HERMES_CONFIG_PATH.with_name(f"config.yaml.bak-router-{stamp}"))
-    tmp = HERMES_CONFIG_PATH.with_suffix(".yaml.router-tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        yaml.dump(config, handle, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    tmp.replace(HERMES_CONFIG_PATH)
+    _atomic_write(HERMES_CONFIG_PATH, yaml.dump(
+        config, default_flow_style=False, allow_unicode=True, sort_keys=False).encode("utf-8"))
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    """Readers see either the previous complete document or the new one."""
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            if path.exists():
+                os.fchmod(handle.fileno(), path.stat().st_mode & 0o777)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _config_revision() -> str:
+    digest = hashlib.sha256()
+    for path in (CONFIG_PATH, _local_config_path(), HERMES_CONFIG_PATH):
+        content = path.read_bytes() if path.exists() else None
+        digest.update(repr((str(path), content)).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _hermes_chain(*path: str) -> list:
@@ -107,7 +134,7 @@ def _hermes_chain(*path: str) -> list:
     ] if isinstance(node, list) else []
 
 
-def _save_hermes_fallback(payload, router_cfg: dict):
+def _save_hermes_fallback(payload, router_cfg: dict, *, hermes=None, persist=True):
     """Persist the orchestrator and delegated-child chains; an error string, or None.
 
     Absent keys are left alone, so saving one chain never clears the other.
@@ -115,7 +142,7 @@ def _save_hermes_fallback(payload, router_cfg: dict):
     if not isinstance(payload, dict):
         return "hermes_fallback must be an object"
     options = _fallback_chain_options(router_cfg)
-    stamp, config = _read_hermes_snapshot()
+    stamp, config = _read_hermes_snapshot() if hermes is None else (None, hermes)
     if not config:
         return "The Hermes config could not be read; refusing to overwrite it"
     # Whatever is already saved is always accepted, even when it names a route the
@@ -147,13 +174,14 @@ def _save_hermes_fallback(payload, router_cfg: dict):
             config["delegation"] = delegation
         delegation["fallback_providers"] = chains["children"]
     try:
-        _write_hermes_config(config, stamp)
+        if persist:
+            _write_hermes_config(config, stamp)
     except Exception as exc:
         return f"Could not write the Hermes config: {exc}"
     return None
 
 
-def _sync_hermes_default_model(tier: str, config: dict, hermes: dict | None = None, stamp=None) -> str | None:
+def _sync_hermes_default_model(tier: str, config: dict, hermes: dict | None = None, stamp=None, *, persist=True) -> str | None:
     """Point Hermes's own ``model`` block at this router tier.
 
     A missing or unreadable Hermes config is skipped, not an error: there is no
@@ -206,7 +234,8 @@ def _sync_hermes_default_model(tier: str, config: dict, hermes: dict | None = No
         delegation["targets"] = targets
     targets[tier] = {"provider": provider, "model": model_name}
     try:
-        _write_hermes_config(hermes, stamp)
+        if persist:
+            _write_hermes_config(hermes, stamp)
     except HermesConfigChanged as exc:
         return str(exc)
     except Exception as exc:
@@ -214,7 +243,7 @@ def _sync_hermes_default_model(tier: str, config: dict, hermes: dict | None = No
     return None
 
 
-def _save_default_model(requested: str, config: dict) -> str | None:
+def _save_default_model(requested: str, config: dict, *, hermes=None, persist=True) -> str | None:
     """Store the default model, syncing Hermes only when it actually changed.
 
     ``default_model`` is the one router setting that also decides the model
@@ -249,9 +278,9 @@ def _save_default_model(requested: str, config: dict) -> str | None:
     # replaced the Opus parent at the next Hermes start. One read serves both the
     # check and the write, so the file cannot change between them unnoticed.
     if candidate != previous:
-        stamp, hermes = _read_hermes_snapshot()
+        stamp, hermes = _read_hermes_snapshot() if hermes is None else (None, hermes)
         if _parent_is_router_model(config, hermes):
-            error = _sync_hermes_default_model(candidate, config, hermes, stamp)
+            error = _sync_hermes_default_model(candidate, config, hermes, stamp, persist=persist)
             if error:
                 return error
     config["default_model"] = candidate
@@ -1073,6 +1102,7 @@ const I18N = {
     'model.desc.haiku': 'Claude account — quick lookups',
     'model.desc.qwen': 'Alternative model',
     // Settings messages
+    'settings.reload': 'Reload settings before saving again.',
     'settings.saving': 'Saving...',
     'settings.saved': 'Saved ✓',
     'settings.error.unknown': 'Unknown error',
@@ -1301,6 +1331,7 @@ const I18N = {
     'model.desc.sonnet5': 'Claude account — alapértelmezett',
     'model.desc.haiku': 'Claude account — gyors keresések',
     'model.desc.qwen': 'Alternatív modell',
+    'settings.reload': 'Mentés előtt töltsd újra a beállításokat.',
     'settings.saving': 'Mentés...',
     'settings.saved': 'Mentve ✓',
     'settings.error.unknown': 'Ismeretlen hiba',
@@ -1386,11 +1417,16 @@ function setTab(name,remember=true){if(name==='agents')name='router';selectedTab
 
 // Settings management
 let currentConfig=null;
+let settingsSaveQueue=Promise.resolve(),settingsPending=0,settingsSaveFailed=false,settingsLoadGeneration=0;
 async function loadSettings(){
+  if(settingsPending)return;
+  const generation=++settingsLoadGeneration;
   try{
     const response=await fetch('/api/config',{cache:'no-store'});
     if(!response.ok)throw new Error(`HTTP ${response.status}`);
-    currentConfig=await response.json();
+    const loaded=await response.json();
+    if(generation!==settingsLoadGeneration||settingsPending)return;
+    currentConfig=loaded;settingsSaveFailed=false;
     renderSettings();
   }catch(error){
     console.error(t('settings.error.load'),error);
@@ -1705,27 +1741,31 @@ function mutatePreference(kind,index,act){
   saveSettings();
 }
 
-async function saveSettings(){
-  if(!currentConfig)return;
-  const statusEl=$('settings-status');
-  statusEl.textContent=t('settings.saving');
-  statusEl.style.color='#c4b5fd';
-  try{
-    const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined})});
-    if(!response.ok)throw new Error(`HTTP ${response.status}`);
-    const result=await response.json();
-    if(result.success){
-      statusEl.textContent=t('settings.saved');
-      statusEl.style.color='#88e36f';
-    }else{
-      throw new Error(result.error||t('settings.error.unknown'));
-    }
-  }catch(error){
-    statusEl.textContent=t('settings.error.prefix')+error.message;
-    statusEl.style.color='#ff6b7a';
-    console.error(t('settings.error.save'),error);
-  }
+function saveSettings(){
+  if(!currentConfig)return Promise.resolve();
+  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  settingsPending++;settingsLoadGeneration++;
+  settingsSaveQueue=settingsSaveQueue.then(async()=>{
+    const statusEl=$('settings-status');
+    try{
+      if(settingsSaveFailed)throw new Error(t('settings.reload'));
+      statusEl.textContent=t('settings.saving');statusEl.style.color='#c4b5fd';
+      payload.revision=currentConfig.revision;
+      const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const result=await response.json();
+      if(!response.ok||!result.success)throw new Error(result.error||`HTTP ${response.status}`);
+      currentConfig.revision=result.revision;
+      statusEl.textContent=t('settings.saved');statusEl.style.color='#88e36f';
+    }catch(error){
+      settingsSaveFailed=true;
+      statusEl.textContent=t('settings.error.prefix')+error.message+' '+t('settings.reload');
+      statusEl.style.color='#ff6b7a';
+      console.error(t('settings.error.save'),error);
+    }finally{settingsPending--;}
+  });
+  return settingsSaveQueue;
 }
+
 function formatDuration(seconds){seconds=Math.max(0,Number(seconds)||0);if(seconds<60)return `${seconds} mp`;const minutes=Math.floor(seconds/60),rest=seconds%60;return minutes<60?`${minutes} ${t('duration.m')} ${rest} ${t('duration.s')}`:`${Math.floor(minutes/60)} ${t('duration.h')} ${minutes%60} ${t('duration.m')}`}
 function agentRunParts(timestamp){if(!timestamp)return ['—','—'];return dateAndTime(new Date(Number(timestamp)*1000).toISOString())}
 function renderAgents(activity){const s=activity.summary||{},tree=$('agent-tree');$('agent-summary').textContent=`${s.running||0} ${t('agents.sum.running')} · ${s.completed||0} ${t('agents.sum.completed')} · ${s.failed||0} ${t('agents.sum.failed')}`;tree.replaceChildren();const allParents=activity.parents||[],parents=allParents.slice(0,12);$('agent-summary').textContent=`${s.running||0} ${t('agents.sum.running')} · ${s.completed||0} ${t('agents.sum.completed')} · ${s.failed||0} ${t('agents.sum.failed')} · ${parents.length}/${allParents.length} ${t('agents.recent')}`;if(!parents.length){const empty=document.createElement('div');empty.className='agent-empty';empty.textContent=t('agents.none');tree.append(empty);return}for(const parent of parents){const branch=document.createElement('article');branch.className='agent-branch';const header=document.createElement('div');header.className='agent-parent-head';const label=document.createElement('div');label.className='agent-session';label.textContent=t('agents.main.thread');const id=document.createElement('code');id.textContent=parent.session_id;header.append(label,id);const prompt=document.createElement('div');prompt.className='agent-parent-prompt';prompt.textContent=parent.prompt||t('agents.prev.task');branch.append(header,prompt);const children=document.createElement('div');children.className='agent-children';for(const child of parent.children||[]){const row=document.createElement('div');row.className='agent-child-row';const stem=document.createElement('span');stem.className=`agent-dot ${child.state==='running'?'running':''}`;const body=document.createElement('div');body.className='agent-child-body';const reason=document.createElement('div');reason.className='agent-reason';reason.textContent=child.reason||t('agents.reason.default');body.append(reason);const meta=document.createElement('div');meta.className='agent-meta';meta.textContent=`${child.state==='running'?t('state.running.short'):t('state.done.short')} · ${formatDuration(child.age_seconds)}${child.api_calls?` · ${child.api_calls} ${t('agents.calls')}`:''}${child.model?`\n${child.model}`:''}`;row.append(stem,body,meta);children.append(row)}branch.append(children);tree.append(branch)}}
@@ -1895,6 +1935,75 @@ def select_recent_root_closure(entries: list[dict], activity: dict, root_limit: 
     return [entry for entry in entries if id(entry) in selected_ids], len(selected_groups)
 
 
+def _save_config_payload(data):
+    """Validate both documents before committing either; serialize dashboard saves."""
+    with _CONFIG_LOCK:
+        if not isinstance(data, dict):
+            return 400, {"success": False, "error": "Settings must be an object"}
+        revision = _config_revision()
+        if data.get("revision", revision) != revision:
+            return 409, {"success": False, "error": "Settings changed. Reload before saving again."}
+        shipped = _load_yaml_mapping(CONFIG_PATH)
+        local_path = _local_config_path()
+        local, dump = _read_router_config_for_update(local_path)
+        config = _merge(shipped, _load_yaml_mapping(local_path))
+        hermes_before = HERMES_CONFIG_PATH.read_bytes() if HERMES_CONFIG_PATH.exists() else None
+        stamp, hermes = _read_hermes_snapshot()
+        original_hermes = json.dumps(hermes, sort_keys=True)
+        if "callable" in data:
+            switches = data["callable"]
+            if not isinstance(switches, dict) or any(type(v) is not bool for v in switches.values()):
+                return 400, {"success": False, "error": "callable must map tiers to booleans"}
+            _assign_in_place(config, "callable", switches)
+        if "preferences" in data:
+            cleaned, error = _clean_preferences(data["preferences"], config)
+            if error:
+                return 400, {"success": False, "error": error}
+            _assign_in_place(config, "preferences", cleaned)
+        for key, save in (("usage_limits", _save_usage_limits), ("effort", _save_effort),
+                          ("claude_delegation", _save_claude_delegation), ("balance", _save_balance),
+                          ("workflow", _save_workflow)):
+            if key in data:
+                error = save(data[key], config)
+                if error:
+                    return 400, {"success": False, "error": error}
+        if "hermes_fallback" in data:
+            error = _save_hermes_fallback(data["hermes_fallback"], config, hermes=hermes, persist=False)
+            if error:
+                return 400, {"success": False, "error": error}
+        if "default_model" in data:
+            error = _save_default_model(str(data["default_model"]), config, hermes=hermes, persist=False)
+            if error:
+                return 400, {"success": False, "error": error}
+        delta = _overlay(shipped, config)
+        holder = {"local": local}
+        _assign_in_place(holder, "local", delta)
+        output = io.StringIO()
+        if not local_path.exists():
+            output.write(LOCAL_CONFIG_HEADER)
+        dump(holder["local"], output)
+        if _config_revision() != revision:
+            return 409, {"success": False, "error": "Settings changed while saving. Reload and try again."}
+        hermes_changed = json.dumps(hermes, sort_keys=True) != original_hermes
+        written_hermes = None
+        try:
+            if hermes_changed:
+                _write_hermes_config(hermes, stamp)
+                written_hermes = HERMES_CONFIG_PATH.read_bytes()
+            if delta or local_path.exists():
+                _atomic_write(local_path, output.getvalue().encode("utf-8"))
+        except Exception:
+            if written_hermes is not None:
+                if HERMES_CONFIG_PATH.read_bytes() != written_hermes:
+                    raise RuntimeError("Router save failed and Hermes changed concurrently; automatic rollback refused.")
+                if hermes_before is None:
+                    HERMES_CONFIG_PATH.unlink()
+                else:
+                    _atomic_write(HERMES_CONFIG_PATH, hermes_before)
+            raise
+        return 200, {"success": True, "revision": _config_revision()}
+
+
 class Handler(BaseHTTPRequestHandler):
     log_path = DEFAULT_LOG
     state_db_path = DEFAULT_STATE_DB
@@ -1911,99 +2020,8 @@ class Handler(BaseHTTPRequestHandler):
                 content_length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(content_length)
                 data = json.loads(body.decode("utf-8"))
-                # The page edits the layered config; only what differs from the
-                # shipped file is written, and only into the git-ignored local file.
-                shipped = _load_yaml_mapping(CONFIG_PATH)
-                local_path = _local_config_path()
-                local, dump = _read_router_config_for_update(local_path)
-                config = _merge(shipped, _load_yaml_mapping(local_path))
-                if "callable" in data:
-                    _assign_in_place(config, "callable", data["callable"])
-                if "hermes_fallback" in data:
-                    error = _save_hermes_fallback(data["hermes_fallback"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                if "preferences" in data:
-                    cleaned, error = _clean_preferences(data["preferences"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                    _assign_in_place(config, "preferences", cleaned)
-                if "usage_limits" in data:
-                    error = _save_usage_limits(data["usage_limits"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                if "effort" in data:
-                    error = _save_effort(data["effort"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                if "claude_delegation" in data:
-                    error = _save_claude_delegation(data["claude_delegation"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                if "balance" in data:
-                    error = _save_balance(data["balance"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                # After claude_delegation, so the switch wins over a stale enabled flag.
-                if "workflow" in data:
-                    error = _save_workflow(data["workflow"], config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                if "default_model" in data:
-                    error = _save_default_model(str(data["default_model"]), config)
-                    if error:
-                        self._send(
-                            400,
-                            json.dumps({"error": error, "success": False}).encode("utf-8"),
-                            "application/json",
-                        )
-                        return
-                    data["default_model"] = config["default_model"]
-                delta = _overlay(shipped, config)
-                holder = {"local": local}
-                _assign_in_place(holder, "local", delta)
-                if delta or local_path.exists():
-                    created = not local_path.exists()
-                    with open(local_path, "w", encoding="utf-8") as f:
-                        if created:
-                            f.write(LOCAL_CONFIG_HEADER)
-                        dump(holder["local"], f)
-                self._send(200, json.dumps({"success": True}).encode("utf-8"), "application/json")
+                status, result = _save_config_payload(data)
+                self._send(status, json.dumps(result).encode("utf-8"), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e), "success": False}).encode("utf-8"), "application/json")
             return
@@ -2085,32 +2103,34 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"error": "yaml not available"}).encode("utf-8"), "application/json")
                 return
             try:
-                config = _read_router_config()
-                router = _router_module()
-                work_kinds = list(getattr(router, "WORK_KINDS", ())) if router else []
-                response = {
-                    "callable": config.get("callable", {}),
-                    "workflow": _workflow_name(config),
-                    "delegation_limits": router._host_delegation_limits() if router else {},
-                    "balance": _balance_status(config),
-                    "default_model": config.get("default_model", "terra"),
-                    "effort": {tier: (config.get("effort") or {}).get(tier) for tier in MANAGED_EFFORT_TIERS},
-                    "preferences": config.get("preferences") or {},
-                    "work_kinds": work_kinds,
-                    # Hermes's own chains, not the router's. Kept separate in the payload
-                    # so the UI can say plainly which file a change lands in.
-                    "hermes_fallback": {
-                        "orchestrator": _hermes_chain("fallback_providers"),
-                        "children": _hermes_chain("delegation", "fallback_providers"),
-                    },
-                    "fallback_options": _fallback_chain_options(config),
-                    "accounts": _accounts_status(config),
-                    "tier_accounts": _tier_accounts(config),
-                    # ``routable`` (which names the router can serve itself, as opposed to
-                    # delegation-only targets) already comes from _router_status().
-                    **_router_status(),
-                }
-                self._send(200, json.dumps(response).encode("utf-8"), "application/json")
+                with _CONFIG_LOCK:
+                    config = _read_router_config()
+                    router = _router_module()
+                    work_kinds = list(getattr(router, "WORK_KINDS", ())) if router else []
+                    response = {
+                        "revision": _config_revision(),
+                        "callable": config.get("callable", {}),
+                        "workflow": _workflow_name(config),
+                        "delegation_limits": router._host_delegation_limits() if router else {},
+                        "balance": _balance_status(config),
+                        "default_model": config.get("default_model", "terra"),
+                        "effort": {tier: (config.get("effort") or {}).get(tier) for tier in MANAGED_EFFORT_TIERS},
+                        "preferences": config.get("preferences") or {},
+                        "work_kinds": work_kinds,
+                        # Hermes's own chains, not the router's. Kept separate in the payload
+                        # so the UI can say plainly which file a change lands in.
+                        "hermes_fallback": {
+                            "orchestrator": _hermes_chain("fallback_providers"),
+                            "children": _hermes_chain("delegation", "fallback_providers"),
+                        },
+                        "fallback_options": _fallback_chain_options(config),
+                        "accounts": _accounts_status(config),
+                        "tier_accounts": _tier_accounts(config),
+                        # ``routable`` (which names the router can serve itself, as opposed to
+                        # delegation-only targets) already comes from _router_status().
+                        **_router_status(),
+                    }
+                    self._send(200, json.dumps(response).encode("utf-8"), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode("utf-8"), "application/json")
             return
