@@ -334,3 +334,17 @@ class DispatchFailureTests(unittest.TestCase):
                 model="gpt-terra", api_call_count=2, turn_id="turn-dispatch-failure",
             )
         self.assertIn("BLOCKED AT THE HOST", result["request"]["messages"][0]["content"])
+
+
+class LabelledRetryTests(unittest.TestCase):
+    def test_labels_do_not_replace_work_kind(self):
+        for label in ("sol", "terra", "opus5", "sonnet5", "sol:xhigh"):
+            with self.subTest(label=label):
+                self.assertEqual(_kind_for_goal(f"[{label}] {GOAL}", CFG), "code")
+
+    def test_retry_skips_a_hard_closed_account(self):
+        with patch("model_router._account_states", return_value={"anthropic": "closed"}), \
+             patch("model_router._account_of", side_effect=lambda n, c: "anthropic" if n == "opus5" else "openai-codex"), \
+             patch("model_router._delegation_target_names", return_value=TARGETS), \
+             patch("model_router._tier_cooldown_remaining", return_value=0):
+            self.assertEqual(_next_available_entry("code", CFG), "terra")

@@ -1260,6 +1260,9 @@ def _kind_for_goal(goal: str, cfg: Dict[str, Any]) -> str:
     decided the route, and then the retry advice would name a chain the operator
     never associated with it.
     """
+    # A route label describes the stopped worker, not the semantic work kind.
+    goal = re.sub(r"^\s*\[(?:luna|spark|terra|sol|opus5|sonnet5|haiku|qwen)(?::xhigh)?\]\s*",
+                  "", goal, flags=re.I)
     if not goal.strip():
         return "default"
     try:
@@ -1284,18 +1287,27 @@ def _chain_entries(kind: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
     )
 
 
+def _retry_chain(kind: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    readings = _guarded_readings(cfg)
+    states = _account_states(cfg, readings)
+    if claude_delegation.is_active():
+        names, _reason = _advised_chain(kind, cfg, states, set(_delegation_target_names()), readings)
+    else:
+        names = _chain_entries(kind, cfg)
+    return tuple(name for name in names if states.get(_account_of(name, cfg)) != "closed")
+
+
 def _next_available_entry(kind: str, cfg: Dict[str, Any]) -> Optional[str]:
     return next(
-        (name for name in _chain_entries(kind, cfg) if _tier_cooldown_remaining(name, cfg) <= 0),
+        (name for name in _retry_chain(kind, cfg) if _tier_cooldown_remaining(name, cfg) <= 0),
         None,
     )
 
 
 def _earliest_free_entry(kind: str, cfg: Dict[str, Any]) -> Optional[Tuple[str, int]]:
-    """The chain entry that frees up soonest, when every one of them is cooling."""
-    waiting = [
-        (name, _tier_cooldown_remaining(name, cfg)) for name in _chain_entries(kind, cfg)
-    ]
+    """The earliest known cooldown among accounts still admitting workers."""
+    waiting = [(name, remaining) for name in _retry_chain(kind, cfg)
+               if (remaining := _tier_cooldown_remaining(name, cfg)) > 0]
     if not waiting:
         return None
     name, remaining = min(waiting, key=lambda item: item[1])
@@ -1427,8 +1439,8 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
             )
         else:
             lines.append(
-                f"- {label}\n  {kind} work -> no target is configured for this kind; "
-                f"pick from the offered targets yourself"
+                f"- {label}\n  {kind} work -> no configured target is currently available; "
+                f"wait for fresh usage data or account recovery"
             )
     return (
         "\n\n[ROUTER — A WORKER STOPPED ON AN ACCOUNT LIMIT]\n"
