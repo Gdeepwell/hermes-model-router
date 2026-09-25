@@ -358,7 +358,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(
             json.loads(result.stdout),
             {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34,
-             "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0},
+             "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0, "grok": 0},
         )
         renderer = HTML[HTML.rindex("function render(){"):]
         self.assertIn("const summary=executionSummary(runData.map(run=>run.scope.calls))", renderer)
@@ -892,6 +892,27 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             self.assertEqual(written["delegation"]["max_iterations"], 40, "the rest of the block survives")
             self.assertEqual(status["tier"], "sol")
             self.assertEqual(status["options"], ["terra", "sol"])
+
+    def test_a_switched_off_route_is_dropped_from_both_chains(self):
+        """Hermes fails over without consulting the router's switches, so Qwen
+        switched off in the dashboard was still a live fallback (and a 403)."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "config.yaml"
+            target.write_text("model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n", encoding="utf-8")
+            options = [{"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"},
+                       {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"}]
+            qwen = {"provider": "qwen-token", "model": "qwen3.7-plus"}
+            sonnet = {"provider": "anthropic", "model": "claude-sonnet-5"}
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
+                 patch.object(web_viewer, "_fallback_chain_options", return_value=options):
+                error = web_viewer._save_hermes_fallback(
+                    {"orchestrator": [sonnet, qwen], "children": [qwen]}, {"callable": {"qwen": False}})
+            self.assertIsNone(error)
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            self.assertEqual(written["fallback_providers"], [sonnet])
+            self.assertEqual(written["delegation"]["fallback_providers"], [])
 
     def test_an_unreadable_config_is_never_overwritten(self):
         import tempfile
@@ -1858,7 +1879,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
             "account.delegation.default_tier", "account.delegation.live",
             "account.delegation.restart", "account.load", "account.load.calls",
             "settings.main.heading", "settings.main.sub", "settings.main.primary",
-            "settings.main.off", "settings.main.external", "settings.workers.heading",
+            "settings.main.external", "settings.workers.heading",
             "settings.workers.sub", "settings.workers.codex", "settings.workers.codex.desc",
             "settings.workers.claude", "settings.workers.claude.desc",
             "settings.workers.fallback", "settings.workers.fallback.desc",
@@ -1936,6 +1957,24 @@ class AccountGroupTests(DashboardProbeMixin, unittest.TestCase):
         )
         groups = json.loads(out)
         self.assertNotIn("unused-account", [g["account"] for g in groups])
+
+    def test_a_switched_off_tier_and_an_account_left_empty_leave_the_overview(self):
+        callable_ = {"qwen": False, "spark": False}
+        out = self._run(
+            "console.log(JSON.stringify(accountGroupsFor("
+            + json.dumps(self.TIER_ACCOUNTS) + "," + json.dumps(self.ACCOUNTS) + ","
+            + json.dumps(callable_) + ")));"
+        )
+        groups = {g["account"]: g["tiers"] for g in json.loads(out)}
+        self.assertNotIn("qwen-token", groups)
+        self.assertEqual(groups["openai-codex"], ["luna", "terra", "sol"])
+
+    def test_the_overview_hides_switched_off_cards_instead_of_removing_them(self):
+        """render() writes every tier's count by element id, so a removed card
+        would break the page; hidden keeps it ready for switching back on."""
+        source = self.javascript_function("groupModelCards")
+        self.assertIn("card.hidden=callable[tier]===false", source)
+        self.assertIn("box.hidden=!shown.has(box.dataset.account)", source)
 
     def test_claude_group_is_filtered_to_tiers_present_in_tier_accounts(self):
         tier_accounts = dict(self.TIER_ACCOUNTS)

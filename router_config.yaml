@@ -16,6 +16,7 @@ models:
   terra: gpt-5.6-terra
   sol: gpt-6-sol
   qwen: qwen3.7-plus
+  grok: grok-4.7
 callable:
   luna: true
   spark: false
@@ -31,6 +32,9 @@ callable:
   sonnet5: true
   haiku: true
   qwen: true
+  # Needs a SuperGrok subscription: `hermes auth add xai-oauth --type oauth`, a
+  # `delegation.targets.grok` entry in ~/.hermes/config.yaml, then switch it on.
+  grok: false
 # Preferred models per kind of work, best first. The router takes the first entry
 # that is callable; if that entry is a Codex tier it becomes the route, and if it is
 # an external account (opus5, sonnet5, qwen) it becomes a delegation recommendation
@@ -65,6 +69,7 @@ fallbacks:
   sol: terra
   opus5: sol
   qwen: terra
+  grok: terra
 default_model: qwen
 # Claude Code CLI bridge only, not `delegate_claude`: these settings govern the
 # subprocess path that runs `claude -p` in `default_repo` (or a configured alias).
@@ -111,6 +116,7 @@ tier_providers:
   sonnet5: anthropic
   haiku: anthropic
   qwen: qwen-token
+  grok: xai-oauth
 thresholds:
   luna_max_chars: 700
   sol_min_chars: 3500
@@ -119,6 +125,7 @@ effort:
   spark: medium
   terra: medium
   sol: medium
+  grok: medium
   opus5: external
   sol_long: medium
   explicit_sol: medium
@@ -154,6 +161,7 @@ peer_groups:
   heavy:
   - terra
   - opus5
+  - grok
   - qwen
   - sonnet5
   light:

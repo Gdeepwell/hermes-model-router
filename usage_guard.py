@@ -31,7 +31,7 @@ from .hermes_paths import hermes_path
 
 _logger = logging.getLogger("model_router.usage_guard")
 
-ACCOUNT_LABELS: Dict[str, str] = {"openai-codex": "Codex", "anthropic": "Claude", "qwen-token": "Qwen"}
+ACCOUNT_LABELS: Dict[str, str] = {"openai-codex": "Codex", "anthropic": "Claude", "qwen-token": "Qwen", "xai-oauth": "Grok"}
 DEFAULTS: Dict[str, Any] = {"cache_seconds": 300, "state_path": "", "accounts": {}}
 BALANCE_DEFAULTS: Dict[str, Any] = {"enabled": False, "busy_percent": 20.0, "margin_percent": 10.0,
                                     "window": "5-hour"}
