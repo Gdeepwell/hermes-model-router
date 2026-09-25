@@ -652,16 +652,41 @@ def _dispatch(args: Dict[str, Any]) -> str:
     if not model:
         return _error(f"Claude tier \"{tier}\" has no model under claude_delegation.tiers.")
 
-    raw = delegate_task(
-        goal=args.get("goal"),
-        context=args.get("context"),
-        tasks=_strip_hidden(args.get("tasks")),
-        parent_agent=parent,
-        # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
-        # top level, synchronous for an orchestrator child that needs its results.
-        background=not getattr(parent, "_delegate_depth", 0) > 0,
-        credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
-    )
+    # Haiku has no extended-thinking support (see agent.anthropic_adapter.build_anthropic_kwargs),
+    # so the reasoning-effort bridge is simply irrelevant to it: a Haiku call never sets a scope
+    # and must delegate normally even when the bridge is unavailable on this host.
+    if tier == "haiku":
+        raw = delegate_task(
+            goal=args.get("goal"),
+            context=args.get("context"),
+            tasks=_strip_hidden(args.get("tasks")),
+            parent_agent=parent,
+            # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
+            # top level, synchronous for an orchestrator child that needs its results.
+            background=not getattr(parent, "_delegate_depth", 0) > 0,
+            credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
+        )
+    else:
+        bridge_ok, bridge_reason = install_reasoning_bridge()
+        if not bridge_ok:
+            return _error(f"Claude reasoning effort is unavailable: {bridge_reason}")
+        from hermes_constants import parse_reasoning_effort
+
+        level = reasoning_effort_config(cfg)[tier]
+        reasoning_config = parse_reasoning_effort(level)
+        if reasoning_config is None:
+            return _error(f"Claude reasoning effort for {tier} is invalid")
+        with reasoning_scope(parent, tier, model, reasoning_config):
+            raw = delegate_task(
+                goal=args.get("goal"),
+                context=args.get("context"),
+                tasks=_strip_hidden(args.get("tasks")),
+                parent_agent=parent,
+                # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
+                # top level, synchronous for an orchestrator child that needs its results.
+                background=not getattr(parent, "_delegate_depth", 0) > 0,
+                credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
+            )
     error_message = _raw_error(raw)
     if error_message is not None:
         _audit(cfg, parent, requested, tier, outcome, "error", error_message[:300])
