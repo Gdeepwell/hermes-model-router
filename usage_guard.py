@@ -23,6 +23,7 @@ import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, Optional
 
@@ -102,12 +103,32 @@ class GuardOutcome:
     usage: str = "unknown"
 
 
+def _unexpired(reading: Optional[Reading]) -> Optional[Reading]:
+    """Discard a percentage once its reported window has reset."""
+    if reading is None:
+        return None
+    def value(percent: Optional[float], resets: Optional[str]) -> Optional[float]:
+        if resets:
+            try:
+                reset = datetime.fromisoformat(resets.replace("Z", "+00:00"))
+                if reset.tzinfo is None:
+                    reset = reset.replace(tzinfo=timezone.utc)
+                if reset.timestamp() <= time.time():
+                    return None
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return percent
+    return replace(reading, weekly=value(reading.weekly, reading.weekly_resets_at),
+                   session=value(reading.session, reading.session_resets_at))
+
+
 def load(reading: Optional["Reading"], window: str = "tighter") -> Optional[tuple]:
     """(percent, window name) an account is compared by, or None when it is unknown.
 
     ``tighter`` is the higher of the weekly and 5-hour windows; ``5-hour`` is that
     window alone.
     """
+    reading = _unexpired(reading)
     if reading is None:
         return None
     candidates = ((reading.session, "5-hour"),) if window == "5-hour" else (
@@ -396,7 +417,8 @@ def peek(account: str, cfg: Dict[str, Any]) -> Optional[Reading]:
 
 def state(account: str, cfg: Dict[str, Any], reading: Optional[Reading]) -> str:
     limits = account_limits(account, cfg)
-    if limits is None or reading is None:
+    reading = _unexpired(reading) if fresh(reading, cfg) else None
+    if limits is None or reading is None or (reading.weekly is None and reading.session is None):
         return "unknown"
     weekly, session = reading.weekly or 0.0, reading.session or 0.0
     if weekly >= limits["hard_percent"] or session >= limits["hard_percent"]:
@@ -407,7 +429,8 @@ def state(account: str, cfg: Dict[str, Any], reading: Optional[Reading]) -> str:
 def apply(account: str, tier: str, cfg: Dict[str, Any], reading: Optional[Reading]) -> GuardOutcome:
     """The guard for one worker on ``account``; ``tier`` is a router target name."""
     limits = account_limits(account, cfg)
-    if limits is None or reading is None:
+    reading = _unexpired(reading) if fresh(reading, cfg) else None
+    if limits is None or reading is None or (reading.weekly is None and reading.session is None):
         return GuardOutcome(tier)
     weekly, session = reading.weekly or 0.0, reading.session or 0.0
     usage, label, hard = f"{weekly:.0f}%", account_label(account), limits["hard_percent"]

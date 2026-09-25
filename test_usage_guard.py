@@ -572,3 +572,25 @@ class ParentUsageIdentityTests(unittest.TestCase):
                     request={'model': 'gpt-sol', 'messages': [{'role': 'user', 'content': '[sol] Implement parser'}]},
                     model='gpt-sol', provider='openai-codex', platform=platform, turn_id='identity', api_call_count=1)
             self.assertEqual(routed['metadata']['tier'], expected)
+
+
+class ExpiredUsageTests(unittest.TestCase):
+    def test_stale_usage_neither_closes_nor_steps_down_either_account(self):
+        for account in ACCOUNTS:
+            heavy, _ = STEP[account]
+            for percent in (75, 99):
+                reading = _reading(percent, fetched_at=time.time() - 601)
+                self.assertEqual(usage_guard.state(account, _cfg(), reading), "unknown")
+                self.assertEqual(usage_guard.apply(account, heavy, _cfg(), reading), GuardOutcome(heavy))
+
+    def test_reset_windows_expire_independently_before_cache_ttl(self):
+        past = datetime.fromtimestamp(time.time() - 1, timezone.utc).isoformat()
+        reading = Reading(95, 10, past, None, time.time())
+        for account in ACCOUNTS:
+            heavy, _ = STEP[account]
+            self.assertEqual(usage_guard.state(account, _cfg(), reading), "open")
+            self.assertEqual(usage_guard.apply(account, heavy, _cfg(), reading).tier, heavy)
+        self.assertEqual(usage_guard.load(reading), (10, "5-hour"))
+        # Resetting the session cannot erase a still-valid weekly hard limit.
+        reading = Reading(95, 99, None, past, time.time())
+        self.assertEqual(usage_guard.state("anthropic", _cfg(), reading), "closed")
