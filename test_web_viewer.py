@@ -1234,8 +1234,9 @@ class HaikuDashboardTests(DashboardProbeMixin, unittest.TestCase):
                          ".pill.haiku{color:var(--haiku)}", ".task-tree-marker.haiku{background:var(--haiku)"):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, HTML)
-        self.assertEqual(HTML.count("'sonnet5'"), HTML.count("'haiku'"))
-        self.assertEqual(HTML.count("sonnet5:"), HTML.count("haiku:"))
+        effort = self.javascript_function("renderClaudeReasoningEffort") or ""
+        self.assertIn("haiku", effort)
+        self.assertIn("sonnet5", effort)
 
     def test_haiku_is_offered_by_the_tier_filter(self):
         # Since Task 7, the static #tier select only has the "all" option; the
@@ -1639,7 +1640,8 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
     def _account_functions(self):
         return "\n".join(self.javascript_function(name)
-                          for name in ("ageText", "resetText", "usageRow", "shortModelName", "accountCard"))
+                          for name in ("ageText", "resetText", "usageRow", "shortModelName",
+                                       "escapeHtml", "renderEffort", "renderClaudeReasoningEffort", "accountCard"))
 
     def _run(self, script):
         # 'status.locale' must resolve to a real BCP-47 tag: toLocaleString throws
@@ -1670,9 +1672,9 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
         codex_card = self._card("openai-codex", self.CODEX_INFO)
         claude_card = self._card("anthropic", self.CLAUDE_INFO)
-        # Models | Limits | Delegation on the first line, Usage underneath;
-        # the load count lives in Usage's last line, next to Refresh.
-        expected = ["models", "limits", "delegation", "usage"]
+        # Model switches | their effort dropdowns | Limits | Delegation;
+        # Usage and its load count occupy the full-width row underneath.
+        expected = ["models", "effort", "limits", "delegation", "usage"]
         self.assertEqual(re.findall(r'class="account-row (\w+)"', codex_card), expected)
         self.assertEqual(re.findall(r'class="account-row (\w+)"', claude_card), expected)
         for card in (codex_card, claude_card):
@@ -1680,6 +1682,41 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
             self.assertIn("account.load.calls", usage_row)
         claude_footer = claude_card[claude_card.index('class="usage-age"'):]
         self.assertLess(claude_footer.index("data-refresh-usage"), claude_footer.index("account.load.calls"))
+
+    def test_effort_controls_follow_account_models_and_do_not_appear_in_qwen(self):
+        codex = self._card("openai-codex", self.CODEX_INFO, {"effort": {"luna": "low", "terra": "high", "sol": "xhigh"}})
+        claude = self._card("anthropic", self.CLAUDE_INFO, {
+            "claude_reasoning_effort": {"available": True, "levels": {"sonnet": "low", "opus": "high"}},
+        })
+        qwen = self._card("qwen-token", self.NO_USAGE_SOURCE_INFO)
+        for model in self.CODEX_INFO["tiers"]:
+            self.assertIn(f'data-effort="{model}"', codex)
+        self.assertLess(codex.index('data-effort="luna"'), codex.index('data-effort="terra"'))
+        self.assertIn('<option value="high" selected>', codex)
+        self.assertIn('data-claude-effort="sonnet"', claude)
+        self.assertIn('data-claude-effort="opus"', claude)
+        self.assertNotIn('data-claude-effort="haiku"', claude)
+        self.assertIn("settings.claude_effort.haiku_unsupported", claude)
+        self.assertNotIn('class="account-row effort"', qwen)
+
+    def test_unavailable_claude_effort_stays_visible_but_disabled_in_account_card(self):
+        card = self._card("anthropic", self.CLAUDE_INFO, {
+            "claude_reasoning_effort": {"available": False, "reason": "seam moved", "levels": {"sonnet": "medium", "opus": "medium"}},
+        })
+        self.assertIn('data-claude-effort="sonnet" disabled', card)
+        self.assertIn('data-claude-effort="opus" disabled', card)
+        self.assertIn("seam moved", card)
+
+    def test_unavailable_claude_effort_reason_is_html_escaped(self):
+        card = self._card("anthropic", self.CLAUDE_INFO, {
+            "claude_reasoning_effort": {"available": False, "reason": "<img src=x onerror=alert(1)>", "levels": {}},
+        })
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", card)
+        self.assertNotIn("<img src=x onerror=alert(1)>", card)
+
+    def test_standalone_effort_sections_are_removed(self):
+        self.assertNotIn('id="effort-settings"', HTML)
+        self.assertNotIn('id="claude-effort-settings"', HTML)
 
     def test_model_switches_drop_the_repeated_vendor_prefix(self):
         script = ("console.log(JSON.stringify(['GPT-5.6 Luna','GPT-5.3 Spark','Claude Opus 5.5',"
@@ -1761,7 +1798,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
     def test_every_i18n_key_used_by_the_new_code_exists_in_both_languages(self):
         for key in [
             "settings.accounts.heading", "account.state.open", "account.state.soft",
-            "account.state.closed", "account.state.unknown", "account.models",
+            "account.state.closed", "account.state.unknown", "account.models", "account.effort",
             "account.usage", "account.usage.week", "account.usage.session",
             "account.usage.resets", "account.usage.age", "account.usage.none",
             "account.usage.refresh", "account.limits", "account.limits.soft",
@@ -2807,7 +2844,7 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_the_control_offers_exactly_the_four_shared_effort_levels(self):
         source = self.javascript_function("renderEffort") or ""
-        self.assertIn("for(const tier of ['luna','spark','terra','sol'])", source)
+        self.assertIn("tiers.filter(tier=>['luna','spark','terra','sol'].includes(tier))", source)
         self.assertNotIn("opus5", source)
         self.assertNotIn("sol_long", source)
         for level in ("low", "medium", "high", "xhigh"):
@@ -3181,9 +3218,8 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
     def test_renderClaudeReasoningEffort_renders_sonnet_and_opus_selects_only(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
         self.assertIn("data-claude-effort=", source)
-        self.assertIn("['sonnet','opus']", source)
+        self.assertIn("sonnet5:'sonnet',opus5:'opus'", source)
         self.assertNotIn('data-claude-effort="haiku"', source)
-        self.assertNotIn("'haiku'", source.split("haiku_unsupported")[0])
 
     def test_renderClaudeReasoningEffort_shows_haiku_as_a_nonselect_unsupported_label(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
