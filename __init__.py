@@ -1244,11 +1244,38 @@ def _failed_delegation_blocks(text: str) -> Tuple[Tuple[str, str], ...]:
     headers = list(_TASK_HEADER.finditer(text))
     blocks = []
     for position, match in enumerate(headers):
-        if match.group("icon") not in {"✗", "⚠"}:
-            continue
         end = headers[position + 1].start() if position + 1 < len(headers) else len(text)
-        blocks.append((str(match.group("goal") or "").strip(), text[match.end():end]))
+        block = text[match.end():end]
+        # A zero-token admission stop is a completed model response in Hermes,
+        # so the host's ✓ status cannot be treated as proof that work ran.
+        stopped = _router_stopped_summary(block)
+        if match.group("icon") in {"✗", "⚠"} or stopped:
+            blocks.append((str(match.group("goal") or "").strip(), block))
     return tuple(blocks)
+
+
+def _router_stopped_summary(block: str) -> bool:
+    # Batch headers leave their status suffix on the first line. A completed
+    # worker's first result line is the router's reserved marker.
+    result = block.split("\n", 1)[-1] if "\n" in block else block
+    for candidate in (block.lstrip(), result.lstrip()):
+        if (candidate.startswith("[ROUTER WORKER STOPPED]")
+                and "No work was performed by this call." in candidate[:500]):
+            return True
+    return False
+
+
+def _single_stopped_block(text: str) -> Tuple[Tuple[str, str], ...]:
+    if not (text or "").lstrip().casefold().startswith("[async delegation complete"):
+        return ()
+    goal = re.search(r"^Original goal:\s*(.*)$", text, re.M)
+    result = text.split("--- RESULT ---", 1)
+    if not goal or len(result) != 2:
+        return ()
+    summary = result[1].lstrip()
+    if not _router_stopped_summary(summary):
+        return ()
+    return ((goal.group(1).strip(), summary),)
 
 
 def _kind_for_goal(goal: str, cfg: Dict[str, Any]) -> str:
@@ -1276,36 +1303,42 @@ def _kind_for_goal(goal: str, cfg: Dict[str, Any]) -> str:
     return decision.kind or "default"
 
 
-def _chain_entries(kind: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
-    """The kind's configured order, restricted to real, switched-on targets."""
+def _chain_entries(kind: str, cfg: Dict[str, Any], *, model_param: bool = True) -> Tuple[str, ...]:
+    """The kind's order, restricted to routes this host can actually express."""
     targets = set(_delegation_target_names())
     switches = cfg.get("callable") or {}
     return tuple(
         name for name in _preference_list(kind, cfg)
-        if name in targets and switches.get(name) is True
+        if switches.get(name) is True and _target_is_offered(name, cfg)
+        and (name in targets if model_param else
+             (name in claude_delegation.TIER_FOR_TARGET and claude_delegation.is_active())
+             or (name in (cfg.get("models") or {}) and
+                 _account_of(name, cfg) in ("", str(cfg.get("provider", "openai-codex")))))
     )
 
 
-def _retry_chain(kind: str, cfg: Dict[str, Any]) -> Tuple[str, ...]:
+def _retry_chain(kind: str, cfg: Dict[str, Any], *, model_param: bool = True) -> Tuple[str, ...]:
     readings = _guarded_readings(cfg)
     states = _account_states(cfg, readings)
     if claude_delegation.is_active():
-        names, _reason = _advised_chain(kind, cfg, states, set(_delegation_target_names()), readings)
+        offered = set(_chain_entries(kind, cfg, model_param=model_param))
+        names, _reason = _advised_chain(kind, cfg, states, offered, readings)
     else:
-        names = _chain_entries(kind, cfg)
+        names = _chain_entries(kind, cfg, model_param=model_param)
     return tuple(name for name in names if states.get(_account_of(name, cfg)) != "closed")
 
 
-def _next_available_entry(kind: str, cfg: Dict[str, Any]) -> Optional[str]:
+def _next_available_entry(kind: str, cfg: Dict[str, Any], *, model_param: bool = True) -> Optional[str]:
     return next(
-        (name for name in _retry_chain(kind, cfg) if _tier_cooldown_remaining(name, cfg) <= 0),
+        (name for name in _retry_chain(kind, cfg, model_param=model_param)
+         if _tier_cooldown_remaining(name, cfg) <= 0),
         None,
     )
 
 
-def _earliest_free_entry(kind: str, cfg: Dict[str, Any]) -> Optional[Tuple[str, int]]:
+def _earliest_free_entry(kind: str, cfg: Dict[str, Any], *, model_param: bool = True) -> Optional[Tuple[str, int]]:
     """The earliest known cooldown among accounts still admitting workers."""
-    waiting = [(name, remaining) for name in _retry_chain(kind, cfg)
+    waiting = [(name, remaining) for name in _retry_chain(kind, cfg, model_param=model_param)
                if (remaining := _tier_cooldown_remaining(name, cfg)) > 0]
     if not waiting:
         return None
@@ -1414,22 +1447,29 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
     text, _index = _last_user_text_and_index(_request_items(request))
     if not text:
         return ""
-    candidates = _failed_delegation_blocks(text) or _single_failure_block(text)
+    candidates = (_failed_delegation_blocks(text) or _single_failure_block(text)
+                  or _single_stopped_block(text))
     stopped = [
         (goal, block) for goal, block in candidates
-        if _QUOTA_STOP_WORDING.search(_delegation_failure_reason(block))
+        if (_router_stopped_summary(block)
+            or _QUOTA_STOP_WORDING.search(_delegation_failure_reason(block)))
     ]
     if not stopped:
         return ""
     lines = []
+    model_param = _host_delegate_has_model(request)
     for goal, _block in stopped:
         kind = _kind_for_goal(goal, cfg)
         label = (goal[:120] + "…") if len(goal) > 120 else (goal or "the stopped leaf")
-        target = _next_available_entry(kind, cfg)
+        target = _next_available_entry(kind, cfg, model_param=model_param)
         if target:
-            lines.append(f"- {label}\n  {kind} work -> re-dispatch with {_dispatch_phrase(target)}")
+            call = (f'delegate_claude(tier="{claude_delegation.TIER_FOR_TARGET[target]}")'
+                    if claude_delegation.is_active() and target in claude_delegation.TIER_FOR_TARGET
+                    else f"delegate_task(model=\"{target}\")" if model_param
+                    else f'delegate_task(tasks=[{{"goal": "[{target}] <original objective>"}}])')
+            lines.append(f"- {label}\n  {kind} work -> re-dispatch with {call}")
             continue
-        waiting = _earliest_free_entry(kind, cfg)
+        waiting = _earliest_free_entry(kind, cfg, model_param=model_param)
         if waiting:
             name, minutes = waiting
             lines.append(
@@ -1447,9 +1487,8 @@ def _quota_redispatch_instruction(request: Any, cfg: Dict[str, Any]) -> str:
         "valid. Sending the same goal to the same target again will fail the same way while "
         "it is cooling.\n"
         + "\n".join(lines)
-        + ("\nRe-dispatch each one with the call named above and tell the retry to "
-           if claude_delegation.is_active() else
-           "\nRe-dispatch each one with the model: parameter named above and tell the retry to ")
+        + "\nRe-dispatch each one with the call named above. Keep its objective and context, "
+          "replacing any prior route prefix with the target's prefix, and tell the retry to "
         + "continue from what the stopped worker already committed in its worktree instead of "
         "starting over. Do not re-plan or narrow the goal: only the account changed.\n"
     )

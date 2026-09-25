@@ -57,7 +57,9 @@ def envelope(error_line=QUOTA_ERROR, summary="Committed the schema migration; st
 
 
 def request_for(text):
-    return {"model": "gpt-terra", "messages": [{"role": "user", "content": text}]}
+    return {"model": "gpt-terra", "messages": [{"role": "user", "content": text}],
+            "tools": [{"name": "delegate_task", "parameters": {"type": "object",
+                       "properties": {"model": {"type": "string"}}}}]}
 
 
 def _no_cooldown(name, cfg):
@@ -109,18 +111,18 @@ class RedispatchInstructionTests(unittest.TestCase):
 
     def test_it_names_the_next_target_for_the_goals_kind(self):
         instruction = self._instruction(envelope())
-        self.assertIn("model:opus5", instruction)
+        self.assertIn('delegate_task(model="opus5")', instruction)
         self.assertIn("code work", instruction)
         self.assertIn(GOAL[:60], instruction)
 
     def test_it_advances_down_the_chain_when_the_first_entry_is_cooling(self):
-        self.assertIn("model:terra", self._instruction(envelope(), cooling={"opus5"}))
+        self.assertIn('delegate_task(model="terra")', self._instruction(envelope(), cooling={"opus5"}))
 
     def test_it_says_how_long_to_wait_when_every_entry_is_cooling(self):
         instruction = self._instruction(envelope(), cooling={"opus5", "terra"})
         self.assertIn("every configured target is cooling", instruction)
         self.assertIn("min", instruction)
-        self.assertNotIn("re-dispatch with model:", instruction)
+        self.assertNotIn("re-dispatch with delegate_task(model", instruction)
 
     def test_it_says_to_continue_rather_than_restart(self):
         instruction = self._instruction(envelope())
@@ -238,7 +240,7 @@ class EarlyFailureNoticeTests(unittest.TestCase):
 
     def test_the_early_notice_is_answered_too(self):
         instruction = self._instruction(SINGLE_FAILURE.format(goal=GOAL))
-        self.assertIn("model:opus5", instruction)
+        self.assertIn('delegate_task(model="opus5")', instruction)
         self.assertIn(GOAL[:60], instruction)
 
     def test_an_early_notice_for_an_ordinary_failure_is_left_alone(self):
@@ -348,3 +350,55 @@ class LabelledRetryTests(unittest.TestCase):
              patch("model_router._delegation_target_names", return_value=TARGETS), \
              patch("model_router._tier_cooldown_remaining", return_value=0):
             self.assertEqual(_next_available_entry("code", CFG), "terra")
+
+
+class CurrentSchemaRetryTests(unittest.TestCase):
+    def _request(self, text):
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        return {"model": "gpt-terra", "messages": [{"role": "user", "content": text}],
+                "tools": [DELEGATE_TASK_SCHEMA]}
+
+    def test_router_stop_in_completed_batch_is_retried(self):
+        stopped = (
+            "[ASYNC DELEGATION BATCH COMPLETE — d]\n"
+            f"--- ✓ TASK 1/1: [sol] {GOAL}  (status=completed, api_calls=0) ---\n"
+            "[ROUTER WORKER STOPPED] Codex delegation closed: weekly usage 95%. "
+            "No work was performed by this call.\n"
+        )
+        cfg = {**CFG, "preferences": {"code": ["sol", "terra"]}}
+        with patch("model_router._delegation_target_names", return_value=()), \
+             patch("model_router._tier_cooldown_remaining", return_value=0):
+            instruction = _quota_redispatch_instruction(self._request(stopped), cfg)
+        self.assertIn('delegate_task(tasks=[{"goal": "[sol] <original objective>"}])', instruction)
+        self.assertNotIn('model:', instruction)
+        self.assertIn('replacing any prior route prefix', instruction)
+
+    def test_single_completed_stop_is_detected_but_ordinary_prose_is_not(self):
+        text = ("[ASYNC DELEGATION COMPLETE — d]\n"
+                f"Original goal: [sol] {GOAL}\n"
+                "Status: completed   API calls: 0   Duration: 0s\n"
+                "--- RESULT ---\n"
+                "[ROUTER WORKER STOPPED] Codex delegation closed: weekly usage 95%. "
+                "No work was performed by this call.\n")
+        cfg = {**CFG, "preferences": {"code": ["sol", "terra"]}}
+        with patch("model_router._delegation_target_names", return_value=()), \
+             patch("model_router._tier_cooldown_remaining", return_value=0):
+            self.assertIn("[sol]", _quota_redispatch_instruction(self._request(text), cfg))
+            self.assertEqual(_quota_redispatch_instruction(
+                self._request(text.replace("[ROUTER WORKER STOPPED]", "I reviewed the router stop marker")),
+                cfg), "")
+
+    def test_current_schema_cannot_offer_external_target_by_goal_prefix(self):
+        cfg = {**CFG, "preferences": {"code": ["opus5", "terra"]}}
+        with patch("model_router._delegation_target_names", return_value=("opus5", "terra")), \
+             patch("model_router._tier_cooldown_remaining", return_value=0):
+            text = _quota_redispatch_instruction(self._request(envelope()), cfg)
+        self.assertIn('"[terra] <original objective>"', text)
+        self.assertNotIn('"[opus5] <original objective>"', text)
+
+    def test_current_task_shape_normalizes_retry_goal(self):
+        from tools.delegate_tool_tasks import _normalize_task_list
+        target = '[terra] Implement and commit the backend ledger'
+        tasks, error = _normalize_task_list(None, None, [{"goal": target}], None, "leaf", 3)
+        self.assertIsNone(error)
+        self.assertEqual(tasks[0]["goal"], target)
