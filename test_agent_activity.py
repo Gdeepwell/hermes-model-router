@@ -90,7 +90,7 @@ class AgentActivityTests(unittest.TestCase):
             router_log_path.write_text(
                 "\n".join([
                     json.dumps({"turn_id": "child-session:turn-1", "tier": "spark", "model": "gpt-5.3-codex-spark", "effort": "medium"}),
-                    json.dumps({"turn_id": "child-session:turn-2", "tier": "sol", "model": "gpt-6-sol", "effort": "medium"}),
+                    json.dumps({"turn_id": "child-session:turn-2", "tier": "sol", "model": "gpt-6-sol", "effort": "medium", "reason": "usage soft limit: sol→terra"}),
                 ]) + "\n",
                 encoding="utf-8",
             )
@@ -104,7 +104,7 @@ class AgentActivityTests(unittest.TestCase):
         self.assertEqual(activity["parents"][0]["children"][0]["activity"], "Terminal parancs fut")
         self.assertEqual(activity["parents"][0]["children"][0]["routed_calls"], [
             {"tier": "spark", "model": "gpt-5.3-codex-spark", "effort": "medium"},
-            {"tier": "sol", "model": "gpt-6-sol", "effort": "medium"},
+            {"tier": "sol", "model": "gpt-6-sol", "effort": "medium", "reason": "usage soft limit: sol→terra"},
         ])
         self.assertEqual(activity["parents"][0]["children"][0]["model"], "gpt-6-sol")
         self.assertEqual(activity["parents"][0]["children"][0]["console"][0]["tool"], "terminal")

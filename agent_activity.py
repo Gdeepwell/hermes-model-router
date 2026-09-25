@@ -142,6 +142,7 @@ def _router_calls_by_session(router_log_path: Path | None) -> Dict[str, List[Dic
             "model": model,
             "effort": str(entry.get("effort", "")),
             "timestamp": str(entry.get("timestamp", "")),
+            **({"reason": _redact_sensitive(str(entry["reason"]))} if entry.get("reason") else {}),
         })
     return by_session
 
@@ -154,7 +155,8 @@ def _recent_routed_calls(router_log_path: Path | None, child_session_id: str | N
     retained JSONL rather than only its newest chunk.
     """
     return [
-        {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", "")}
+        {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", ""),
+                 **({"reason": call["reason"]} if call.get("reason") else {})}
         for call in _router_calls_by_session(router_log_path).get(str(child_session_id or ""), [])
     ]
 
@@ -383,7 +385,8 @@ def load_agent_activity(
             if child_session_id:
                 claimed_sessions.add(child_session_id)
             routed_calls = [
-                {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", "")}
+                {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", ""),
+                 **({"reason": call["reason"]} if call.get("reason") else {})}
                 for call in raw_calls_by_session.get(child_session_id or "", [])
             ]
             actual_model = routed_calls[-1]["model"] if routed_calls else None
@@ -457,7 +460,8 @@ def load_agent_activity(
                 # uses it as the primary audit source for both model and effort;
                 # session metadata is a fallback only when no raw record exists.
                 nested_routed_calls = [
-                    {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", "")}
+                    {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", ""),
+                 **({"reason": call["reason"]} if call.get("reason") else {})}
                     for call in raw_calls_by_session.get(nested_id, [])
                 ]
                 inferred = {
