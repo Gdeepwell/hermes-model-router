@@ -267,6 +267,44 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class ClaudeReasoningConfigTests(unittest.TestCase):
+    def test_defaults_expose_only_editable_sonnet_and_opus_levels(self):
+        self.assertEqual(
+            claude_delegation.reasoning_effort_config({"claude_delegation": {}}),
+            {"sonnet": "medium", "opus": "medium"},
+        )
+
+    def test_invalid_or_haiku_config_values_fall_back_to_the_safe_default(self):
+        config = {"claude_delegation": {"reasoning_effort": {
+            "sonnet": " HIGH ", "opus": "external", "haiku": "xhigh",
+        }}}
+        self.assertEqual(
+            claude_delegation.reasoning_effort_config(config),
+            {"sonnet": "high", "opus": "medium"},
+        )
+
+
+class ReasoningBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_a_missing_runtime_resolver_is_reported_as_unavailable(self):
+        fake = types.ModuleType("tools.delegate_tool")
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertFalse(ok)
+        self.assertIn("_resolve_child_runtime", reason)
+
+    def test_the_bridge_install_is_idempotent_and_records_availability(self):
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+        # Re-install must be a no-op that still reports available (idempotent).
+        ok2, reason2 = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok2, reason2)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+
 class RegisterTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(setattr, claude_delegation, "_ACTIVE", False)

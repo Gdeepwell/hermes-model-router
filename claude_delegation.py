@@ -21,7 +21,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
@@ -37,11 +37,16 @@ TIERS: Tuple[str, ...] = ("haiku", "sonnet", "opus")
 TARGET_FOR_TIER: Dict[str, str] = {"haiku": "haiku", "sonnet": "sonnet5", "opus": "opus5"}
 TIER_FOR_TARGET: Dict[str, str] = {target: tier for tier, target in TARGET_FOR_TIER.items()}
 
+EDITABLE_REASONING_TIERS: Tuple[str, ...] = ("sonnet", "opus")
+REASONING_LEVELS: Tuple[str, ...] = ("low", "medium", "high", "xhigh")
+DEFAULT_REASONING_EFFORT: Dict[str, str] = {"sonnet": "medium", "opus": "medium"}
+
 DEFAULTS: Dict[str, Any] = {
     "enabled": False,
     "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
     "log_path": "",
+    "reasoning_effort": dict(DEFAULT_REASONING_EFFORT),
 }
 
 _ACTIVE = False
@@ -73,6 +78,197 @@ def request_scope(active: bool) -> Iterator[None]:
         _REQUEST_ACTIVE.reset(token)
 
 
+# ---------------------------------------------------------------------------
+# Reasoning-effort compatibility bridge
+#
+# Hermes copies a delegating parent's ``reasoning_config`` verbatim into every
+# child it spawns (see ``tools.delegate_tool_config._resolve_child_runtime``).
+# That leaves no way for this plugin to give a Claude Sonnet/Opus child its own
+# per-tier reasoning effort without either forking Hermes's private resolver or
+# mutating shared parent/config state (which would leak across concurrent
+# delegations). Instead, install_reasoning_bridge() wraps the *module global*
+# Hermes's own call site (tools.delegate_tool._resolve_child_runtime) actually
+# calls, and the wrapper only ever substitutes ``reasoning_config`` while a
+# ContextVar scope set by the active delegate_claude call is live, and only for
+# the exact child it was set for. Outside that narrow window -- including any
+# other concurrent delegation, any non-Anthropic child, or any host that lacks
+# this private seam -- the original Hermes behavior is untouched.
+
+
+@dataclass(frozen=True)
+class _ReasoningScope:
+    """One delegate_claude call's claim on the next matching child's reasoning.
+
+    ``parent`` is compared by identity, so unrelated concurrent delegations from
+    other parents (or other tasks under the same parent) never match.
+    """
+
+    parent: Any
+    tier: str
+    model: str
+    reasoning_config: Dict[str, Any]
+
+
+_REASONING_SCOPE: ContextVar[Optional[_ReasoningScope]] = ContextVar(
+    "claude_delegation_reasoning_scope", default=None
+)
+
+_REASONING_BRIDGE_LOCK = threading.Lock()
+_REASONING_BRIDGE_INSTALLED = False
+_REASONING_BRIDGE_REASON = "not yet installed"
+_REASONING_BRIDGE_ORIGINAL: Optional[Callable[..., Any]] = None
+
+
+@contextmanager
+def reasoning_scope(parent: Any, tier: str, model: str, reasoning_config: Dict[str, Any]) -> Iterator[None]:
+    """Claim the next matching Anthropic child's reasoning_config for this call.
+
+    Task 2 sets this around the delegate_task call inside ``_dispatch``.
+    """
+    token = _REASONING_SCOPE.set(_ReasoningScope(parent, tier, model, dict(reasoning_config)))
+    try:
+        yield
+    finally:
+        _REASONING_SCOPE.reset(token)
+
+
+def _wrap_resolve_child_runtime(original: Callable[..., Any]) -> Callable[..., Any]:
+    signature = inspect.signature(original)
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        scope = _REASONING_SCOPE.get()
+        if scope is None:
+            return result
+        try:
+            bound = signature.bind_partial(*args, **kwargs)
+        except TypeError:
+            return result
+        arguments = bound.arguments
+        parent_agent = arguments.get("parent_agent")
+        override_provider = arguments.get("override_provider")
+        if parent_agent is not scope.parent or override_provider != "anthropic":
+            return result
+        model = None
+        if isinstance(result, dict):
+            model = result.get("model")
+        if model is None:
+            model = arguments.get("model")
+        if model != scope.model:
+            return result
+        if isinstance(result, dict):
+            return dict(result, reasoning_config=dict(scope.reasoning_config))
+        return result
+
+    return wrapper
+
+
+def install_reasoning_bridge() -> Tuple[bool, str]:
+    """Idempotently install the reasoning-effort bridge onto the real host seam.
+
+    Safe to call repeatedly (e.g. once per registration): a prior successful
+    install is a no-op, and a prior failure is retried since the host may have
+    changed (mainly relevant to tests that swap ``sys.modules`` entries).
+    """
+    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL
+    with _REASONING_BRIDGE_LOCK:
+        try:
+            import sys as _sys
+
+            # Read back through sys.modules rather than `import ... as name`: once a
+            # submodule has been imported, a plain dotted import can bind through the
+            # parent package's cached attribute instead of a swapped-in sys.modules
+            # entry (as tests do via unittest.mock.patch.dict(sys.modules, ...)).
+            import tools.delegate_tool  # noqa: F401  (ensures it's importable / triggers ImportError)
+            import tools.delegate_tool_config  # noqa: F401
+            delegate_tool = _sys.modules["tools.delegate_tool"]
+            delegate_tool_config = _sys.modules["tools.delegate_tool_config"]
+        except Exception as exc:
+            _REASONING_BRIDGE_INSTALLED = False
+            _REASONING_BRIDGE_REASON = f"Hermes delegation API not importable ({type(exc).__name__}: {exc})"
+            return False, _REASONING_BRIDGE_REASON
+
+        current = getattr(delegate_tool, "_resolve_child_runtime", None)
+        if current is None:
+            _REASONING_BRIDGE_INSTALLED = False
+            _REASONING_BRIDGE_REASON = "tools.delegate_tool has no _resolve_child_runtime to wrap"
+            return False, _REASONING_BRIDGE_REASON
+
+        already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _wrapped_marker_target()
+        if already_wrapped:
+            _REASONING_BRIDGE_INSTALLED = True
+            _REASONING_BRIDGE_REASON = ""
+            return True, ""
+
+        original_from_config = getattr(delegate_tool_config, "_resolve_child_runtime", None)
+        if current is not original_from_config:
+            _REASONING_BRIDGE_INSTALLED = False
+            _REASONING_BRIDGE_REASON = (
+                "tools.delegate_tool._resolve_child_runtime is not the same callable as "
+                "tools.delegate_tool_config._resolve_child_runtime; the host seam has moved"
+            )
+            return False, _REASONING_BRIDGE_REASON
+
+        try:
+            signature = inspect.signature(current)
+        except (TypeError, ValueError) as exc:
+            _REASONING_BRIDGE_INSTALLED = False
+            _REASONING_BRIDGE_REASON = f"could not inspect _resolve_child_runtime's signature: {exc}"
+            return False, _REASONING_BRIDGE_REASON
+
+        required = ("parent_agent", "model", "override_provider")
+        missing = [name for name in required if name not in signature.parameters]
+        if missing:
+            _REASONING_BRIDGE_INSTALLED = False
+            _REASONING_BRIDGE_REASON = "_resolve_child_runtime lacks " + ", ".join(missing)
+            return False, _REASONING_BRIDGE_REASON
+
+        try:
+            wrapper = _wrap_resolve_child_runtime(current)
+            setattr(delegate_tool, "_resolve_child_runtime", wrapper)
+        except Exception as exc:
+            _REASONING_BRIDGE_INSTALLED = False
+            _REASONING_BRIDGE_REASON = f"installing the reasoning bridge failed: {type(exc).__name__}: {exc}"
+            return False, _REASONING_BRIDGE_REASON
+
+        _REASONING_BRIDGE_ORIGINAL = current
+        globals()["_reasoning_bridge_wrapper_marker"] = wrapper
+        _REASONING_BRIDGE_INSTALLED = True
+        _REASONING_BRIDGE_REASON = ""
+        return True, ""
+
+
+def _wrapped_marker_target() -> Any:
+    return globals().get("_reasoning_bridge_wrapper_marker")
+
+
+def reasoning_bridge_status() -> Tuple[bool, str]:
+    """Whether the reasoning-effort bridge is installed, and why not when it isn't."""
+    return _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON
+
+
+def _reset_reasoning_bridge_for_tests() -> None:
+    """Test-only: restore the real host's ``_resolve_child_runtime`` and bridge state.
+
+    Never leaves a wrapped host function installed for later, unrelated test
+    modules or a live process.
+    """
+    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL
+    with _REASONING_BRIDGE_LOCK:
+        original = _REASONING_BRIDGE_ORIGINAL
+        if original is not None:
+            try:
+                import tools.delegate_tool as delegate_tool
+                if getattr(delegate_tool, "_resolve_child_runtime", None) is _wrapped_marker_target():
+                    delegate_tool._resolve_child_runtime = original
+            except Exception:
+                pass
+        _REASONING_BRIDGE_ORIGINAL = None
+        _REASONING_BRIDGE_INSTALLED = False
+        _REASONING_BRIDGE_REASON = "not yet installed"
+        globals().pop("_reasoning_bridge_wrapper_marker", None)
+
+
 # Hermes's Tool Search defers plugin tools: a live parent request carries only the
 # tool_search/tool_describe/tool_call bridge, and delegate_claude is reached through
 # tool_call. Whether it is in that session's deferred scope follows tool_available().
@@ -101,6 +297,23 @@ def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def tier_model(tier: str, cfg: Dict[str, Any]) -> str:
     return str(delegation_config(cfg)["tiers"].get(tier) or "").strip()
+
+
+def reasoning_effort_config(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Normalized editable per-tier reasoning levels: only ``sonnet`` and ``opus``.
+
+    Unset or invalid values (including ``haiku``, which is not editable here)
+    fall back to the safe default rather than raising or propagating garbage
+    into a child's ``reasoning_config``.
+    """
+    raw = delegation_config(cfg).get("reasoning_effort")
+    raw = raw if isinstance(raw, dict) else {}
+    values = dict(DEFAULT_REASONING_EFFORT)
+    for tier in EDITABLE_REASONING_TIERS:
+        value = raw.get(tier)
+        if isinstance(value, str) and value.strip().casefold() in REASONING_LEVELS:
+            values[tier] = value.strip().casefold()
+    return values
 
 
 def target_names(cfg: Dict[str, Any]) -> Tuple[str, ...]:
