@@ -97,6 +97,12 @@ The user-facing conversation stays on one durable parent model. Classifier resul
 - The router does not raise host limits.
 - Handoff capsule required for every worker task
 
+On current Hermes, forced planning uses one `tasks` entry and puts the routing
+contract in that entry's `context`. Legacy single-goal hosts remain supported.
+The router advertises a `model` parameter only when the host exposes it; otherwise
+Codex labels choose models within the configured provider and Claude workers use
+`delegate_claude`.
+
 ### Claude targets
 
 Claude is reached like any other delegation target — `model: "opus5"` or

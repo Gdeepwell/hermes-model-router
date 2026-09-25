@@ -2411,7 +2411,7 @@ def _leaf_label_contract(cfg: Optional[Dict[str, Any]] = None) -> str:
         return ""
     return (
         f"Begin every worker goal with that leaf's own tier label in square brackets "
-        f"({', '.join(labels)}), matching the same leaf's model: parameter. This is not optional "
+        f"({', '.join(labels)}), matching the chosen worker route. This is not optional "
         "and not only for design or read-only leaves: a goal that starts with no label is "
         "re-classified from its own text, and there a single mention of UI, UX, CSS, layout or "
         "styling is read as design work and forces the leaf onto Sol no matter how read-only it "
@@ -2447,11 +2447,16 @@ def _model_param_contract(
     preference_names = [
         name for name in _delegation_target_names() if _target_is_offered(name, cfg)
     ]
+    if not model_param:
+        reachable = lambda n: (_account_of(n, cfg) == cfg.get("provider", "openai-codex")
+                               or (claude_delegation.is_active() and n in claude_delegation.TIER_FOR_TARGET))
+        names = [n for n in names if reachable(n)]
+        preference_names = [n for n in preference_names if reachable(n)]
     notes = _target_availability(names, cfg)
     scope = (
         f" (targets: {', '.join(name + notes.get(name, '') for name in names)})" if names else ""
     )
-    if model_param or not claude_delegation.is_active():
+    if model_param:
         opening = (
             f"Set the delegate_task 'model' parameter on every worker to choose its route{scope}. "
             "A goal-text prefix only renames the model inside the default provider and cannot reach a "
@@ -2471,7 +2476,7 @@ def _model_param_contract(
             "returned for re-dispatch. Claude targets are reached only by calling delegate_claude with tier "
             "\"haiku\", \"sonnet\" or \"opus\". "
         ) + _DEFERRED_DELEGATION_HINT
-    else:
+    elif model_param:
         # The general rule was already here and lost anyway, seven goals running.
         # It shares a paragraph with [spark]/[sol], which *are* prefixes, so
         # [opus5] is the obvious blend of the two mechanisms -- and it silently
@@ -2482,6 +2487,8 @@ def _model_param_contract(
             "and the leaf runs on this provider -- so it is stopped at its first call and returned "
             "for re-dispatch. Name those targets only in the model parameter. "
         )
+    else:
+        claude_rule = "Cross-account targets cannot be reached through delegate_task on this host. "
     return (
         opening
         + claude_rule
@@ -2494,13 +2501,13 @@ def _model_param_contract(
         # With the operator's code chain making opus5 the conductor, that dropped
         # opus5 -- the one leaf the rule was written from -- out of its own rule.
         f"{_recon_before_expensive_target_sentence(preference_names, cfg)}"
-        f"{_preference_sentence(preference_names, cfg)}"
+        f"{_preference_sentence(preference_names, cfg, model_param=model_param)}"
         f"{_goal_orientation_sentence()}"
         f"{_account_load_sentence(cfg)}"
     )
 
 
-def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
+def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any], *, model_param: bool = True) -> str:
     """State the operator's per-work-kind target order to the conductor.
 
     The router cannot route across providers, so a preference naming an external
@@ -2548,7 +2555,8 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any]) -> str:
         "and it decides which call carries the leaf: a Claude target goes through delegate_claude with its "
         "tier, any other target through delegate_task. "
         if claude_delegation.is_active() else
-        "and it decides the leaf's model: parameter. "
+        "and it decides the leaf's model: parameter. " if model_param else
+        "and it decides the leaf's goal-prefix route inside the configured provider. "
     )
     return (
         "The operator's target order per kind of work, highest priority first -- "
@@ -2565,7 +2573,7 @@ def _worker_order_note(request: Dict[str, Any], cfg: Dict[str, Any]) -> str:
     """Refresh a conductor's capacity advice without reclassifying its goal."""
     if _find_delegate_tool(request) is None and not claude_delegation.offered(_tool_names(request)):
         return ""
-    order = _preference_sentence(_delegation_target_names(), cfg)
+    order = _preference_sentence(_delegation_target_names(), cfg, model_param=_host_delegate_has_model(request))
     return ("\n\n[ROUTER] Current worker order replaces earlier capacity advice. " + order) if order else ""
 
 
@@ -2910,11 +2918,15 @@ def _prepare_orchestration_delegation(
     if claude_tool is None:
         claude_target = ""
     model_param = _host_delegate_has_model(request)
+    original_tool = _find_delegate_tool(request)
+    owner, key = _tool_schema_slot(original_tool) if original_tool else ({}, "")
+    batch_shape = "tasks" in ((owner.get(key) or {}).get("properties") or {})
+    planner_call = 'delegate_task with one tasks entry' if batch_shape else 'delegate_task with role="orchestrator"'
     claude_hint = (
         "For real work prefer a native Claude worker through delegate_claude when one is offered. "
         + _DEFERRED_DELEGATION_HINT
         if claude_delegation.is_active() else
-        "For real work prefer a native Claude target via model:opus5 / model:sonnet5 when one is offered. "
+        "For real work use a reachable worker route. "
     )
     if claude_target:
         claude_tier = claude_delegation.TIER_FOR_TARGET[claude_target]
@@ -2928,12 +2940,12 @@ def _prepare_orchestration_delegation(
                '(tier, tasks). ' if via_bridge else "")
             + "Take this route unless the work needs several workers; on it there is no conductor, and you accept "
             "or reject the Claude worker's result yourself. "
-            f"CONDUCTOR ROUTE: otherwise call delegate_task with role=\"orchestrator\" and a goal beginning with "
+            f"CONDUCTOR ROUTE: otherwise call {planner_call} and a goal beginning with "
             f"[{orchestrator_tier}]. "
         )
     else:
         lead = (
-            f"Plan ID: {plan_id}. Before any normal tool action, call delegate_task exactly once with role=\"orchestrator\" "
+            f"Plan ID: {plan_id}. Before any normal tool action, call {planner_call} exactly once "
             f"and a goal beginning with [{orchestrator_tier}]. "
             + (f"Balanced: {balanced}, so this turn's delegation stays off Claude. " if balanced else "")
         )
@@ -2977,18 +2989,26 @@ def _prepare_orchestration_delegation(
     schema = schema_owner.get(schema_key)
     if isinstance(schema, dict):
         properties = schema.setdefault("properties", {})
-        properties["role"] = {
-            "type": "string",
-            "enum": ["orchestrator"],
-            "description": f"Required fixed role for the {orchestrator_tier} planning child.",
-        }
+        if batch_shape:
+            tasks_schema = properties["tasks"]
+            tasks_schema["minItems"] = tasks_schema["maxItems"] = 1
+            schema["required"] = list(dict.fromkeys([*(schema.get("required") or []), "tasks"]))
+            schema = tasks_schema["items"]
+            properties = schema.setdefault("properties", {})
+        properties.setdefault("goal", {"type": "string"})
+        if not batch_shape:
+            properties["role"] = {
+                "type": "string",
+                "enum": ["orchestrator"],
+                "description": f"Required fixed role for the {orchestrator_tier} planning child.",
+            }
         # This travels in the actual delegated child's system prompt. It avoids
         # relying on the parent model to faithfully copy the planner contract
         # into a free-form goal/context field.
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] and model:sol. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg, model_param='model' in properties)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] {'and model:sol' if model_param else 'inside the configured provider'}. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg, model_param=model_param)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -3011,7 +3031,7 @@ def _prepare_orchestration_delegation(
         else:
             pinned_model = False
         required = list(schema.get("required") or [])
-        for name in ("goal", "role", "context") + (("model",) if pinned_model else ()):
+        for name in ("goal", "context") + (() if batch_shape else ("role",)) + (("model",) if pinned_model else ()):
             if name not in required:
                 required.append(name)
         schema["required"] = required

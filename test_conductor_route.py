@@ -128,6 +128,36 @@ class HostCapabilityTests(unittest.TestCase):
         import model_router as router
         with patch('tools.delegate_tool_config._get_max_spawn_depth', return_value=1):
             self.assertFalse(router._host_delegation_limits()['conductor_available'])
+
         with patch('tools.delegate_tool_config._get_max_spawn_depth', return_value=2), \
              patch('tools.delegate_tool_config._get_orchestrator_enabled', return_value=False):
             self.assertFalse(router._host_delegation_limits()['conductor_available'])
+
+
+class BatchSchemaTests(unittest.TestCase):
+    def test_real_host_batch_schema_preserves_child_contract(self):
+        from copy import deepcopy
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        from tools.delegate_tool_tasks import _normalize_task_list
+        request = {'messages': [{'role': 'user', 'content': 'Implement parser'}],
+                   'tools': [deepcopy(DELEGATE_TASK_SCHEMA)]}
+        routed = _prepare_orchestration_delegation(request, 'batch-test', 2, cfg=_load_config())
+        schema = routed['tools'][0]['parameters']
+        self.assertTrue(set(schema['required']) <= set(schema['properties']))
+        tasks = schema['properties']['tasks']
+        self.assertEqual((tasks['minItems'], tasks['maxItems']), (1, 1))
+        context = tasks['items']['properties']['context']['enum'][0]
+        normalized, error = _normalize_task_list(None, None, [{'goal': '[terra] Implement parser',
+                                                'context': context}], None, 'leaf', 3)
+        self.assertIsNone(error)
+        self.assertEqual(normalized[0]['context'], context)
+        self.assertIn('context', tasks['items']['required'])
+        self.assertNotIn('model:sol', context)
+
+    def test_no_model_contract_does_not_request_a_model_parameter(self):
+        from unittest.mock import patch
+        from model_router import claude_delegation
+        with patch.object(claude_delegation, '_ACTIVE', False):
+            text = _model_param_contract('terra', _load_config(), model_param=False)
+        self.assertNotIn("Set the delegate_task 'model' parameter", text)
+        self.assertNotIn('Name those targets only in the model parameter', text)
