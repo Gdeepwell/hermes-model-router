@@ -222,14 +222,10 @@ its own provider, so a parent on a fallback account silently lost its contract
 and worked alone. A second gate compounded it by recognising only Sol and
 `default_model` as orchestrators.
 
-The forced conductor follows the `code` preference chain when one is set, then
-`default_model` when that tier is callable, then its `fallbacks` chain. Planning and
-coordination are code work, and the conductor is not cheap: six consecutive
-conductors on the Codex account each ran to the 16-iteration cap and spent 36% of a
-five-hour limit before a leaf did any real work. Putting `opus5` first in `code`
-moves the planning to another subscription and leaves the primary quota for the
-work itself. Pinning it to `default_model` regardless was also how the preflight
-used to fail exactly when it was needed — on the account that had just run out.
+The forced conductor uses `orchestration.conductor`, then the callable
+`default_model` and its fallback chain. Worker preference chains such as `code`
+choose implementation workers independently. The host must allow a conductor
+to spawn children; with a one-level limit, the parent coordinates direct workers.
 
 One more thing had to change for this to actually fire. An Anthropic OAuth request
 is normalised for Claude Code compatibility, which renames every tool to
@@ -335,6 +331,17 @@ cannot name something the installation cannot run. Because this file is not the
 router's — it also carries providers, approvals and the command allowlist — every
 save first copies it to `config.yaml.bak-router-<timestamp>`, and a config that
 cannot be read is refused rather than overwritten.
+
+The delegated-worker fallback chain applies to native `delegate_task` workers.
+`delegate_claude` supplies no fallback providers: a failure returns to the parent
+for an explicit re-dispatch through the current worker order. The dashboard
+states this distinction beside the worker fallback control.
+
+Settings saves validate both configuration documents before writing. The page
+queues edits and sends a revision token; conflicting saves require a reload.
+Each file is replaced atomically, and a failed router write restores the previous
+Hermes document unless another writer has changed it in the meantime. This
+protects ordinary save failures; it is not a cross-file crash transaction.
 
 ### Reasoning effort per tier
 
@@ -1233,7 +1240,7 @@ Use a fresh `RUN` for every run. Some tests still write the default orchestratio
 log inside that home, and `test_root_parent_is_pinned_when_classifier_wants_sol_worker`
 fails on a second run over the same one.
 
-Every test is a `unittest.TestCase`, so the command above collects all 680. They
+Every test is a `unittest.TestCase`, so the command above collects the full suite. They
 were not always: `test_artifact_name.py`, `test_leaf_label_contract.py` and
 `test_callable_and_qwen_guards.py` held 25 tests written as module-level
 `def test_*` functions. unittest never collects those, so the first two reported
