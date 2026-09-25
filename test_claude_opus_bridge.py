@@ -23,9 +23,12 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
                 dispatch(
                     "[opus-review] Review only", Path(directory), review=True,
                     parent_session_id="parent-session", parent_turn_id="parent-turn",
-                    lifecycle_path=lifecycle,
+                    lifecycle_path=lifecycle, max_turns=12, max_budget_usd=2.5,
                 )
             events = [json.loads(line) for line in lifecycle.read_text().splitlines()]
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--max-turns") + 1], "12")
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.50")
         self.assertEqual([event["event"] for event in events], ["started", "terminal"])
         self.assertEqual({event["bridge_run_id"] for event in events}, {events[0]["bridge_run_id"]})
         self.assertEqual(events[0]["parent_session_id"], "parent-session")

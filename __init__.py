@@ -4325,6 +4325,12 @@ def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False
         review=review,
         model=model,
         timeout=int(coding_cfg.get("timeout_seconds", 300)),
+        max_turns=coding_cfg.get("max_turns"),
+        max_budget_usd=coding_cfg.get("max_budget_usd", 5.0),
+        parent_session_id=str(context.get("parent_session_id") or context.get("session_id")
+                              or str(context.get("turn_id") or "").split(":", 1)[0]),
+        parent_turn_id=str(context.get("parent_turn_id") or context.get("turn_id") or ""),
+        lifecycle_path=hermes_path(coding_cfg["lifecycle_path"]) if coding_cfg.get("lifecycle_path") else None,
     )
 
 
@@ -4404,6 +4410,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
                 model=alias,
                 cfg=cfg,
                 turn_id=str(kwargs.get("turn_id") or ""),
+                parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
+                parent_turn_id=kwargs.get("parent_turn_id"),
                 provider=str(kwargs.get("provider") or ""),
             )
             return _opus5_response(result)
@@ -4420,6 +4428,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             model=alias,
             cfg=cfg,
             turn_id=str(kwargs.get("turn_id") or ""),
+            parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
+            parent_turn_id=kwargs.get("parent_turn_id"),
             provider=str(kwargs.get("provider") or ""),
         )
         return _opus5_response(result)
@@ -4432,6 +4442,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             model=alias,
             cfg=cfg,
             turn_id=str(kwargs.get("turn_id") or ""),
+            parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
+            parent_turn_id=kwargs.get("parent_turn_id"),
             provider=str(kwargs.get("provider") or ""),
         )
         return _opus5_response(result)
@@ -4457,6 +4469,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         model=alias,
         cfg=cfg,
         turn_id=str(kwargs.get("turn_id") or ""),
+        parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
+        parent_turn_id=kwargs.get("parent_turn_id"),
         api_request_id=str(kwargs.get("api_request_id") or ""),
         provider=str(kwargs.get("provider") or ""),
     )

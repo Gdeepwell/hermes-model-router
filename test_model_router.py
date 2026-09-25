@@ -1918,7 +1918,7 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIs(response, sentinel)
 
     def test_runtime_opus_bridge_uses_the_real_dispatch_entrypoint(self):
-        cfg = {"coding_agent": {"timeout_seconds": 300}}
+        cfg = {"coding_agent": {"timeout_seconds": 300, "max_turns": 12, "max_budget_usd": 2.5}}
         expected = {"result": "ok", "model": "claude-opus-5-5"}
         with tempfile.TemporaryDirectory() as repo, patch(
             "model_router.claude_opus_bridge.dispatch", return_value=expected
@@ -1930,11 +1930,15 @@ class ModelRouterTests(unittest.TestCase):
                 task="Inspect the parser.",
                 write=False,
                 cfg=cfg,
-                turn_id="entrypoint-test",
+                turn_id="parent:entrypoint-test",
             )
 
         dispatch.assert_called_once()
         self.assertEqual(result, expected)
+        self.assertEqual(dispatch.call_args.kwargs["parent_session_id"], "parent")
+        self.assertEqual(dispatch.call_args.kwargs["parent_turn_id"], "parent:entrypoint-test")
+        self.assertEqual(dispatch.call_args.kwargs["max_turns"], 12)
+        self.assertEqual(dispatch.call_args.kwargs["max_budget_usd"], 2.5)
 
     def test_design_coding_call_stays_on_existing_sol_route(self):
         cfg = {

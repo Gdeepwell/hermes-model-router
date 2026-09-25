@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -152,7 +153,7 @@ def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, ma
 
 
 def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False, timeout: int | None = None,
-             max_turns: int | None = None, model: str | None = None,
+             max_turns: int | None = None, model: str | None = None, max_budget_usd: float = 5.0,
              parent_session_id: str | None = None, parent_turn_id: str | None = None,
              lifecycle_path: Path | None = None) -> dict[str, Any]:
     if review and write:
@@ -177,6 +178,9 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
     resolved_max_turns = max_turns if max_turns is not None else (DEFAULT_REVIEW_MAX_TURNS if review else DEFAULT_CODING_MAX_TURNS)
     if resolved_max_turns < 1:
         raise ValueError("max_turns must be positive")
+    budget = float(max_budget_usd)
+    if not math.isfinite(budget) or budget <= 0:
+        raise ValueError("max_budget_usd must be positive and finite")
     default_timeout = DEFAULT_REVIEW_TIMEOUT_SECONDS if review else DEFAULT_CODING_TIMEOUT_SECONDS
     resolved_timeout = default_timeout if timeout is None else timeout
     if resolved_timeout < 1:
@@ -196,7 +200,7 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
     # stdin when no positional prompt is supplied.
     command = [
         "claude", "-p", "--model", alias,
-        "--max-turns", str(resolved_max_turns), "--max-budget-usd", "5.00", "--output-format", "json",
+        "--max-turns", str(resolved_max_turns), "--max-budget-usd", f"{budget:.2f}", "--output-format", "json",
     ]
     # Results are accepted only when Claude reports the requested canonical tier.
     # Do not request a lower-tier fallback that this contract must reject.
@@ -214,6 +218,7 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         "schema_version": 1, "bridge_run_id": bridge_run_id,
         "parent_session_id": parent_session_id or "", "parent_turn_id": parent_turn_id or "",
         "review": review, "requested_read_only": not write, "pid": os.getpid(),
+        "requested_model": expected_model,
         "process_started_at": _process_start_identity(os.getpid()),
     }
     _append_lifecycle(lifecycle_path, {**base_event, "event": "started", "state": "running", "timestamp": started_at})
@@ -223,6 +228,10 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "timeout",
                                           "timestamp": time.time(), "duration_seconds": time.time() - started_at})
         raise RuntimeError("Claude Code timed out") from exc
+    except OSError:
+        _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "error",
+                                          "timestamp": time.time(), "duration_seconds": time.time() - started_at})
+        raise
     if completed.returncode:
         _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "error",
                                           "timestamp": time.time(), "duration_seconds": time.time() - started_at,

@@ -509,15 +509,19 @@ def load_agent_activity(
         evidence = terminal or started_event
         run_id = str(run["bridge_run_id"])
         bridge_run_ids.append(run_id)
-        calls = [{"tier": "opus5", "model": evidence.get("canonical_model"), "effort": "external"}] if evidence.get("canonical_model") else []
+        model = str(evidence.get("canonical_model") or started_event.get("requested_model") or "")
+        tier = "sonnet5" if "sonnet" in model else "opus5" if "opus" in model else "claude"
+        label = {"sonnet5": "Sonnet", "opus5": "Opus"}.get(tier, "Claude")
+        work = "review" if evidence.get("review") else "worker"
+        calls = [{"tier": tier, "model": evidence.get("canonical_model"), "effort": "external"}] if evidence.get("canonical_model") else []
         child = {
-            "id": run_id, "bridge_run_id": run_id, "goal": "Opus review",
-            "task_description": "Claude Opus 5.5 · külső Claude Code reviewer",
+            "id": run_id, "bridge_run_id": run_id, "goal": f"{label} {work}",
+            "task_description": f"{model or label} · Claude Code {work}",
             "reason": "Külső Claude Code review", "external": True,
             "access_mode": "read_only" if evidence.get("review") else ("requested_read_only" if evidence.get("requested_read_only") else "standard"),
             "state": state, "model": evidence.get("canonical_model") or "",
             "model_source": "modelUsage" if evidence.get("canonical_model") else "unverified",
-            "routed_calls": calls, "toolsets": ["Read"],
+            "routed_calls": calls, "toolsets": ["Read"] if evidence.get("requested_read_only") or evidence.get("review") else ["Read", "Edit", "Write", "Bash"],
             "started_at": float(started_event.get("timestamp") or 0),
             "updated_at": float(evidence.get("timestamp") or started_event.get("timestamp") or 0),
             "age_seconds": round(float(evidence.get("duration_seconds") or max(0, now - float(started_event.get("timestamp") or now)))),

@@ -34,15 +34,16 @@ class AgentActivityTests(unittest.TestCase):
             lifecycle = Path(directory) / "bridge.jsonl"
             lifecycle.write_text("\n".join(map(json.dumps, [
                 {"bridge_run_id":"run-1","event":"started","state":"running","timestamp":20,"parent_session_id":"parent","parent_turn_id":"parent:turn","pid":999999,"review":True,"requested_read_only":True},
-                {"bridge_run_id":"run-1","event":"terminal","state":"success","timestamp":25,"parent_session_id":"parent","parent_turn_id":"parent:turn","canonical_model":"claude-opus-5-5","num_turns":2,"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"total_cost_usd":0.1,"duration_seconds":5,"review":True,"requested_read_only":True},
+                {"bridge_run_id":"run-1","event":"terminal","state":"success","timestamp":25,"parent_session_id":"parent","parent_turn_id":"parent:turn","canonical_model":"claude-sonnet-5","num_turns":2,"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"total_cost_usd":0.1,"duration_seconds":5,"review":True,"requested_read_only":True},
                 {"bridge_run_id":"run-1","event":"terminal","state":"success","timestamp":24,"parent_session_id":"parent"},
             ]))+"\n")
             router = Path(directory) / "router.jsonl"
-            router.write_text(json.dumps({"turn_id":"run-1:2","tier":"opus5","model":"claude-opus-5-5","effort":"external"})+"\n")
+            router.write_text(json.dumps({"turn_id":"run-1:2","tier":"sonnet5","model":"claude-sonnet-5","effort":"external"})+"\n")
             activity = load_agent_activity(db_path, now=30, router_log_path=router, bridge_lifecycle_path=lifecycle)
         self.assertEqual(len(activity["parents"]), 1)
         child = activity["parents"][0]["children"][0]
-        self.assertEqual((child["id"], child["goal"], child["state"], child["model"]), ("run-1", "Opus review", "success", "claude-opus-5-5"))
+        self.assertEqual((child["id"], child["goal"], child["state"], child["model"]), ("run-1", "Sonnet review", "success", "claude-sonnet-5"))
+        self.assertEqual(child["routed_calls"][0]["tier"], "sonnet5")
         self.assertEqual(child["api_calls"], 2)
         self.assertEqual(child["metrics"]["input_tokens"], 10)
         self.assertEqual(child["access_mode"], "read_only")
