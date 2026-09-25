@@ -1735,13 +1735,15 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         card = self._card("anthropic", self.CLAUDE_INFO)
         switch = re.search(r'<div class="model-switch[^\"]*">(?:(?!</div>).)*data-model="haiku"(?:(?!</div>).)*</div>', card, re.DOTALL)
         self.assertIsNotNone(switch)
-        self.assertRegex(switch.group(0), r'<select disabled><option>settings.claude_effort.haiku_no_reasoning</option></select>')
+        self.assertRegex(switch.group(0), r'<select class="effort-none" disabled><option>settings.claude_effort.haiku_no_reasoning</option></select>')
         self.assertNotIn('data-claude-effort=', switch.group(0))
 
     def test_dropdowns_share_a_fixed_width_css_rule(self):
         import re
-        self.assertRegex(HTML, r'\.account-card \.model-switch select\{[^}]*width:140px;[^}]*\}')
-        self.assertIn('grid-template-columns:44px max-content 140px', HTML)
+        self.assertRegex(HTML, r'\.account-card \.model-switch select\{[^}]*width:190px;[^}]*\}')
+        self.assertIn('grid-template-columns:44px max-content 190px', HTML)
+        # Haiku's placeholder is greyed out beyond the ordinary disabled look.
+        self.assertRegex(HTML, r'\.account-card \.model-switch select\.effort-none\{[^}]*opacity:[^}]*\}')
         self.assertIn('grid-template-columns:subgrid', HTML)
         self.assertIn('.model-list.no-effort{grid-template-columns:44px max-content}', HTML)
         self.assertIn('.model-switch .cooldown-pill{grid-column:1/-1', HTML)
@@ -3271,7 +3273,7 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
     def test_renderClaudeReasoningEffort_shows_haiku_as_a_disabled_placeholder(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
         self.assertIn("settings.claude_effort.haiku_no_reasoning", source)
-        self.assertIn('<select disabled><option>', source)
+        self.assertIn('<select class="effort-none" disabled><option>', source)
 
     def test_renderClaudeReasoningEffort_offers_exactly_the_four_shared_levels(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
