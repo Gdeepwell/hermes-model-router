@@ -748,7 +748,7 @@ class UsageStepDownIntegrationTests(unittest.TestCase):
     gates (forced preflight, forced shadow) have to see the request's original
     classification, not a tier the usage guard already moved it off of."""
 
-    def test_a_codex_root_request_at_the_soft_limit_steps_down_before_dispatch(self):
+    def test_a_codex_root_request_at_the_soft_limit_retains_its_route(self):
         cfg = _cfg(preferences=PREFS, provider="openai-codex",
                    orchestration={"enabled": False}, logging={"enabled": False},
                    shadow={"enabled": False})
@@ -769,10 +769,10 @@ class UsageStepDownIntegrationTests(unittest.TestCase):
             routed = route_llm_request(request=request, provider="openai-codex", model="gpt-terra",
                                        api_call_count=1, turn_id="root-turn", platform="cli")
         self.assertIsNotNone(routed)
-        self.assertEqual(routed["request"]["model"], "gpt-terra")
-        self.assertIn("usage soft limit: sol→terra", routed["reason"])
+        self.assertEqual(routed["request"]["model"], "gpt-sol")
+        self.assertNotIn("usage soft limit", routed["reason"])
         logged = log_decision.call_args.args[0]
-        self.assertIn("usage soft limit: sol→terra", logged.reason)
+        self.assertNotIn("usage soft limit", logged.reason)
         preflight_decision = preflight.call_args.args[2]
         self.assertEqual(preflight_decision.tier, "sol")
 
