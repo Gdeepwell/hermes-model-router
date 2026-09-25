@@ -310,6 +310,27 @@ chain arrived as "Honour these when a leaf matches the kind and the target is
 free" while an unconditional built-in default sat two sentences earlier — so
 `code -> model:opus5` never once decided a leaf.
 
+### Switched-off targets and `delegate_task`
+
+`delegate_task` offers every entry of Hermes's `delegation.targets`, whatever the
+dashboard says, so an agent can still call `delegate_task(model="qwen")` with Qwen
+switched off. The `llm_request` middleware notices, but Hermes logs a middleware
+error and sends the request unchanged — measured 2026-09-25, a Terra worker spawned
+a Qwen child that died on a 403. A `pre_tool_call` hook therefore checks the
+call-level and every per-task `model` (a full model name is mapped back to its
+tier) and blocks the call before anything spawns, naming a working route instead:
+
+```
+Delegation target "qwen" is switched off in the dashboard. Use model "terra" or
+delegate_claude with tier "opus" instead. Nothing was spawned.
+```
+
+A switched-off target is always refused. A target that is only cooling down is
+refused while `delegation.fallback_providers` is empty; with a worker chain Hermes
+can still move the child to another account. Names the router does not know are
+left to Hermes, other tools are never touched, and a failing check lets the call
+through.
+
 ### Hermes fallback chains
 
 The Settings tab also edits the two chains that live in **Hermes's** config rather
@@ -1279,6 +1300,10 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.17.1** — A `pre_tool_call` gate refuses a `delegate_task` that names a target
+switched off in the dashboard (or cooling down with no worker fallback chain) and
+points the agent at a working route; before, the call reached the disabled account.
 
 **1.17.0** — The Settings tab now edits the plain `effort` values for Luna,
 Spark, Terra and Sol. The picker offers the four shared provider levels — `low`,
