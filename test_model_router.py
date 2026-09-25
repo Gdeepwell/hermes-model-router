@@ -1833,7 +1833,7 @@ class ModelRouterTests(unittest.TestCase):
         return {
             "enabled": True,
             "provider": "openai-codex",
-            "models": MODELS, "callable": CALLABLE,
+            "models": MODELS, "callable": {**CALLABLE, "sonnet5": True},
             "coding_agent": {
                 # Deliberately off: the delegated path must not depend on the
                 # switch that also arms the label-free coding classifier.

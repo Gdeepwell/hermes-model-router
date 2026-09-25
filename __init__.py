@@ -4359,9 +4359,6 @@ def _opus5_response(result: Dict[str, Any]) -> Any:
 def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any) -> Optional[Any]:
     """Execute the first safe, non-design coding call through Claude Code OAuth."""
     coding_cfg = cfg.get("coding_agent") or {}
-    # Hard gate before any bridge import, auth probe, or subprocess launch.
-    if not _is_callable_tier("opus5", cfg):
-        return None
     if int(kwargs.get("api_call_count") or 1) != 1:
         return None
     if str(kwargs.get("api_mode") or "") != "codex_responses":
@@ -4371,6 +4368,19 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     if not isinstance(source_request, dict):
         source_request = request
     text = _last_user_text_and_index(_request_items(source_request))[0]
+
+    from .claude_opus_bridge import review_model_alias
+    alias = review_model_alias(text) or "opus"
+    target = {"opus": "opus5", "sonnet": "sonnet5"}[alias]
+    if not _is_callable_tier(target, cfg):
+        return None
+    if usage_guard.guarded("anthropic", cfg):
+        outcome = usage_guard.apply("anthropic", target, cfg, usage_guard.read("anthropic", cfg))
+        if outcome.refused or not _is_callable_tier(outcome.tier, cfg):
+            return None
+        alias = {"opus5": "opus", "sonnet5": "sonnet"}.get(outcome.tier)
+        if alias is None:
+            return None
 
     # A delegated review leaf runs on Claude and returns its verdict as the
     # leaf's answer. Restricted to delegated workers: the documented hazard of
@@ -4382,7 +4392,10 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     ):
         delegated = _verified_delegated_claude_review(text, cfg)
         if delegated is not None:
-            repo, alias = delegated
+            repo, _requested_alias = delegated
+            allowed = (coding_cfg.get("delegated_review") or {}).get("models")
+            if isinstance(allowed, list) and alias not in allowed:
+                return None
             result = _run_opus5_bridge(
                 repo=str(repo),
                 task=text,
@@ -4404,6 +4417,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             task=text,
             write=False,
             review=True,
+            model=alias,
             cfg=cfg,
             turn_id=str(kwargs.get("turn_id") or ""),
             provider=str(kwargs.get("provider") or ""),
@@ -4415,6 +4429,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             repo=str(explicit_ui_repo),
             task=f"[opus5] {text}",
             write=_opus5_write_intent(text),
+            model=alias,
             cfg=cfg,
             turn_id=str(kwargs.get("turn_id") or ""),
             provider=str(kwargs.get("provider") or ""),
@@ -4439,6 +4454,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         repo=str(repo_path.resolve()),
         task=text,
         write=_opus5_write_intent(text),
+        model=alias,
         cfg=cfg,
         turn_id=str(kwargs.get("turn_id") or ""),
         api_request_id=str(kwargs.get("api_request_id") or ""),
