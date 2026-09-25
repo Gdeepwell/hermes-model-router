@@ -39,6 +39,15 @@ fallback_providers: []
         self.assertEqual(self.hermes.read_bytes(), before)
         self.assertFalse(self.local.exists())
 
+    def test_unparseable_hermes_config_refusal_names_the_yaml_error(self):
+        self.hermes.write_text('plugins:\n  enabled:\n    - a\n  - b\n')
+        before = self.hermes.read_bytes()
+        message = web_viewer._save_hermes_fallback({'orchestrator': []}, {})
+        self.assertIn('refusing to overwrite', message)
+        self.assertIn('not valid YAML', message)
+        self.assertIn('line 4', message)
+        self.assertEqual(self.hermes.read_bytes(), before)
+
     def test_local_write_failure_restores_exact_hermes_content(self):
         before = self.hermes.read_bytes()
         real = web_viewer._atomic_write

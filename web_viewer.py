@@ -52,6 +52,22 @@ def _read_hermes_config() -> dict:
         return {}
 
 
+def _hermes_unreadable_message() -> str:
+    """Why a save refuses to touch the Hermes config, with the parse error when there is one."""
+    message = "The Hermes config could not be read; refusing to overwrite it"
+    if yaml is None or not HERMES_CONFIG_PATH.exists():
+        return message
+    try:
+        with open(HERMES_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())
+        return f"{message}: {HERMES_CONFIG_PATH} is not valid YAML ({detail}). Fix it and reload settings."
+    if loaded is not None and not isinstance(loaded, dict):
+        return f"{message}: {HERMES_CONFIG_PATH} is not a YAML mapping."
+    return message
+
+
 class HermesConfigChanged(RuntimeError):
     """~/.hermes/config.yaml changed between a save's read and its write."""
 
@@ -149,7 +165,7 @@ def _save_hermes_fallback(payload, router_cfg: dict, *, hermes=None, persist=Tru
     options = _fallback_chain_options(router_cfg)
     stamp, config = _read_hermes_snapshot() if hermes is None else (None, hermes)
     if not config:
-        return "The Hermes config could not be read; refusing to overwrite it"
+        return _hermes_unreadable_message()
     # Whatever is already saved is always accepted, even when it names a route the
     # picker no longer (or never did) offer -- a chain the operator already has
     # configured, elsewhere, must never be the reason a save 400s.
@@ -353,7 +369,7 @@ def _save_worker_model(tier, config: dict, *, hermes=None, persist=True):
         return f"'{tier}' cannot be the delegate_task worker model"
     stamp, hermes = _read_hermes_snapshot() if hermes is None else (None, hermes)
     if not hermes:
-        return "The Hermes config could not be read; refusing to overwrite it"
+        return _hermes_unreadable_message()
     delegation = hermes.get("delegation")
     if not isinstance(delegation, dict):
         delegation = {}
