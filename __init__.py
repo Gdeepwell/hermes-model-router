@@ -4598,7 +4598,99 @@ def on_subagent_stop(**kwargs: Any) -> None:
     )
 
 
+def _requested_delegation_targets(args: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[str, ...]:
+    """Router tiers a ``delegate_task`` call names: the call-level ``model`` and each task's.
+
+    A full model name (``qwen3.7-plus``) is mapped back to its tier. A name the
+    router does not know is left to Hermes: this gate only enforces the router's
+    own switches, not Hermes's target list.
+    """
+    by_model = {str(model): str(tier) for tier, model in (cfg.get("models") or {}).items()}
+    known = set(cfg.get("callable") or {}) | set(cfg.get("models") or {})
+    raw = [args.get("model")]
+    tasks = args.get("tasks")
+    if isinstance(tasks, list):
+        raw += [task.get("model") for task in tasks if isinstance(task, dict)]
+    names = []
+    for value in raw:
+        name = str(value or "").strip()
+        name = by_model.get(name, name.casefold())
+        if name in known and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _hermes_worker_fallback_configured() -> bool:
+    """Whether Hermes's ``delegation.fallback_providers`` names any route."""
+    if yaml is None:
+        return False
+    try:
+        raw = yaml.safe_load(_HERMES_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        chain = (raw.get("delegation") or {}).get("fallback_providers")
+        return isinstance(chain, list) and bool(chain)
+    except Exception:
+        return False
+
+
+def on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, **_: Any) -> Optional[Dict[str, str]]:
+    """Refuse a ``delegate_task`` that names a target switched off or cooling down.
+
+    ``delegate_task`` offers every entry of Hermes's ``delegation.targets``, so a
+    conductor can name ``model: "qwen"`` while the dashboard has Qwen off. The
+    ``llm_request`` middleware does notice -- but Hermes logs a middleware error and
+    sends the request unchanged, so the child still ran on the disabled account
+    (live 2026-09-25: a Terra worker spawned a Qwen reconnaissance child that
+    died on a 403). Blocking here stops the spawn before it happens and hands the
+    agent a working route instead. Fails open: a broken check never blocks work.
+
+    A target switched off is always refused: that is the operator's instruction.
+    A target merely cooling down is refused only while the worker fallback chain
+    is empty -- with one, Hermes can still move the child to another account,
+    which the router's own failover (one provider only) cannot.
+    """
+    if tool_name != "delegate_task" or not isinstance(args, dict):
+        return None
+    try:
+        cfg = _load_config()
+        switched_on = cfg.get("callable") or {}
+        rescued = None
+        blocked = []
+        for name in _requested_delegation_targets(args, cfg):
+            if _is_callable_tier(name, cfg):
+                continue
+            if switched_on.get(name) is True:  # only cooling down
+                if rescued is None:
+                    rescued = _hermes_worker_fallback_configured()
+                if rescued:
+                    continue
+            blocked.append(name)
+        if not blocked:
+            return None
+        claude_ok = claude_delegation.is_active()
+        parts = []
+        for name in blocked:
+            why = claude_delegation._unavailable(name, cfg) or "unavailable"
+            options = []
+            codex = claude_delegation.next_codex_route(name, cfg)
+            if codex:
+                options.append(f'model "{codex}"')
+            if claude_ok:
+                for peer in (name, *_peers_for(name, cfg)):
+                    tier = claude_delegation.TIER_FOR_TARGET.get(peer)
+                    if tier and _is_callable_tier(peer, cfg):
+                        options.append(f'delegate_claude with tier "{tier}"')
+                        break
+            hint = f" Use {' or '.join(options)} instead." if options else ""
+            parts.append(f'Delegation target "{name}" is {why}.{hint}')
+        _logger.warning("model_router blocked delegate_task to %s", ", ".join(blocked))
+        return {"action": "block", "message": " ".join(parts) + " Nothing was spawned."}
+    except Exception as exc:  # pragma: no cover - defensive
+        _logger.debug("delegate_task gate skipped: %s", exc)
+        return None
+
+
 def register(ctx: Any) -> None:
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_middleware("llm_request", route_llm_request)
     ctx.register_middleware("llm_execution", run_llm_with_transient_failover)
     ctx.register_hook("post_llm_call", on_post_llm_call)
