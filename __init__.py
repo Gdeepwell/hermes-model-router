@@ -2352,6 +2352,10 @@ def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
     tier: the dashboard toggle otherwise reads as if it governed Claude while
     changing nothing.
     """
+    if workflow_name(cfg) == "codex" and (name in claude_delegation.TIER_FOR_TARGET
+            or _account_of(name, cfg) == "anthropic"
+            or _delegation_targets_detail().get(name, {}).get("provider") == "anthropic"):
+        return False
     switches = cfg.get("callable") or {}
     # Deliberately not _is_callable_tier: that folds in the cooldown, and a
     # cooling target must stay visible. Hiding it invites the planner to route
@@ -4365,6 +4369,10 @@ def _opus5_response(result: Dict[str, Any]) -> Any:
 def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any) -> Optional[Any]:
     """Execute the first safe, non-design coding call through Claude Code OAuth."""
     coding_cfg = cfg.get("coding_agent") or {}
+    if workflow_name(cfg) == "codex":
+        return None
+    if not coding_cfg.get("enabled") and not (coding_cfg.get("delegated_review") or {}).get("enabled"):
+        return None
     if int(kwargs.get("api_call_count") or 1) != 1:
         return None
     if str(kwargs.get("api_mode") or "") != "codex_responses":

@@ -8,6 +8,10 @@ from . import usage_guard
 
 
 def refusal(account, tier, cfg, *, blocking=False):
+    if str(cfg.get("workflow") or "").strip().lower() == "codex" and (
+        account == "anthropic" or str(tier).startswith("claude-")
+    ):
+        return "Claude workers are disabled by workflow: codex. The parent model is unchanged."
     if not usage_guard.guarded(account, cfg):
         return ""
     reading = (usage_guard.read if blocking else usage_guard.peek)(account, cfg)

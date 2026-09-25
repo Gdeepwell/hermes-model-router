@@ -227,3 +227,25 @@ class HandlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AllClaudeTransportsTests(unittest.TestCase):
+    def test_codex_workflow_excludes_native_claude_targets_from_advice(self):
+        cfg = _load("codex")
+        for tier in ("opus5", "sonnet5", "haiku"):
+            self.assertFalse(model_router._target_is_offered(tier, cfg))
+        self.assertTrue(model_router._target_is_offered("terra", cfg))
+
+    def test_codex_workflow_refuses_claude_worker_execution(self):
+        from model_router.worker_admission import refusal
+        self.assertIn("workflow: codex", refusal("anthropic", "claude-sonnet-5", _load("codex")))
+        self.assertEqual(refusal("openai-codex", "gpt-terra", {"workflow": "codex"}), "")
+
+    def test_codex_workflow_cannot_launch_cli_reviews(self):
+        cfg = {"workflow": "codex", "callable": {"sonnet5": True, "opus5": True},
+               "coding_agent": {"enabled": True, "delegated_review": {"enabled": True}}}
+        with patch.object(model_router, "_run_opus5_bridge") as bridge:
+            self.assertIsNone(model_router._maybe_run_opus5(
+                {"messages": [{"role": "user", "content": "[sonnet-review] Review parser"}]},
+                cfg, platform="subagent", api_mode="codex_responses"))
+        bridge.assert_not_called()
