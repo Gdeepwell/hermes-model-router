@@ -321,6 +321,20 @@ chain**, so without its own it runs with no fallback at all: a quota-exhausted
 leaf simply dies mid-task. An empty list there means "no fallback", which is a
 different instruction from the key being absent.
 
+On the page the orchestrator chain is not a separate setting: **Main agent** shows
+one chain whose first entry is `default_model` (the model Hermes starts on) and
+whose remaining entries are `fallback_providers`. Setting the default and its
+fallbacks in two places let the primary sit in its own fallback list — a step
+that can never help, since when its provider is out so is that entry — so a save
+drops the parent from `fallback_providers`. An entry whose tier is switched off
+is shown greyed out as *switched off*, not removed.
+
+The **Workers** section holds the worker defaults side by side: the
+`delegate_task` model (`delegation.provider`/`delegation.model`, Codex tiers only,
+since that block carries no key or base URL), the `delegate_claude` default tier,
+and the delegated-worker chain. The `delegate_task` model used to be invisible, so
+changing the default model left every Codex worker on the old one.
+
 Do not confuse either with the router's own `fallbacks:`, which substitutes tiers
 *within* one provider and cannot cross accounts.
 
@@ -507,16 +521,17 @@ The Settings tab opens with the **Workflow** section: the *Codex only* /
 `workflow: claude_delegation`, chosen to say how many accounts work rather than
 which one came first (see [Workflow switch](#workflow-switch)) -- and, under
 *Codex + Claude*, the load-balancing switch and its two thresholds. Below it is **one
-card per account**: its models with their on/off switches, weekly and 5-hour
-usage bars with a Refresh button, the soft/hard limits, the Claude card's
-delegation state (`delegate_claude live`), and the account's recent call count
-for the same window the conductor is given. A tier switched off keeps its switch
+card per account**, in two lines: models (on/off switches, named without the
+repeated vendor prefix), soft/hard limits and delegation state side by side, then
+the weekly and 5-hour usage bars, whose last line carries the read age, the
+Refresh button and the account's recent call count for the same window the
+conductor is given. A tier switched off keeps its switch
 there, so it can be turned back on. A tier that is enabled but cooling carries a
 pill with the remaining time and the reason, since the switch alone would not
-explain why traffic went elsewhere. Then come the default orchestrator, the
-per-work-kind preference chains described above (each entry shows its account and
-that account's soft/closed state), the Hermes fallback chains, and the interface
-language. Everything is read through the router's own helpers rather than
+explain why traffic went elsewhere. Then come the main agent chain and the worker defaults (see
+[Hermes fallback chains](#hermes-fallback-chains)), the per-work-kind preference
+chains described above (each entry shows its account and that account's
+soft/closed state), and the interface language. Everything is read through the router's own helpers rather than
 recomputed, so the panel and the routing decision cannot disagree.
 
 The server binds to `127.0.0.1` only, so it is not reachable from the local
@@ -1186,6 +1201,11 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.16.0** — Settings: the main agent is one chain (default model first, then
+Hermes's fallbacks; the primary is dropped from its own fallback list), a Workers
+section gathers the `delegate_task` model, the `delegate_claude` default tier and
+the worker fallback chain, and each account card takes two lines instead of five.
 
 **1.15.0** — The Opus tier runs Claude Opus 5.5 (`claude-opus-5-5`) instead
 of Opus 5. The `claude_delegation.tiers.opus` default, the bridge's canonical
