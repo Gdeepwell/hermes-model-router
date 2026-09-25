@@ -180,11 +180,11 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
     if not repo.is_dir():
         raise ValueError(f"repository directory does not exist: {repo}")
     resolved_max_turns = max_turns if max_turns is not None else (DEFAULT_REVIEW_MAX_TURNS if review else DEFAULT_CODING_MAX_TURNS)
-    if resolved_max_turns < 1:
-        raise ValueError("max_turns must be positive")
+    if isinstance(resolved_max_turns, bool) or not isinstance(resolved_max_turns, int) or resolved_max_turns < 1:
+        raise ValueError("max_turns must be a positive integer")
     budget = float(max_budget_usd)
-    if not math.isfinite(budget) or budget <= 0:
-        raise ValueError("max_budget_usd must be positive and finite")
+    if not math.isfinite(budget) or budget < 0.01:
+        raise ValueError("max_budget_usd must be at least 0.01 and finite")
     default_timeout = DEFAULT_REVIEW_TIMEOUT_SECONDS if review else DEFAULT_CODING_TIMEOUT_SECONDS
     resolved_timeout = default_timeout if timeout is None else timeout
     if resolved_timeout < 1:

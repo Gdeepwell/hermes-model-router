@@ -8,6 +8,47 @@ from claude_opus_bridge import CANONICAL_OPUS_MODEL, classify_coding_dispatch, c
 
 
 class ClaudeOpusBridgeTests(unittest.TestCase):
+    @patch("claude_opus_bridge.subprocess.run")
+    def test_invalid_limits_never_launch_a_process(self, run):
+        with tempfile.TemporaryDirectory() as directory:
+            for turns in (0, -1, 0.5, 1.5, True, "2"):
+                with self.subTest(turns=turns), self.assertRaisesRegex(ValueError, "positive integer"):
+                    dispatch("[opus-review] Review parser", Path(directory), review=True, max_turns=turns)
+            for budget in (0, -1, 0.001, float("nan"), float("inf")):
+                with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, "at least 0.01"):
+                    dispatch("[opus-review] Review parser", Path(directory), review=True, max_budget_usd=budget)
+        run.assert_not_called()
+
+    @patch("claude_opus_bridge.subprocess.run", side_effect=OSError("CLI missing"))
+    def test_adapter_records_parent_identity_and_terminal_launch_failure(self, run):
+        import sqlite3
+        from model_router import _run_opus5_bridge
+        from agent_activity import load_agent_activity
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = root / "bridge.jsonl"
+            db = root / "state.db"
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE async_delegations (delegation_id TEXT, origin_session TEXT, parent_session_id TEXT, state TEXT, dispatched_at REAL, completed_at REAL, updated_at REAL, task_json TEXT, result_json TEXT)")
+                conn.execute("CREATE TABLE sessions (id TEXT, parent_session_id TEXT, started_at REAL, ended_at REAL, model TEXT)")
+                conn.execute("CREATE TABLE messages (id INTEGER, session_id TEXT, role TEXT, content TEXT, tool_name TEXT, timestamp REAL)")
+                conn.execute("INSERT INTO sessions VALUES ('parent', NULL, 1, NULL, 'gpt-terra')")
+                conn.execute("INSERT INTO sessions VALUES ('child', 'parent', 2, NULL, 'gpt-terra')")
+            with self.assertRaisesRegex(OSError, "CLI missing"):
+                _run_opus5_bridge(repo=directory, task="[opus-review] Review parser", write=False,
+                    review=True, cfg={"coding_agent": {"lifecycle_path": str(lifecycle)}},
+                    parent_session_id="parent", session_id="child", parent_turn_id="parent:turn",
+                    turn_id="child:turn")
+            events = [json.loads(line) for line in lifecycle.read_text().splitlines()]
+            activity = load_agent_activity(db, bridge_lifecycle_path=lifecycle)
+        self.assertEqual([e["state"] for e in events], ["running", "error"])
+        self.assertEqual({e["parent_session_id"] for e in events}, {"parent"})
+        self.assertEqual({e["parent_turn_id"] for e in events}, {"parent:turn"})
+        bridge = next(child for parent in activity["parents"] for child in parent["children"]
+                      if child.get("id") == events[0]["bridge_run_id"])
+        self.assertEqual(bridge["state"], "error")
+        run.assert_called_once()
+
     @patch("claude_opus_bridge._log_decision")
     @patch("claude_opus_bridge.subprocess.run")
     def test_lifecycle_records_started_then_one_terminal_with_parent_and_precedence(self, run, log):
@@ -36,6 +77,18 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         self.assertEqual(events[1]["state"], "max-turn")
         self.assertNotIn("task", events[0])
         self.assertNotIn("prompt", json.dumps(events))
+
+    @patch("claude_opus_bridge._log_decision")
+    @patch("claude_opus_bridge.subprocess.run")
+    def test_minimum_supported_budget_is_preserved_in_argv(self, run, logged):
+        run.return_value.returncode = 0
+        run.return_value.stdout = json.dumps({"modelUsage": {CANONICAL_OPUS_MODEL: {}}, "result": "ok"})
+        with tempfile.TemporaryDirectory() as directory:
+            dispatch("[opus-review] Review parser", Path(directory), review=True,
+                     max_turns=1, max_budget_usd=0.01)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--max-turns") + 1], "1")
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "0.01")
 
     @patch("claude_opus_bridge._log_decision")
     @patch("claude_opus_bridge.subprocess.run", side_effect=__import__("subprocess").TimeoutExpired("claude", 1))
