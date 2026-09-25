@@ -147,20 +147,6 @@ def _router_calls_by_session(router_log_path: Path | None) -> Dict[str, List[Dic
     return by_session
 
 
-def _recent_routed_calls(router_log_path: Path | None, child_session_id: str | None) -> List[Dict[str, str]]:
-    """Read every actual router record for one child session.
-
-    The dashboard is an audit view: truncating to a byte tail silently changes
-    retained router records for older children, so the per-session filter must scan the
-    retained JSONL rather than only its newest chunk.
-    """
-    return [
-        {"tier": call["tier"], "model": call["model"], "effort": call.get("effort", ""),
-                 **({"reason": call["reason"]} if call.get("reason") else {})}
-        for call in _router_calls_by_session(router_log_path).get(str(child_session_id or ""), [])
-    ]
-
-
 def _stored_description(value: Any) -> str:
     """Redact but do not truncate a persisted user task description."""
     raw = str(value or "")

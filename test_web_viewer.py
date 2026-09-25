@@ -76,7 +76,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('<div class="cards"><div class="card"><div class="n" id="total">0</div>', HTML)
         self.assertIn('<div class="k" data-i18n="card.total">', HTML)
         self.assertNotIn('.cards{display:none}', HTML)
-        renderer = HTML[HTML.rindex("render=function(){"):]
+        renderer = HTML[HTML.rindex("function render(){"):]
         self.assertIn("total.innerHTML=`<b>${t('total.routing.decisions')}</b>`", renderer)
         self.assertIn("workers.textContent=`${workerCalls} ${t('run.worker.routing')}`", renderer)
         self.assertEqual(self.i18n('total.routing.decisions'), ('TOTAL ROUTING DECISIONS', 'ÖSSZES ROUTING DÖNTÉS'))
@@ -107,7 +107,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         left out of one of them renders as a card frozen at zero."""
         import re
 
-        renderer = HTML[HTML.rindex("render=function(){"):]
+        renderer = HTML[HTML.rindex("function render(){"):]
         card_ids = re.findall(r'<div class="n" id="([a-z0-9]+)">', HTML)
         loop = re.search(r"for\(const id of \[([^\]]+)\]\)\$\(id\)\.textContent=summary\[id\]", renderer)
         self.assertIsNotNone(loop)
@@ -253,7 +253,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertNotIn("detailsEnabled=$('word-wrap').checked", HTML)
 
     def test_empty_main_run_has_no_disclosure_or_detail_panel(self):
-        renderer = HTML[HTML.rindex("render=function(){"):]
+        renderer = HTML[HTML.rindex("function render(){"):]
         self.assertIn("const header=document.createElement(hasDetails?'button':'div')", renderer)
         self.assertIn("router-run-header ${hasDetails?'':'no-details'}", renderer)
         self.assertIn("if(hasDetails){const toggle=document.createElement('span')", renderer)
@@ -360,7 +360,7 @@ class ModelRouterDashboardTests(DashboardProbeMixin, unittest.TestCase):
             {"total": 82, "luna": 0, "spark": 10, "terra": 38, "sol": 34,
              "opus5": 0, "sonnet5": 0, "haiku": 0, "qwen": 0},
         )
-        renderer = HTML[HTML.rindex("render=function(){"):]
+        renderer = HTML[HTML.rindex("function render(){"):]
         self.assertIn("const summary=executionSummary(runData.map(run=>run.scope.calls))", renderer)
         self.assertNotIn("$('total').textContent=allEntries.length", renderer)
 
@@ -2080,7 +2080,7 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         extra header child auto-places onto a stray grid cell instead of
         flowing inline. The chips must attach to the existing router-run-routes
         cell instead, after its route pills."""
-        renderer = HTML[HTML.rindex("render=function(){"):]
+        renderer = HTML[HTML.rindex("function render(){"):]
         self.assertIn("const delegationMap=assignDelegations(runData,delegations)", renderer)
         routes_start = renderer.index(
             "const routes=document.createElement('span');routes.className='router-run-routes';"
@@ -2097,7 +2097,7 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         (not a reimplementation): builds the same header/routes elements the
         real code builds and asserts the chips box lands inside routes.children,
         never directly in header.children."""
-        renderer = HTML[HTML.rindex("render=function(){"):]
+        renderer = HTML[HTML.rindex("function render(){"):]
         start = renderer.index("const routes=document.createElement")
         end = renderer.index("if(hasDetails)header.addEventListener")
         segment = renderer[start:end]
