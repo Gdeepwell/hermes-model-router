@@ -557,6 +557,16 @@ class ForcedReadTests(unittest.TestCase):
             # The bar should keep showing the last number it had, not go blank.
             self.assertEqual(usage_guard.cached("anthropic", _cfg()).weekly, 40)
 
+    def test_a_failed_import_is_reported_as_the_reason(self):
+        def broken():
+            usage_guard._import_failed("anthropic", ModuleNotFoundError("No module named 'hermes_yaml'"))
+        with patch.dict(usage_guard.FETCHERS, {"anthropic": broken}):
+            self.assertIsNone(usage_guard.read("anthropic", _cfg(), now=1000.0, force=True))
+        self.assertIn("hermes_yaml", usage_guard.last_failure("anthropic"))
+        with self._fetchers(anthropic=[_reading(40)]):
+            usage_guard.read("anthropic", _cfg(), now=1003.0, force=True)
+        self.assertEqual(usage_guard.last_failure("anthropic"), "")
+
     def test_an_account_without_a_fetcher_is_still_nothing_to_force(self):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0, force=True))
 

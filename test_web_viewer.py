@@ -1589,6 +1589,17 @@ class AccountsApiTests(unittest.TestCase):
                     self.assertTrue(mocked_read.call_args.kwargs.get("force"),
                                     "the refresh endpoint must force a live read")
 
+                    with patch.object(self.model_router.usage_guard, "read", return_value=None), \
+                         patch.object(self.model_router.usage_guard, "last_failure", return_value="boom"):
+                        try:
+                            urllib.request.urlopen(urllib.request.Request(
+                                f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=anthropic",
+                                method="POST"))
+                            self.fail("a refresh that read nothing must not answer 200")
+                        except urllib.error.HTTPError as exc:
+                            self.assertEqual(exc.code, 502)
+                            self.assertIn("boom", json.load(exc)["error"])
+
                     bad_request = urllib.request.Request(
                         f"http://127.0.0.1:{server.server_port}/api/usage/refresh?account=nope",
                         method="POST",
@@ -1675,7 +1686,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
     def _account_functions(self):
         return "const ROUTER_EFFORT_TIERS=['luna','spark','terra','sol','grok'];\n" + "\n".join(self.javascript_function(name)
                           for name in ("ageText", "resetText", "usageRow", "shortModelName",
-                                       "escapeHtml", "renderEffort", "renderClaudeReasoningEffort", "accountCard"))
+                                       "escapeHtml", "renderEffort", "renderClaudeReasoningEffort", "usageError", "accountCard"))
 
     def _run(self, script):
         # 'status.locale' must resolve to a real BCP-47 tag: toLocaleString throws
