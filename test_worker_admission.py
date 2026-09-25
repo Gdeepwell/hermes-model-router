@@ -7,6 +7,32 @@ from model_router import worker_admission, usage_guard
 from model_router.test_usage_guard import ROUTER_CFG
 
 class AdmissionTests(unittest.TestCase):
+    def test_live_switch_stops_existing_claude_child_on_its_next_call(self):
+        cfg = {"enabled": True, "workflow": "claude_delegation"}
+        downstream = Mock(return_value="Claude continued")
+        request = {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "Continue"}]}
+        with patch.object(router, "_load_config", side_effect=lambda: dict(cfg)):
+            kwargs = dict(request=request, original_request=request, next_call=downstream,
+                          provider="anthropic", platform="subagent", turn_id="root:sa-1")
+            self.assertEqual(router.run_llm_with_transient_failover(**kwargs), "Claude continued")
+            cfg["workflow"] = "codex"
+            stopped = router.run_llm_with_transient_failover(**kwargs)
+        self.assertIn("ROUTER WORKER STOPPED", stopped.output_text)
+        self.assertIn("workflow: codex", stopped.output_text)
+        downstream.assert_called_once()
+
+    def test_anthropic_fallback_child_obeys_current_workflow(self):
+        request = {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "Continue"}]}
+        downstream = Mock(return_value="Fallback child ran")
+        for workflow, should_run in (("claude_delegation", True), ("codex", False)):
+            with self.subTest(workflow=workflow), patch.object(router, "_load_config", return_value={
+                    "enabled": True, "workflow": workflow}):
+                result = router.run_llm_with_transient_failover(
+                    request=request, original_request=request, next_call=downstream,
+                    provider="anthropic", platform="subagent", turn_id="root:sa-2")
+                self.assertEqual(result == "Fallback child ran", should_run)
+        self.assertEqual(downstream.call_count, 1)
+
     def test_both_accounts_stop_at_execution_without_calling_provider(self):
         from hermes_cli.middleware import run_llm_execution_middleware
         manager = SimpleNamespace(_middleware={'llm_execution': [router.run_llm_with_transient_failover]},

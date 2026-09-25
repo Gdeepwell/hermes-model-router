@@ -107,6 +107,50 @@ class QwenMisdispatchTests(unittest.TestCase):
         )
 
 class HostCapabilityTests(unittest.TestCase):
+    def test_codex_workflow_avoids_claude_conductor_on_both_host_shapes(self):
+        from copy import deepcopy
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        cfg = _load_config()
+        cfg.update(workflow="codex", orchestration={"conductor": "opus5"})
+        current = {"tools": [deepcopy(DELEGATE_TASK_SCHEMA)]}
+        self.assertEqual(_conductor_tier(cfg, current), "terra")
+        self.assertEqual(_conductor_tier(cfg, _request_with_delegate_tool()), "terra")
+
+    def test_current_host_cannot_prefix_an_external_conductor(self):
+        from copy import deepcopy
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        cfg = _load_config()
+        cfg.update(orchestration={"conductor": "qwen"}, default_model="terra",
+                   callable={**cfg["callable"], "qwen": True})
+        current = {"tools": [deepcopy(DELEGATE_TASK_SCHEMA)]}
+        self.assertEqual(_conductor_tier(cfg, current), "terra")
+
+    def test_legacy_host_can_pin_off_provider_target_only_if_named(self):
+        from unittest.mock import patch
+        cfg = _load_config()
+        cfg.update(orchestration={"conductor": "qwen"}, default_model="terra",
+                   callable={**cfg["callable"], "qwen": True})
+        with patch("model_router._delegation_targets_detail", return_value={
+            "qwen": {"provider": "openai", "model": "qwen-test"}}):
+            self.assertEqual(_conductor_tier(cfg, _request_with_delegate_tool()), "qwen")
+        with patch("model_router._delegation_targets_detail", return_value={}):
+            self.assertEqual(_conductor_tier(cfg, _request_with_delegate_tool()), "terra")
+
+    def test_no_reachable_planner_records_a_clear_skip(self):
+        from copy import deepcopy
+        from unittest.mock import patch
+        from tools.delegate_tool import DELEGATE_TASK_SCHEMA
+        import model_router as router
+        cfg = _load_config()
+        cfg.update(orchestration={"enabled": True, "min_chars": 1},
+                   callable={name: False for name in cfg["callable"]})
+        request = {"messages": [{"role": "user", "content": "Plan this implementation carefully"}],
+                   "tools": [deepcopy(DELEGATE_TASK_SCHEMA)]}
+        decision = router.RouteDecision("terra", cfg["models"]["terra"], "test", "test")
+        with patch.object(router, "_host_delegation_limits", return_value={"conductor_available": True}):
+            self.assertIn("no_reachable_conductor_route", router._orchestration_skip_reason(
+                {"request": request, "api_call_count": 1}, cfg, decision))
+
     def test_flat_host_skips_forced_conductor(self):
         from unittest.mock import patch
         import model_router as router

@@ -223,7 +223,10 @@ and worked alone. A second gate compounded it by recognising only Sol and
 `default_model` as orchestrators.
 
 The forced conductor uses `orchestration.conductor`, then the callable
-`default_model` and its fallback chain. Worker preference chains such as `code`
+`default_model` and its fallback chain, skipping targets the current workflow
+or `delegate_task` schema cannot reach. On hosts without a `model` parameter,
+an off-provider goal prefix cannot create an off-provider conductor; if no
+planner route remains, the parent keeps direct worker coordination. Worker preference chains such as `code`
 choose implementation workers independently. The host must allow a conductor
 to spawn children; with a one-level limit, the parent coordinates direct workers.
 
@@ -743,6 +746,11 @@ still pointed at the right route. Hermes memoizes tool lists without rerunning
 check_fns, so the router clears that memo (a private `model_tools` helper)
 when it sees the workflow flip, on a routed request or before a gateway message
 is dispatched.
+An already-running Claude child is stopped before its next provider call after
+switching to Codex. A Claude parent keeps its current provider; the switch does
+not rewrite host provider configuration or erase historical activity. A
+Hermes-managed child reached through an Anthropic fallback follows the same
+execution rule: it runs in Claude mode and stops in Codex mode.
 
 ### Claude delegation and the usage guard
 

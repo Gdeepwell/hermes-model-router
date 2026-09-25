@@ -2901,7 +2901,7 @@ def _account_load_sentence(cfg: Dict[str, Any]) -> str:
     )
 
 
-def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
+def _conductor_tier(cfg: Optional[Dict[str, Any]], request: Optional[Dict[str, Any]] = None) -> str:
     """The tier the forced conductor child should run on.
 
     ``orchestration.conductor`` when the operator has pinned one, else
@@ -2921,11 +2921,29 @@ def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
     conductor now has its own.
     """
     cfg = cfg or {}
+    model_param = _host_delegate_has_model(request)
+    targets = _delegation_targets_detail() if request is not None and model_param else {}
+
+    def reachable(tier: str) -> bool:
+        if not _is_callable_tier(tier, cfg) or not _target_is_offered(tier, cfg):
+            return False
+        if request is None:
+            return True
+        # A goal label can only change the model within the delegate_task
+        # provider. An off-provider planner requires a named host target and
+        # an actual model field in this request's schema.
+        account = _account_of(tier, cfg) or targets.get(tier, {}).get("provider")
+        if account and account != cfg.get("provider", "openai-codex"):
+            return model_param and tier in targets
+        if tier in (cfg.get("models") or {}):
+            return True
+        return model_param and tier in targets
+
     pinned = str((cfg.get("orchestration") or {}).get("conductor") or "").strip().casefold()
-    if pinned and _is_callable_tier(pinned, cfg):
+    if pinned and reachable(pinned):
         return pinned
     default = str(cfg.get("default_model", "terra"))
-    if _is_callable_tier(default, cfg):
+    if reachable(default):
         return default
     chain = cfg.get("fallbacks") or {}
     seen, current = {default}, default
@@ -2933,14 +2951,14 @@ def _conductor_tier(cfg: Optional[Dict[str, Any]]) -> str:
         nxt = str(chain.get(current) or "")
         if not nxt or nxt in seen:
             break
-        if _is_callable_tier(nxt, cfg):
+        if reachable(nxt):
             return nxt
         seen.add(nxt)
         current = nxt
-    for tier in (cfg.get("models") or {}):
-        if _is_callable_tier(tier, cfg):
+    for tier in dict.fromkeys((*((cfg.get("models") or {}).keys()), *targets.keys())):
+        if reachable(tier):
             return tier
-    return default
+    return default if request is None else ""
 
 
 def _prepare_orchestration_delegation(
@@ -2963,7 +2981,7 @@ def _prepare_orchestration_delegation(
     requires one of them -- forcing delegate_task alone made that preference
     unreachable (a review turn ran on Terra instead of Sonnet, 2026-09-19).
     """
-    orchestrator_tier = _conductor_tier(cfg)
+    orchestrator_tier = _conductor_tier(cfg, request)
 
     routed = deepcopy(request)
     claude_kind, claude_target, balanced = claude_choice
@@ -3320,6 +3338,8 @@ def _orchestration_skip_reason(
         return "empty_normalised_text"
     if not sol_preflight and not _host_delegation_limits()["conductor_available"]:
         return "host_has_no_conductor_depth; parent_delegates_direct_workers"
+    if not _conductor_tier(cfg, request):
+        return "no_reachable_conductor_route; parent_delegates_direct_workers"
     return None
 
 
