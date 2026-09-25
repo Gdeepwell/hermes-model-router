@@ -1046,7 +1046,7 @@ class CooldownPillLayoutTests(DashboardProbeMixin, unittest.TestCase):
     def _rule(self, selector):
         import re
 
-        match = re.search(re.escape(selector) + r"\{([^}]*)\}", HTML)
+        match = re.search(r"(?<![\w\s])" + re.escape(selector) + r"\{([^}]*)\}", HTML)
         self.assertIsNotNone(match, f"{selector} has no rule")
         return match.group(1)
 
@@ -1584,13 +1584,12 @@ class AccountsApiTests(unittest.TestCase):
 
 
 class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
-    """Settings shows one account card per account, not a flat toggle list plus a
-    separate load box. Every card has the same five rows: models, usage, limits,
-    delegation, load."""
+    """Settings aligns each model's switch, title and effort dropdown within
+    the Models block, followed by account-level Limits, Delegation and Usage."""
 
     CODEX_INFO = {
         "label": "Codex",
-        "tiers": ["luna", "terra", "sol"],
+        "tiers": ["luna", "spark", "terra", "sol"],
         "state": "unknown",
         "usage": None,
         "usage_age_seconds": None,
@@ -1672,11 +1671,11 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
         codex_card = self._card("openai-codex", self.CODEX_INFO)
         claude_card = self._card("anthropic", self.CLAUDE_INFO)
-        # Model switches | their effort dropdowns | Limits | Delegation;
-        # Usage and its load count occupy the full-width row underneath.
-        expected = ["models", "effort", "limits", "delegation", "usage"]
-        self.assertEqual(re.findall(r'class="account-row (\w+)"', codex_card), expected)
-        self.assertEqual(re.findall(r'class="account-row (\w+)"', claude_card), expected)
+        # Models | Limits | Delegation; Usage and its load count are full width.
+        expected = ["models", "limits", "delegation", "usage"]
+        self.assertEqual(re.findall(r'class="account-row ([\w-]+)"', codex_card), expected)
+        self.assertEqual(re.findall(r'class="account-row ([\w-]+)"', claude_card), expected)
+        self.assertNotIn("account.effort", codex_card + claude_card)
         for card in (codex_card, claude_card):
             usage_row = card[card.index('class="account-row usage"'):]
             self.assertIn("account.load.calls", usage_row)
@@ -1696,23 +1695,73 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn('data-claude-effort="sonnet"', claude)
         self.assertIn('data-claude-effort="opus"', claude)
         self.assertNotIn('data-claude-effort="haiku"', claude)
-        self.assertIn("settings.claude_effort.haiku_unsupported", claude)
-        self.assertNotIn('class="account-row effort"', qwen)
+        self.assertIn("settings.claude_effort.haiku_no_reasoning", claude)
+        self.assertNotIn('data-effort=', qwen)
+        self.assertNotIn('data-claude-effort=', qwen)
+        self.assertNotIn('<select', qwen)
+        self.assertNotIn('account.effort', qwen)
+
+    def test_each_effort_control_shares_its_model_row(self):
+        import re
+
+        codex = self._card("openai-codex", self.CODEX_INFO, {
+            "callable": {},
+            "cooldowns": {"luna": {"seconds": 120, "reason": "3 failures within 60s"}},
+            "effort": {"luna": "low", "terra": "high", "sol": "xhigh"},
+        })
+        claude = self._card("anthropic", self.CLAUDE_INFO, {
+            "claude_reasoning_effort": {"available": True, "levels": {"sonnet": "low", "opus": "high"}},
+        })
+
+        def switch_for(card, model):
+            match = re.search(
+                r'<div class="model-switch[^\"]*">(?:(?!</div>).)*'
+                + rf'data-model="{model}"(?:(?!</div>).)*</div>',
+                card,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, f"{model} has no model switch")
+            return match.group(0)
+
+        for model in self.CODEX_INFO["tiers"]:
+            switch = switch_for(codex, model)
+            self.assertIn(f'data-effort="{model}"', switch)
+        self.assertIn("3 failures within 60s", switch_for(codex, "luna"))
+        for model, effort in (("sonnet5", "sonnet"), ("opus5", "opus")):
+            self.assertIn(f'data-claude-effort="{effort}"', switch_for(claude, model))
+
+    def test_haiku_has_a_disabled_unsaved_placeholder(self):
+        import re
+        card = self._card("anthropic", self.CLAUDE_INFO)
+        switch = re.search(r'<div class="model-switch[^\"]*">(?:(?!</div>).)*data-model="haiku"(?:(?!</div>).)*</div>', card, re.DOTALL)
+        self.assertIsNotNone(switch)
+        self.assertRegex(switch.group(0), r'<select disabled><option>settings.claude_effort.haiku_no_reasoning</option></select>')
+        self.assertNotIn('data-claude-effort=', switch.group(0))
+
+    def test_dropdowns_share_a_fixed_width_css_rule(self):
+        import re
+        self.assertRegex(HTML, r'\.account-card \.model-switch select\{[^}]*width:140px;[^}]*\}')
+        self.assertIn('grid-template-columns:44px max-content 140px', HTML)
+        self.assertIn('grid-template-columns:subgrid', HTML)
+        self.assertIn('.model-list.no-effort{grid-template-columns:44px max-content}', HTML)
+        self.assertIn('.model-switch .cooldown-pill{grid-column:1/-1', HTML)
 
     def test_unavailable_claude_effort_stays_visible_but_disabled_in_account_card(self):
         card = self._card("anthropic", self.CLAUDE_INFO, {
             "claude_reasoning_effort": {"available": False, "reason": "seam moved", "levels": {"sonnet": "medium", "opus": "medium"}},
         })
         self.assertIn('data-claude-effort="sonnet" disabled', card)
-        self.assertIn('data-claude-effort="opus" disabled', card)
-        self.assertIn("seam moved", card)
+        self.assertIn('data-claude-effort="opus" disabled title="seam moved"', card)
+        self.assertEqual(card.count('title="seam moved"'), 2)
+        self.assertNotIn('>seam moved<', card)
 
     def test_unavailable_claude_effort_reason_is_html_escaped(self):
         card = self._card("anthropic", self.CLAUDE_INFO, {
             "claude_reasoning_effort": {"available": False, "reason": "<img src=x onerror=alert(1)>", "levels": {}},
         })
-        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", card)
+        self.assertEqual(card.count('title="&lt;img src=x onerror=alert(1)&gt;"'), 2)
         self.assertNotIn("<img src=x onerror=alert(1)>", card)
+        self.assertNotIn('>&lt;img src=x onerror=alert(1)&gt;<', card)
 
     def test_standalone_effort_sections_are_removed(self):
         self.assertNotIn('id="effort-settings"', HTML)
@@ -1798,7 +1847,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
     def test_every_i18n_key_used_by_the_new_code_exists_in_both_languages(self):
         for key in [
             "settings.accounts.heading", "account.state.open", "account.state.soft",
-            "account.state.closed", "account.state.unknown", "account.models", "account.effort",
+            "account.state.closed", "account.state.unknown", "account.models",
             "account.usage", "account.usage.week", "account.usage.session",
             "account.usage.resets", "account.usage.age", "account.usage.none",
             "account.usage.refresh", "account.limits", "account.limits.soft",
@@ -2837,9 +2886,7 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
         self.assertEqual(written, {"fallbacks": {"sol": "terra"}, "effort": {"spark": "xhigh"}})
 
     def test_the_reasoning_effort_control_has_all_of_its_i18n_keys_in_both_languages(self):
-        for key in ("settings.effort.heading", "settings.effort.luna", "settings.effort.spark",
-                    "settings.effort.terra", "settings.effort.sol", "settings.effort.low",
-                    "settings.effort.medium", "settings.effort.high", "settings.effort.xhigh"):
+        for key in ("settings.effort.low", "settings.effort.medium", "settings.effort.high", "settings.effort.xhigh"):
             self.i18n(key)
 
     def test_the_control_offers_exactly_the_four_shared_effort_levels(self):
@@ -3221,30 +3268,25 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         self.assertIn("sonnet5:'sonnet',opus5:'opus'", source)
         self.assertNotIn('data-claude-effort="haiku"', source)
 
-    def test_renderClaudeReasoningEffort_shows_haiku_as_a_nonselect_unsupported_label(self):
+    def test_renderClaudeReasoningEffort_shows_haiku_as_a_disabled_placeholder(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
-        self.assertIn("settings.claude_effort.haiku_unsupported", source)
+        self.assertIn("settings.claude_effort.haiku_no_reasoning", source)
+        self.assertIn('<select disabled><option>', source)
 
     def test_renderClaudeReasoningEffort_offers_exactly_the_four_shared_levels(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
         self.assertIn("['low','medium','high','xhigh']", source)
 
-    def test_renderClaudeReasoningEffort_disables_selects_and_shows_reason_when_unavailable(self):
+    def test_renderClaudeReasoningEffort_disables_selects_and_tooltips_reason_when_unavailable(self):
         source = self.javascript_function("renderClaudeReasoningEffort")
         self.assertIn("available", source)
-        self.assertIn("settings.claude_effort.unavailable", source)
+        self.assertIn("escapeHtml(state.reason", source)
+        self.assertIn("title=", source)
         self.assertIn("disabled", source)
 
     def test_the_claude_reasoning_effort_control_has_all_of_its_i18n_keys_in_both_languages(self):
-        for key in (
-            "settings.claude_effort.heading",
-            "settings.claude_effort.sonnet",
-            "settings.claude_effort.opus",
-            "settings.claude_effort.haiku",
-            "settings.claude_effort.haiku_unsupported",
-            "settings.claude_effort.unavailable",
-        ):
-            self.i18n(key)
+        self.assertEqual(self.i18n("settings.claude_effort.haiku_no_reasoning"),
+                         ("no reasoning allowed", "nincs gondolkodás"))
 
     def test_get_reports_available_when_uninstalled_but_the_host_seam_is_compatible(self):
         """A standalone dashboard process never calls install_reasoning_bridge() itself.

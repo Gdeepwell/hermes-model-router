@@ -224,12 +224,11 @@ for the bridge to override.
 If the host's private seam has moved in a way this bridge does not recognise,
 `delegate_claude` is refused outright with "Claude reasoning effort is
 unavailable: `<reason>`" rather than silently running at the wrong effort;
-Haiku calls, which never touch the bridge, are unaffected. In its Claude
-account card, the dashboard puts the **Effort** row between **Models** and
-**Limits**. It edits only `sonnet` and `opus`, shows Haiku as unsupported, and
-disables its selects with the same reason when the host seam is incompatible —
-the same side-effect-free probe the bridge itself uses, so the dashboard's
-answer never diverges from the bridge's own.
+Haiku calls, which never touch the bridge, are unaffected. In the Claude
+account card, Sonnet and Opus effort dropdowns sit beside their model switches.
+Haiku has a disabled “no reasoning allowed” dropdown. If the host seam is
+incompatible, Sonnet and Opus selects are disabled and the escaped reason is
+available in their tooltips, using the same side-effect-free probe as the bridge.
 
 If the dashboard reports the Claude reasoning-effort control unavailable with a
 `ModuleNotFoundError`, this host's Hermes venv install map is stale after a
@@ -447,12 +446,12 @@ optional rather than a behaviour change. An escalation degrades to its tier's
 capping the request.
 
 The Settings tab edits only the four plain routed-tier keys: `luna`, `spark`,
-`terra`, and `sol`, in the Codex account card's **Effort** row between **Models**
-and **Limits**. `opus5` is a route/log marker; Qwen has no dashboard effort
+`terra`, and `sol`, in dropdowns beside their switches in the Codex account
+card's **Models** block. `opus5` is a route/log marker; Qwen has no dashboard effort
 control because the router strips reasoning; and Claude-only `haiku` / `sonnet5`
 are not routed here — this `effort:` map cannot reach a delegated Claude child at
 all, since the router never runs on that call. Sonnet and Opus have their own
-controls in the Claude account card's **Effort** row: see [Claude reasoning
+controls beside their switches in the Claude account card: see [Claude reasoning
 effort](#claude-reasoning-effort). The situational `sol_long` and
 `explicit_<tier>` / `explicit_<tier>_xhigh` keys remain file-only in
 `router_config.yaml` or its local overlay.
@@ -614,14 +613,15 @@ The Settings tab opens with the **Workflow** section: the *Codex only* /
 `workflow: claude_delegation`, chosen to say how many accounts work rather than
 which one came first (see [Workflow switch](#workflow-switch)) -- and, under
 *Codex + Claude*, the load-balancing switch and its two thresholds. Below it is **one
-card per account**, with Models, **Effort**, Limits and Delegation side by side,
-then the weekly and 5-hour usage bars, whose last line carries the read age, the
-Refresh button and the account's recent call count for the same window the
-conductor is given. The Effort row appears between Models and Limits: Codex
-shows its four plain-tier controls, while Claude shows Sonnet and Opus, Haiku as
-unsupported, and disabled selects with the bridge's own reason when the host
-seam is incompatible (see [Claude reasoning effort](#claude-reasoning-effort)).
-Qwen has no Effort row. A tier switched off keeps its switch there, so it can be
+card per account**, with Models, Limits and Delegation side by side, then the
+weekly and 5-hour usage bars, whose last line carries the read age, the Refresh
+button and the account's recent call count for the same window the conductor
+is given. Inside Models, each switch and title has its effort dropdown immediately
+beside it: Codex shows its four plain-tier controls; Claude shows Sonnet and Opus,
+plus a disabled “no reasoning allowed” select for Haiku. When the host seam is
+incompatible, Claude's disabled selects carry the escaped reason as a tooltip
+(see [Claude reasoning effort](#claude-reasoning-effort)). Qwen has no effort
+select. A tier switched off keeps its switch there, so it can be
 turned back on. A tier that is enabled but cooling carries a pill with the
 remaining time and the reason, since the switch alone would not explain why
 traffic went elsewhere. Then come the main agent chain and the worker defaults
@@ -1341,10 +1341,11 @@ skipped here.
 
 ## Version
 
-**1.18.1** — Reasoning-effort controls now live in each Settings account card's
-**Effort** row, between Models and Limits. The Codex card edits Luna, Spark,
-Terra and Sol; the Claude card edits Sonnet and Opus, retains Haiku's unsupported
-note, and disables unavailable controls with the escaped compatibility reason.
+**1.18.1** — Reasoning-effort dropdowns live beside model switches in the
+Settings account cards' Models blocks. The Codex card edits Luna, Spark,
+Terra and Sol; the Claude card edits Sonnet and Opus, displays a disabled
+“no reasoning allowed” select for Haiku, and puts the escaped compatibility
+reason in unavailable controls' tooltips.
 
 **1.18.0** — `delegate_claude` children get their own per-tier reasoning effort.
 `claude_delegation.reasoning_effort.sonnet` / `.opus` (default `medium`) reach the
