@@ -2688,3 +2688,42 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertIn("opus5", error)
         self.assertEqual(config, before)
+
+
+class FullPageFilterTests(unittest.TestCase):
+    def test_controls_update_visible_cards_and_counts_together(self):
+        import shutil
+        if not shutil.which("node"):
+            self.skipTest("node unavailable")
+        probe = subprocess.run(["node", "-e", "require.resolve('jsdom')"], capture_output=True)
+        if probe.returncode:
+            self.skipTest("jsdom unavailable; provide it through NODE_PATH")
+        script = r"""
+const {JSDOM,VirtualConsole}=require('jsdom');
+const assert=require('node:assert/strict');
+const html=require('node:fs').readFileSync(0,'utf8');
+const errors=[]; const vc=new VirtualConsole(); vc.on('jsdomError',e=>errors.push(e.message));
+const dom=new JSDOM(html,{url:'http://localhost/',runScripts:'dangerously',virtualConsole:vc,
+ beforeParse(w){w.fetch=()=>new Promise(()=>{});w.setInterval=()=>0;}});
+const w=dom.window,d=w.document;
+w.eval(`entries=[
+ {timestamp:'2026-09-25T10:00:00Z',turn_id:'alpha:1',tier:'terra',model:'gpt-terra',prompt_preview:'alpha task'},
+ {timestamp:'2026-09-25T10:01:00Z',turn_id:'beta:1',tier:'sol',model:'gpt-sol',prompt_preview:'beta task'}
+];agentActivity={parents:[],active_turns:[]};render();`);
+d.getElementById('tier').innerHTML='<option value=""></option><option value="sol">Sol</option>';
+const cards=()=>d.querySelectorAll('#runs .router-run').length;
+assert.equal(cards(),2);
+d.getElementById('search').value='alpha';
+d.getElementById('search').dispatchEvent(new w.Event('input'));
+assert.equal(cards(),1);assert.match(d.getElementById('runs').textContent,/alpha task/);
+assert.equal(d.getElementById('total').textContent,'1');
+d.getElementById('search').value='';d.getElementById('tier').value='sol';
+d.getElementById('tier').dispatchEvent(new w.Event('input'));
+assert.equal(cards(),1);assert.match(d.getElementById('runs').textContent,/beta task/);
+d.getElementById('grouped').checked=false;
+d.getElementById('grouped').dispatchEvent(new w.Event('input'));
+assert.equal(cards(),1);assert.equal(d.getElementById('total').textContent,'1');
+assert.deepEqual(errors,[]);dom.window.close();
+"""
+        result = subprocess.run(["node", "-e", script], input=HTML, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
