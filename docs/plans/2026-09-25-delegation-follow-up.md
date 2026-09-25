@@ -1,6 +1,11 @@
 # Hermes delegation: remaining implementation plan
 
-Updated 2026-09-25. Status: plan only; do not implement the remaining items yet.
+Updated 2026-09-25. Status: all seven follow-up items implemented and verified.
+
+Implementation commits: `dfea3b5` (account admission), `d6f7ad8` (retry
+schema), `5ce8cbc` (CLI adjustment audit), `2d8902a` (conductor and workflow),
+`4c80665` (bridge limits and lifecycle), `2488b7e` (settings failure paths),
+and `3bd4a76` (activity snapshot cache).
 
 All completed fixes are retained, including the lower-priority changes. The
 scope-reduction reverts have been reversed. The application tree is identical

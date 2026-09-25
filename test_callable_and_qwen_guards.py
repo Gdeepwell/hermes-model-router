@@ -330,7 +330,9 @@ class QwenOrchestratorPreflightTests(unittest.TestCase):
         blocks = routed["messages"][-1]["content"]
         self.assertEqual({block["type"] for block in blocks}, {"text"})
         self.assertIn("INTERNAL ORCHESTRATOR PREFLIGHT", blocks[-1]["text"])
-        self.assertIn("[qwen]", blocks[-1]["text"])
+        # This host schema has no model argument. Qwen is the external parent,
+        # while the planner child follows the configured Codex delegate route.
+        self.assertIn("[luna]", blocks[-1]["text"])
 
     def test_preflight_keeps_routing_policy_out_of_the_goal(self):
         """The conductor is re-classified from its own goal text, so routing policy
