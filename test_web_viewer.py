@@ -3015,3 +3015,143 @@ const fetch=(_url,options)=>{requests.push(JSON.parse(options.body));return new 
 """
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
+    """The dashboard edits only the two effective Claude tiers; Haiku is explicitly unsupported."""
+
+    CONFIG = {
+        "models": {"luna": "gpt-6-luna"},
+        "callable": {"luna": True},
+        "claude_delegation": {"enabled": True, "default_tier": "sonnet"},
+    }
+
+    def _write_config(self, directory):
+        target = Path(directory) / "router_config.yaml"
+        with open(target, "w", encoding="utf-8") as f:
+            web_viewer.yaml.dump(self.CONFIG, f)
+        return target
+
+    def _request(self, config_path, method, payload=None):
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+             patch.object(web_viewer, "_router_module", return_value=None):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/api/config", data=data, method=method,
+                    headers={"Content-Type": "application/json"} if data is not None else {},
+                )
+                try:
+                    with urllib.request.urlopen(request) as response:
+                        return response.status, json.load(response)
+                except urllib.error.HTTPError as error:
+                    return error.code, json.load(error)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_get_exposes_only_sonnet_and_opus_with_haiku_marked_unsupported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, payload = self._request(self._write_config(directory), "GET")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["claude_reasoning_effort"]["levels"], {"sonnet": "medium", "opus": "medium"})
+        self.assertFalse(payload["claude_reasoning_effort"]["haiku_supported"])
+        self.assertNotIn("haiku", payload["claude_reasoning_effort"]["levels"])
+
+    def test_a_valid_claude_effort_save_writes_only_the_local_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            shipped_before = config_path.read_bytes()
+            status, body = self._request(config_path, "POST", {"claude_reasoning_effort": {"opus": " HIGH "}})
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+            self.assertEqual(config_path.read_bytes(), shipped_before)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+        self.assertIn("revision", body)
+        self.assertEqual(written, {"claude_delegation": {"reasoning_effort": {"opus": "high"}}})
+
+    def test_invalid_claude_effort_payloads_are_refused_without_writing(self):
+        cases = [
+            {"claude_reasoning_effort": ["high"]},
+            {"claude_reasoning_effort": {"haiku": "high"}},
+            {"claude_reasoning_effort": {"opus5": "high"}},
+            {"claude_reasoning_effort": {"sol_long": "high"}},
+            {"claude_reasoning_effort": {"opus": True}},
+            {"claude_reasoning_effort": {"opus": "   "}},
+            {"claude_reasoning_effort": {"opus": "external"}},
+            {"claude_reasoning_effort": {"opus": "max"}},
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
+                config_path = self._write_config(directory)
+                shipped_before = config_path.read_bytes()
+                status, body = self._request(config_path, "POST", payload)
+                self.assertEqual(status, 400)
+                self.assertIn("error", body)
+                self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
+                self.assertEqual(config_path.read_bytes(), shipped_before)
+
+    def test_an_empty_claude_effort_payload_is_a_noop_and_creates_no_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            status, body = self._request(config_path, "POST", {"claude_reasoning_effort": {}})
+            local = config_path.with_name("router_config.local.yaml")
+            self.assertFalse(local.exists())
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+
+    def test_a_claude_effort_save_preserves_unrelated_local_content_and_comments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            local = config_path.with_name("router_config.local.yaml")
+            local.write_text(
+                "# preserve this local note\nclaude_delegation:\n  default_tier: opus\n",
+                encoding="utf-8",
+            )
+            status, body = self._request(config_path, "POST", {"claude_reasoning_effort": {"sonnet": "low"}})
+            text = local.read_text(encoding="utf-8")
+            written = web_viewer.yaml.safe_load(text)
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+        self.assertIn("# preserve this local note", text)
+        self.assertEqual(
+            written,
+            {"claude_delegation": {"default_tier": "opus", "reasoning_effort": {"sonnet": "low"}}},
+        )
+
+    def test_renderClaudeReasoningEffort_renders_sonnet_and_opus_selects_only(self):
+        source = self.javascript_function("renderClaudeReasoningEffort")
+        self.assertIn("data-claude-effort=", source)
+        self.assertIn("['sonnet','opus']", source)
+        self.assertNotIn('data-claude-effort="haiku"', source)
+        self.assertNotIn("'haiku'", source.split("haiku_unsupported")[0])
+
+    def test_renderClaudeReasoningEffort_shows_haiku_as_a_nonselect_unsupported_label(self):
+        source = self.javascript_function("renderClaudeReasoningEffort")
+        self.assertIn("settings.claude_effort.haiku_unsupported", source)
+
+    def test_renderClaudeReasoningEffort_offers_exactly_the_four_shared_levels(self):
+        source = self.javascript_function("renderClaudeReasoningEffort")
+        self.assertIn("['low','medium','high','xhigh']", source)
+
+    def test_renderClaudeReasoningEffort_disables_selects_and_shows_reason_when_unavailable(self):
+        source = self.javascript_function("renderClaudeReasoningEffort")
+        self.assertIn("available", source)
+        self.assertIn("settings.claude_effort.unavailable", source)
+        self.assertIn("disabled", source)
+
+    def test_the_claude_reasoning_effort_control_has_all_of_its_i18n_keys_in_both_languages(self):
+        for key in (
+            "settings.claude_effort.heading",
+            "settings.claude_effort.sonnet",
+            "settings.claude_effort.opus",
+            "settings.claude_effort.haiku",
+            "settings.claude_effort.haiku_unsupported",
+            "settings.claude_effort.unavailable",
+        ):
+            self.i18n(key)

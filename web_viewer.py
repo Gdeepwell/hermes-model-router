@@ -953,6 +953,89 @@ def _save_claude_delegation(raw, config: dict):
     return None
 
 
+def _claude_delegation_module():
+    """The router's ``claude_delegation`` submodule, or None when not importable.
+
+    Reached through ``_router_module()`` (the same standalone/plugin import
+    fallback every other dashboard reader uses) rather than importing the
+    module directly, so a dashboard run outside the router package degrades
+    to the unavailable status below instead of raising.
+    """
+    router = _router_module()
+    return getattr(router, "claude_delegation", None) if router else None
+
+
+CLAUDE_REASONING_TIERS = ("sonnet", "opus")
+_CLAUDE_REASONING_DEFAULT_LEVELS = {"sonnet": "medium", "opus": "medium"}
+
+
+def _claude_reasoning_status(config: dict) -> dict:
+    """``claude_reasoning_effort`` for ``GET /api/config``: levels plus bridge availability.
+
+    Falls back to the router's own defaults, unavailable, with a nonempty
+    reason, whenever the router package (or the reasoning-effort API on it)
+    cannot be imported -- the dashboard must keep serving even without it.
+    """
+    delegation = _claude_delegation_module()
+    if delegation is None:
+        return {
+            "available": False,
+            "reason": "Router package not importable in this dashboard process",
+            "levels": dict(_CLAUDE_REASONING_DEFAULT_LEVELS),
+            "haiku_supported": False,
+        }
+    try:
+        levels = delegation.reasoning_effort_config(config)
+        available, reason = delegation.reasoning_bridge_status()
+    except Exception as exc:
+        return {
+            "available": False,
+            "reason": f"claude_delegation reasoning-effort API not usable ({type(exc).__name__}: {exc})",
+            "levels": dict(_CLAUDE_REASONING_DEFAULT_LEVELS),
+            "haiku_supported": False,
+        }
+    return {
+        "available": bool(available),
+        "reason": str(reason or ""),
+        "levels": {tier: levels[tier] for tier in CLAUDE_REASONING_TIERS},
+        "haiku_supported": False,
+    }
+
+
+def _save_claude_reasoning_effort(raw, config: dict):
+    """Update only ``claude_delegation.reasoning_effort``'s two editable tiers.
+
+    Every submitted key and value is checked into a temporary ``cleaned``
+    mapping before ``config`` changes, matching ``_save_effort``'s rule that a
+    partial payload cannot leave an earlier tier changed after a later one
+    fails.
+    """
+    if not isinstance(raw, dict):
+        return "claude_reasoning_effort must be an object of tier -> low, medium, high, or xhigh"
+    cleaned = {}
+    for tier, value in raw.items():
+        if tier not in CLAUDE_REASONING_TIERS:
+            return f"The dashboard cannot edit Claude reasoning-effort key '{tier}'"
+        if not isinstance(value, str):
+            return f"claude_reasoning_effort.{tier} must be one of: low, medium, high, xhigh"
+        normalized = value.strip().casefold()
+        if normalized not in EFFORT_LEVELS:
+            return f"claude_reasoning_effort.{tier} must be one of: low, medium, high, xhigh"
+        cleaned[tier] = normalized
+    if not cleaned:
+        # Leave an absent reasoning_effort block absent when a client posts no changes.
+        return None
+    block = config.get("claude_delegation")
+    if not isinstance(block, dict):
+        block = config["claude_delegation"] = {}
+    reasoning_effort = block.get("reasoning_effort")
+    if not isinstance(reasoning_effort, dict):
+        reasoning_effort = block["reasoning_effort"] = {}
+    for tier, value in cleaned.items():
+        reasoning_effort[tier] = value
+    return None
+
+
 HTML = r'''<!doctype html>
 <html lang="hu">
 <head>
@@ -986,7 +1069,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 <div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5.5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card haiku"><div class="n" id="haiku">0</div><div class="k" data-i18n="card.haiku">Claude Haiku 4.5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div></div>
 <div class="account-groups" id="account-groups"></div>
 <div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span> <span class="settings-status" id="settings-status"></span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.workflow.heading">Munkafolyamat</h3><div class="workflow-switch" id="workflow-switch"></div></div><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.main.heading">Fő agent</h3><div class="sub"><span data-i18n="settings.main.sub"></span> <b class="fb-file" data-i18n="settings.fb.file"></b></div><div class="pref-kinds" id="main-chain"></div></div><div class="settings-section"><h3 data-i18n="settings.workers.heading">Workerek</h3><div class="sub" data-i18n="settings.workers.sub"></div><div class="pref-kinds" id="worker-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.effort.heading">Gondolkodási erőfeszítés</h3><div class="pref-kinds" id="effort-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
+<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span> <span class="settings-status" id="settings-status"></span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.workflow.heading">Munkafolyamat</h3><div class="workflow-switch" id="workflow-switch"></div></div><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.main.heading">Fő agent</h3><div class="sub"><span data-i18n="settings.main.sub"></span> <b class="fb-file" data-i18n="settings.fb.file"></b></div><div class="pref-kinds" id="main-chain"></div></div><div class="settings-section"><h3 data-i18n="settings.workers.heading">Workerek</h3><div class="sub" data-i18n="settings.workers.sub"></div><div class="pref-kinds" id="worker-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.effort.heading">Gondolkodási erőfeszítés</h3><div class="pref-kinds" id="effort-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.claude_effort.heading">Claude gondolkodási erőfeszítés</h3><div class="pref-kinds" id="claude-effort-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
 <section id="command-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="tab.command">Hermes Command Center</span></h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
 </main>
 <script>
@@ -1145,6 +1228,12 @@ const I18N = {
     'settings.effort.medium': 'medium',
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
+    'settings.claude_effort.heading': 'Claude reasoning effort',
+    'settings.claude_effort.sonnet': 'Sonnet',
+    'settings.claude_effort.opus': 'Opus',
+    'settings.claude_effort.haiku': 'Haiku',
+    'settings.claude_effort.haiku_unsupported': 'not adjustable for Haiku',
+    'settings.claude_effort.unavailable': 'Not available: {reason}',
     'settings.prefs.heading': 'Routing: preferred models per kind of work',
     'settings.prefs.sub': 'In order, best first. The router takes the first callable entry. This re-routes a turn; it does not change the model Hermes starts on.',
     'settings.prefs.add': 'add model...',
@@ -1385,6 +1474,12 @@ const I18N = {
     'settings.effort.medium': 'medium',
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
+    'settings.claude_effort.heading': 'Claude gondolkodási erőfeszítés',
+    'settings.claude_effort.sonnet': 'Sonnet',
+    'settings.claude_effort.opus': 'Opus',
+    'settings.claude_effort.haiku': 'Haiku',
+    'settings.claude_effort.haiku_unsupported': 'Haikunál nem állítható',
+    'settings.claude_effort.unavailable': 'Nem elérhető: {reason}',
     'settings.prefs.heading': 'Útválasztás: preferált modellek munkatípusonként',
     'settings.prefs.sub': 'Sorrendben, a legjobb elöl. A router az első hívható elemet választja. Ez egy fordulót irányít át; a Hermes indulási modelljét nem változtatja meg.',
     'settings.prefs.add': 'modell hozzáadása...',
@@ -1534,6 +1629,7 @@ function renderSettings(){
   if(currentConfig.delegation_limits){const limits=currentConfig.delegation_limits,note=document.createElement('div');note.className='pref-note';note.textContent=t('settings.worker.limits').replace('{depth}',limits.max_spawn_depth??'—').replace('{children}',limits.max_concurrent_children??'—').replace('{iterations}',limits.max_iterations??'—');$('workflow-switch').append(note)}
   renderAccounts();
   renderEffort();
+  renderClaudeReasoningEffort();
   renderPreferences(modelLabels);
   renderMainChain(modelLabels,models);
   renderWorkers(modelLabels);
@@ -1604,6 +1700,33 @@ function renderEffort(){
       +`<div class="pref-chain"><select data-effort="${tier}">${levels.map(level=>`<option value="${level}"${effort[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select></div>`;
     box.appendChild(row);
   }
+}
+function renderClaudeReasoningEffort(){
+  const box=$('claude-effort-settings');
+  if(!box)return;
+  const state=currentConfig.claude_reasoning_effort||{available:false,reason:'',levels:{},haiku_supported:false};
+  const levels=state.levels||{};
+  const options=['low','medium','high','xhigh'];
+  const disabled=state.available?'':'disabled';
+  box.innerHTML='';
+  if(!state.available){
+    const note=document.createElement('div');
+    note.className='pref-note';
+    note.textContent=t('settings.claude_effort.unavailable').replace('{reason}',state.reason||'');
+    box.appendChild(note);
+  }
+  for(const tier of ['sonnet','opus']){
+    const row=document.createElement('div');
+    row.className='pref-kind';
+    row.innerHTML=`<div class="pref-kind-head"><div class="pref-kind-name">${t('settings.claude_effort.'+tier)}</div></div>`
+      +`<div class="pref-chain"><select data-claude-effort="${tier}" ${disabled}>${options.map(level=>`<option value="${level}"${levels[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select></div>`;
+    box.appendChild(row);
+  }
+  const haikuRow=document.createElement('div');
+  haikuRow.className='pref-kind';
+  haikuRow.innerHTML=`<div class="pref-kind-head"><div class="pref-kind-name">${t('settings.claude_effort.haiku')}</div></div>`
+    +`<div class="pref-chain"><span class="pref-note">${t('settings.claude_effort.haiku_unsupported')}</span></div>`;
+  box.appendChild(haikuRow);
 }
 async function refreshUsage(account){try{const r=await fetch(`/api/usage/refresh?account=${encodeURIComponent(account)}`,{method:'POST'});if(r.ok){const body=await r.json();currentConfig.accounts[account]=body.account;renderAccounts()}}catch(e){}}
 const defaultWidths=[55,110,90,350,90,230,480],widthStore='model-router-column-widths-v3';
@@ -1687,6 +1810,11 @@ document.getElementById('workflow-switch').addEventListener('change',async(e)=>{
 document.getElementById('effort-settings').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
   if(!el.dataset.effort)return;
   currentConfig.effort=Object.assign({},currentConfig.effort,{[el.dataset.effort]:el.value});
+  await saveSettings();await loadSettings()});
+document.getElementById('claude-effort-settings').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
+  if(!el.dataset.claudeEffort)return;
+  const state=currentConfig.claude_reasoning_effort||{levels:{}};
+  currentConfig.claude_reasoning_effort=Object.assign({},state,{levels:Object.assign({},state.levels,{[el.dataset.claudeEffort]:el.value})});
   await saveSettings();await loadSettings()});
 document.getElementById('account-cards').addEventListener('click',e=>{const b=e.target.closest('[data-refresh-usage]');if(b)refreshUsage(b.dataset.refreshUsage)});
 document.getElementById('language-select').addEventListener('change',async(e)=>{
@@ -1841,7 +1969,7 @@ function mutatePreference(kind,index,act){
 
 function saveSettings(){
   if(!currentConfig)return Promise.resolve();
-  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},claude_reasoning_effort:(currentConfig.claude_reasoning_effort||{}).levels||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
   settingsPending++;settingsLoadGeneration++;
   settingsSaveQueue=settingsSaveQueue.then(async()=>{
     const statusEl=$('settings-status');
@@ -2063,7 +2191,8 @@ def _save_config_payload(data):
             _assign_in_place(config, "preferences", cleaned)
         for key, save in (("usage_limits", _save_usage_limits), ("effort", _save_effort),
                           ("claude_delegation", _save_claude_delegation), ("balance", _save_balance),
-                          ("workflow", _save_workflow)):
+                          ("workflow", _save_workflow),
+                          ("claude_reasoning_effort", _save_claude_reasoning_effort)):
             if key in data:
                 error = save(data[key], config)
                 if error:
@@ -2220,6 +2349,7 @@ class Handler(BaseHTTPRequestHandler):
                         "balance": _balance_status(config),
                         "default_model": config.get("default_model", "terra"),
                         "effort": {tier: (config.get("effort") or {}).get(tier) for tier in MANAGED_EFFORT_TIERS},
+                        "claude_reasoning_effort": _claude_reasoning_status(config),
                         "preferences": config.get("preferences") or {},
                         "work_kinds": work_kinds,
                         # Hermes's own chains, not the router's. Kept separate in the payload
