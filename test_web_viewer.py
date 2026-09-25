@@ -3096,6 +3096,60 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
                 self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
                 self.assertEqual(config_path.read_bytes(), shipped_before)
 
+    def test_a_full_defaults_save_with_an_unrelated_change_writes_no_claude_block(self):
+        """The exact bug from the final review: saveSettings() always posts the
+        full (currently-default) levels alongside any unrelated setting change.
+        That must not pin today's defaults into the local file forever."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            status, body = self._request(
+                config_path, "POST",
+                {"claude_reasoning_effort": {"sonnet": "medium", "opus": "medium"}, "callable": {"luna": False}},
+            )
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else {}
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+        self.assertEqual(written.get("callable"), {"luna": False})
+        self.assertNotIn("claude_delegation", written)
+
+    def test_setting_opus_back_to_the_default_leaves_the_explicit_override_in_the_delta(self):
+        """An explicit local override set back to the default round-trips correctly:
+        opus's key is present in the merged config (from the earlier "high" write),
+        so per the controller's ruling it is assigned as always -- and _overlay keeps
+        it in the local file because the shipped file has no reasoning_effort block
+        at all to fall back to (there is nothing for the written value to equal)."""
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            status1, _ = self._request(config_path, "POST", {"claude_reasoning_effort": {"opus": "high"}})
+            self.assertEqual(status1, 200)
+            local = config_path.with_name("router_config.local.yaml")
+            written1 = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+            self.assertEqual(written1, {"claude_delegation": {"reasoning_effort": {"opus": "high"}}})
+
+            status2, _ = self._request(
+                config_path, "POST",
+                {"claude_reasoning_effort": {"sonnet": "medium", "opus": "medium"}},
+            )
+            self.assertEqual(status2, 200)
+            written2 = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else {}
+        self.assertEqual(
+            written2.get("claude_delegation", {}).get("reasoning_effort", {}).get("opus"), "medium",
+        )
+
+    def test_an_unavailable_bridge_save_of_unchanged_levels_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            with patch.object(web_viewer, "_claude_delegation_module", return_value=None):
+                status, body = self._request(
+                    config_path, "POST",
+                    {"claude_reasoning_effort": {"sonnet": "medium", "opus": "medium"}},
+                )
+            local = config_path.with_name("router_config.local.yaml")
+            self.assertFalse(local.exists())
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+
     def test_an_empty_claude_effort_payload_is_a_noop_and_creates_no_block(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = self._write_config(directory)

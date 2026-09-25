@@ -1038,13 +1038,31 @@ def _save_claude_reasoning_effort(raw, config: dict):
     if not cleaned:
         # Leave an absent reasoning_effort block absent when a client posts no changes.
         return None
+    existing_block = config.get("claude_delegation")
+    existing_effort = existing_block.get("reasoning_effort") if isinstance(existing_block, dict) else None
+    existing_effort = existing_effort if isinstance(existing_effort, dict) else {}
+    delegation = _claude_delegation_module()
+    try:
+        effective_defaults = delegation.reasoning_effort_config(config) if delegation is not None else dict(_CLAUDE_REASONING_DEFAULT_LEVELS)
+    except Exception:
+        effective_defaults = dict(_CLAUDE_REASONING_DEFAULT_LEVELS)
+    to_write = {}
+    for tier, value in cleaned.items():
+        if tier not in existing_effort and value == effective_defaults.get(tier):
+            # No live override exists and the posted value already matches the
+            # effective default: writing it would pin today's default forever
+            # (a future default change would never reach this dashboard).
+            continue
+        to_write[tier] = value
+    if not to_write:
+        return None
     block = config.get("claude_delegation")
     if not isinstance(block, dict):
         block = config["claude_delegation"] = {}
     reasoning_effort = block.get("reasoning_effort")
     if not isinstance(reasoning_effort, dict):
         reasoning_effort = block["reasoning_effort"] = {}
-    for tier, value in cleaned.items():
+    for tier, value in to_write.items():
         reasoning_effort[tier] = value
     return None
 
