@@ -90,10 +90,10 @@ def classify_coding_dispatch(task: str) -> tuple[bool, str]:
 
 
 def classify_review_dispatch(task: str) -> tuple[bool, str]:
-    """Allow only an explicit Opus request to perform a read-only review."""
+    """Allow only an explicit Claude tier request for a read-only review."""
     if REVIEW_OVERRIDE.match(_normalise(task or "")):
-        return True, "explicit Claude Opus 5.5 read-only review override"
-    return False, "review dispatch requires an explicit [opus-review] or [opus5-review] prefix"
+        return True, "explicit Claude read-only review override"
+    return False, "review dispatch requires an explicit [opus-review] or [sonnet-review] prefix"
 
 
 def _effective_model(payload: dict[str, Any], expected: str = CANONICAL_OPUS_MODEL) -> str:
@@ -154,6 +154,7 @@ def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, ma
 
 def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False, timeout: int | None = None,
              max_turns: int | None = None, model: str | None = None, max_budget_usd: float = 5.0,
+             requested_alias: str | None = None, adjustment: str = "",
              parent_session_id: str | None = None, parent_turn_id: str | None = None,
              lifecycle_path: Path | None = None) -> dict[str, Any]:
     if review and write:
@@ -172,6 +173,9 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
     alias = (model or (review_model_alias(task) if review else None) or "opus").casefold()
     if alias not in CLAUDE_REVIEW_MODELS:
         raise ValueError(f"unknown Claude tier {alias!r}; expected one of {sorted(CLAUDE_REVIEW_MODELS)}")
+    requested_alias = (requested_alias or alias).casefold()
+    if requested_alias not in CLAUDE_REVIEW_MODELS:
+        raise ValueError(f"unknown requested Claude tier {requested_alias!r}")
     expected_model = CLAUDE_REVIEW_MODELS[alias]
     if not repo.is_dir():
         raise ValueError(f"repository directory does not exist: {repo}")
@@ -219,6 +223,8 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         "parent_session_id": parent_session_id or "", "parent_turn_id": parent_turn_id or "",
         "review": review, "requested_read_only": not write, "pid": os.getpid(),
         "requested_model": expected_model,
+        "requested_tier": requested_alias, "effective_tier": alias,
+        **({"adjusted": adjustment} if adjustment else {}),
         "process_started_at": _process_start_identity(os.getpid()),
     }
     _append_lifecycle(lifecycle_path, {**base_event, "event": "started", "state": "running", "timestamp": started_at})
@@ -266,7 +272,8 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         raise RuntimeError(f"Claude Code failed with subtype {payload.get('subtype') or 'unknown'}")
     cfg = _load_config()
     _log_decision(
-        RouteDecision("sonnet5" if alias == "sonnet" else "opus5", effective_model, reason, "external"),
+        RouteDecision("sonnet5" if alias == "sonnet" else "opus5", effective_model,
+                      reason + (f"; usage soft limit: {adjustment}" if adjustment else ""), "external"),
         {"turn_id": f"{bridge_run_id}:{payload.get('num_turns', 1)}", "api_call_count": payload.get("num_turns", 1), "request": {}},
         cfg,
     )

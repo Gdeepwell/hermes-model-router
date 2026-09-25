@@ -178,3 +178,25 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdjustmentEvidenceTests(unittest.TestCase):
+    @patch("claude_opus_bridge._log_decision")
+    @patch("claude_opus_bridge.subprocess.run")
+    def test_requested_and_effective_tiers_reach_lifecycle_and_route_log(self, run, logged):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ""
+        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}},
+                                              "result": "reviewed"})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bridge.jsonl"
+            dispatch("[opus-review] Review parser", Path(directory), review=True, model="sonnet",
+                     requested_alias="opus", adjustment="opus5→sonnet5 (weekly usage 75%)",
+                     parent_session_id="parent", lifecycle_path=path)
+            events = [json.loads(line) for line in path.read_text().splitlines()]
+        for event in events:
+            self.assertEqual(event["requested_tier"], "opus")
+            self.assertEqual(event["effective_tier"], "sonnet")
+            self.assertIn("weekly usage 75%", event["adjusted"])
+        self.assertEqual(events[-1]["canonical_model"], "claude-sonnet-5")
+        self.assertIn("usage soft limit: opus5→sonnet5", logged.call_args.args[0].reason)

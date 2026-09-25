@@ -1915,6 +1915,81 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         result = subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True)
         return result.stdout.strip()
 
+    def test_cli_refusal_audit_reaches_dashboard_chip_without_a_fake_worker(self):
+        import time
+        from model_router import _maybe_run_opus5, usage_guard
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'claude-audit.jsonl'
+            cfg = {'enabled': True, 'callable': {'sonnet5': True},
+                   'coding_agent': {'delegated_review': {'enabled': True}},
+                   'claude_delegation': {'log_path': str(path)},
+                   'usage_guard': {'accounts': {'anthropic': {'soft_percent': 70,
+                       'hard_percent': 90}}}}
+            request = {'messages': [{'role': 'user', 'content': '[sonnet-review] Review parser'}]}
+            with patch('model_router._verified_delegated_claude_review',
+                       return_value=(Path(directory), 'sonnet')), \
+                 patch('model_router.usage_guard.read',
+                       return_value=usage_guard.Reading(95, 10, None, None, time.time())), \
+                 patch('model_router._run_opus5_bridge') as bridge:
+                self.assertIsNone(_maybe_run_opus5(request, cfg, platform='subagent',
+                                   api_mode='codex_responses', turn_id='parent:sa-1'))
+            bridge.assert_not_called()
+            audits, _ = web_viewer._read_delegation_log(cfg)
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0]['event'], 'bridge_claude')
+        self.assertEqual(audits[0]['session_id'], 'parent')
+        self.assertIn('weekly usage 95%', audits[0]['message'])
+        out = self._run(self.ACCOUNTS_STATE,
+                        'const box=delegationChips({scope:{nodes:[]}},' + json.dumps(audits)
+                        + ');console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));')
+        self.assertEqual(json.loads(out), [{'text':'Claude: sonnet ✕',
+                                            'title': audits[0]['message']}])
+
+    def test_router_jsonl_and_bridge_lifecycle_render_both_step_downs(self):
+        import sqlite3
+        from agent_activity import load_agent_activity
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "state.db"
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE async_delegations (delegation_id TEXT, origin_session TEXT, parent_session_id TEXT, state TEXT, dispatched_at REAL, completed_at REAL, updated_at REAL, task_json TEXT, result_json TEXT)")
+                conn.execute("CREATE TABLE sessions (id TEXT, parent_session_id TEXT, started_at REAL, ended_at REAL, model TEXT)")
+                conn.execute("CREATE TABLE messages (id INTEGER, session_id TEXT, role TEXT, content TEXT, tool_name TEXT, timestamp REAL)")
+                conn.execute("INSERT INTO sessions VALUES ('child','parent',100,NULL,'gpt-terra')")
+                conn.execute("INSERT INTO messages VALUES (1,'parent','user','Review parser',NULL,90)")
+                conn.execute("INSERT INTO messages VALUES (2,'child','user','Inspect parser',NULL,100)")
+                conn.execute("INSERT INTO async_delegations VALUES (?,?,?,?,?,?,?,?,?)",
+                             ('deleg','parent','parent','completed',99,110,110,
+                              json.dumps({'goal':'Inspect parser'}),json.dumps({'api_calls':1})))
+            router = Path(directory) / "router.jsonl"
+            router.write_text(json.dumps({'turn_id':'child:sa-0:t','tier':'terra',
+                                          'model':'gpt-terra','effort':'medium',
+                                          'reason':'long work; usage soft limit: sol→terra (weekly 72%)'})+'\n')
+            lifecycle = Path(directory) / "bridge.jsonl"
+            lifecycle.write_text('\n'.join(json.dumps(event) for event in [
+                {'bridge_run_id':'bridge','event':'started','state':'running','timestamp':101,
+                 'parent_session_id':'parent','requested_tier':'opus','effective_tier':'sonnet',
+                 'requested_model':'claude-sonnet-5','review':True,'requested_read_only':True},
+                {'bridge_run_id':'bridge','event':'terminal','state':'success','timestamp':111,
+                 'parent_session_id':'parent','requested_tier':'opus','effective_tier':'sonnet',
+                 'canonical_model':'claude-sonnet-5','review':True,'requested_read_only':True,
+                 'adjusted':'opus5→sonnet5 (weekly usage 75%)'},
+            ])+'\n')
+            activity = load_agent_activity(db, now=112, router_log_path=router,
+                                           bridge_lifecycle_path=lifecycle)
+        parent = next(p for p in activity['parents'] if p['session_id']=='parent')
+        self.assertEqual(len(parent['children']),2)
+        self.assertEqual(activity['external_bridge_run_ids'], ['bridge'])
+        run = {'scope': {'nodes': parent['children']}}
+        out = self._run(self.ACCOUNTS_STATE, (
+            "const box=delegationChips(" + json.dumps(run) + ",[]);"
+            "console.log(JSON.stringify(box.children.map(c=>({text:c.textContent,title:c.title}))));"
+        ))
+        chips = json.loads(out)
+        self.assertEqual(chips, [
+            {'text':'Codex: terra ↓','title':'sol→terra, weekly 72%'},
+            {'text':'Claude: sonnet ↓','title':'opus5→sonnet5, weekly 75%'},
+        ])
+
     def test_assignment_by_session_and_time(self):
         """Two runs in the same session get the audit that landed after them but
         before the next one; an audit in an unrelated session goes nowhere."""

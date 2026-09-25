@@ -499,7 +499,9 @@ def load_agent_activity(
         tier = "sonnet5" if "sonnet" in model else "opus5" if "opus" in model else "claude"
         label = {"sonnet5": "Sonnet", "opus5": "Opus"}.get(tier, "Claude")
         work = "review" if evidence.get("review") else "worker"
-        calls = [{"tier": tier, "model": evidence.get("canonical_model"), "effort": "external"}] if evidence.get("canonical_model") else []
+        adjusted = str(evidence.get("adjusted") or started_event.get("adjusted") or "")
+        calls = [{"tier": tier, "model": evidence.get("canonical_model"), "effort": "external",
+                  **({"reason": f"usage soft limit: {adjusted}"} if adjusted else {})}] if evidence.get("canonical_model") else []
         child = {
             "id": run_id, "bridge_run_id": run_id, "goal": f"{label} {work}",
             "task_description": f"{model or label} · Claude Code {work}",
@@ -507,6 +509,9 @@ def load_agent_activity(
             "access_mode": "read_only" if evidence.get("review") else ("requested_read_only" if evidence.get("requested_read_only") else "standard"),
             "state": state, "model": evidence.get("canonical_model") or "",
             "model_source": "modelUsage" if evidence.get("canonical_model") else "unverified",
+            "tier_requested": evidence.get("requested_tier") or started_event.get("requested_tier") or "",
+            "tier_used": evidence.get("effective_tier") or started_event.get("effective_tier") or "",
+            "adjusted": adjusted,
             "routed_calls": calls, "toolsets": ["Read"] if evidence.get("requested_read_only") or evidence.get("review") else ["Read", "Edit", "Write", "Bash"],
             "started_at": float(started_event.get("timestamp") or 0),
             "updated_at": float(evidence.get("timestamp") or started_event.get("timestamp") or 0),

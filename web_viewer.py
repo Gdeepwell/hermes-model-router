@@ -571,7 +571,7 @@ def _read_delegation_log(config: dict, limit: int = 500):
             continue
         if entry.get("event") == "registration":
             registration = entry
-        elif entry.get("event") == "delegate_claude":
+        elif entry.get("event") in {"delegate_claude", "bridge_claude"}:
             audits.append(entry)
     return audits[-limit:], registration
 

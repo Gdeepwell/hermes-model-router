@@ -4355,7 +4355,8 @@ def _verified_delegated_claude_review(text: str, cfg: Dict[str, Any]) -> Optiona
 
 
 def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False, cfg: Dict[str, Any],
-                      model: Optional[str] = None, **context: Any) -> Dict[str, Any]:
+                      model: Optional[str] = None, requested_alias: Optional[str] = None,
+                      adjustment: str = "", **context: Any) -> Dict[str, Any]:
     """Lazy bridge import keeps the standalone CLI and package imports independent."""
     from .claude_opus_bridge import dispatch
 
@@ -4366,6 +4367,8 @@ def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False
         write=write,
         review=review,
         model=model,
+        requested_alias=requested_alias,
+        adjustment=adjustment,
         timeout=int(coding_cfg.get("timeout_seconds", 300)),
         max_turns=coding_cfg.get("max_turns"),
         max_budget_usd=coding_cfg.get("max_budget_usd", 5.0),
@@ -4423,17 +4426,35 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
 
     from .claude_opus_bridge import review_model_alias
     requested_alias = review_model_alias(text) or "opus"
+    adjustment = ""
+
+    def audit_refusal(message: str) -> None:
+        turn_id = str(kwargs.get("parent_turn_id") or kwargs.get("turn_id") or "")
+        session_id = str(kwargs.get("parent_session_id") or kwargs.get("session_id")
+                         or turn_id.split(":", 1)[0])
+        claude_delegation._log(cfg, {
+            "event": "bridge_claude", "tier_requested": requested_alias,
+            "tier_used": requested_alias, "outcome": "refused", "message": message,
+            "session_id": session_id, "turn_id": turn_id,
+        })
 
     def admitted_alias() -> Optional[str]:
         """Check Claude only after a real bridge route has been established."""
+        nonlocal adjustment
         target = {"opus": "opus5", "sonnet": "sonnet5"}[requested_alias]
         if not _is_callable_tier(target, cfg):
+            audit_refusal(f"Claude CLI tier {requested_alias} is disabled or cooling.")
             return None
         if not usage_guard.guarded("anthropic", cfg):
             return requested_alias
         outcome = usage_guard.apply("anthropic", target, cfg, usage_guard.read("anthropic", cfg))
-        if outcome.refused or not _is_callable_tier(outcome.tier, cfg):
+        if outcome.refused:
+            audit_refusal(outcome.refused)
             return None
+        if not _is_callable_tier(outcome.tier, cfg):
+            audit_refusal(f"Claude CLI substitution {outcome.tier} is disabled or cooling.")
+            return None
+        adjustment = outcome.adjusted
         return {"opus5": "opus", "sonnet5": "sonnet"}.get(outcome.tier)
 
     # A delegated review leaf runs on Claude and returns its verdict as the
@@ -4459,6 +4480,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
                 write=False,
                 review=True,
                 model=alias,
+                requested_alias=requested_alias,
+                adjustment=adjustment,
                 cfg=cfg,
                 turn_id=str(kwargs.get("turn_id") or ""),
                 parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
@@ -4480,6 +4503,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             write=False,
             review=True,
             model=alias,
+            requested_alias=requested_alias,
+            adjustment=adjustment,
             cfg=cfg,
             turn_id=str(kwargs.get("turn_id") or ""),
             parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
@@ -4497,6 +4522,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             task=f"[opus5] {text}",
             write=_opus5_write_intent(text),
             model=alias,
+            requested_alias=requested_alias,
+            adjustment=adjustment,
             cfg=cfg,
             turn_id=str(kwargs.get("turn_id") or ""),
             parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),
@@ -4527,6 +4554,8 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         task=text,
         write=_opus5_write_intent(text),
         model=alias,
+        requested_alias=requested_alias,
+        adjustment=adjustment,
         cfg=cfg,
         turn_id=str(kwargs.get("turn_id") or ""),
         parent_session_id=kwargs.get("parent_session_id") or kwargs.get("session_id"),

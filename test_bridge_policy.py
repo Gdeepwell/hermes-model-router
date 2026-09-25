@@ -29,6 +29,8 @@ class BridgePolicyTests(unittest.TestCase):
     def test_soft_limit_selects_only_an_enabled_lighter_tier(self):
         bridge = self.run_bridge("opus", {"sonnet5": True, "opus5": True}, weekly=75)
         self.assertEqual(bridge.call_args.kwargs["model"], "sonnet")
+        self.assertEqual(bridge.call_args.kwargs["requested_alias"], "opus")
+        self.assertIn("opus5→sonnet5", bridge.call_args.kwargs["adjustment"])
         self.run_bridge("opus", {"sonnet5": False, "opus5": True}, weekly=75).assert_not_called()
 
 
