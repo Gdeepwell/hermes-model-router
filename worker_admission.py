@@ -2,16 +2,40 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from . import usage_guard
 
 
+CLAUDE_OFF = "Claude workers are switched off in Settings. The parent model is unchanged."
+
+
+def claude_switched_off(account, model, cfg):
+    """Whether a Claude worker may not run: the Claude target its model maps to is off.
+
+    A model the delegation tiers do not list (a dated snapshot, say) maps to its
+    target through Hermes's own ``delegation.targets``; one neither names needs
+    any Claude switch on. The switch alone decides, not the cooldown: a cooling
+    tier is a wait, not a reason to stop a child mid-task.
+    """
+    model = str(model or "")
+    if account != "anthropic" and not model.startswith("claude-"):
+        return False
+    from . import claude_delegation, _delegation_targets_detail
+
+    claude_targets = tuple(claude_delegation.TARGET_FOR_TIER.values())
+    target = claude_delegation.target_for_model(model, cfg) or next(
+        (name for name, spec in _delegation_targets_detail().items()
+         if name in claude_targets and spec.get("model") == model), None)
+    targets = (target,) if target else claude_targets
+    switches = cfg.get("callable") or {}
+    return not any(switches.get(name) is True for name in targets)
+
+
 def refusal(account, tier, cfg, *, blocking=False):
-    if str(cfg.get("workflow") or "").strip().lower() == "codex" and (
-        account == "anthropic" or str(tier).startswith("claude-")
-    ):
-        return "Claude workers are disabled by workflow: codex. The parent model is unchanged."
+    if claude_switched_off(account, tier, cfg):
+        return CLAUDE_OFF
     if not usage_guard.guarded(account, cfg):
         return ""
     reading = (usage_guard.read if blocking else usage_guard.peek)(account, cfg)
@@ -29,7 +53,9 @@ def delegate_task_route():
 
 
 def guard_tool_execution(**kwargs):
-    from . import _load_config, _delegation_targets_detail
+    from . import _delegated_claude_review_status, _load_config, _delegation_targets_detail
+    from .claude_delegation import TIER_FOR_TARGET
+    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS
 
     args, next_call = kwargs.get("args") or {}, kwargs["next_call"]
     name = str(kwargs.get("tool_name") or "").removeprefix("mcp__")
@@ -41,9 +67,26 @@ def guard_tool_execution(**kwargs):
     account, model = delegate_task_route()
     targets = _delegation_targets_detail()
     tasks = args.get("tasks") or [args]
+    switches = cfg.get("callable") or {}
     for task in tasks if isinstance(tasks, list) else [args]:
-        target = targets.get(str(task.get("model") or args.get("model") or ""), {}) if isinstance(task, dict) else {}
-        message = refusal(target.get("provider") or account, target.get("model") or model, cfg, blocking=True)
+        task = task if isinstance(task, dict) else {}
+        goal = str(task.get("goal") or args.get("goal") or "")
+        requested_model = str(task.get("model") or args.get("model") or "").strip()
+        review, _reason = _delegated_claude_review_status(
+            goal, cfg, dispatch_cwd=Path.cwd(), requested_model=requested_model,
+        )
+        if review is not None:
+            _repo, alias = review
+            message = refusal("anthropic", CLAUDE_REVIEW_MODELS[alias], cfg, blocking=True)
+        else:
+            name = requested_model.casefold()
+            target = targets.get(name, {})
+            # A Claude target named by its switch obeys that switch, even when its
+            # model string (a dated snapshot, say) is not one the delegation tiers list.
+            if name in TIER_FOR_TARGET and switches.get(name) is not True:
+                message = CLAUDE_OFF
+            else:
+                message = refusal(target.get("provider") or account, target.get("model") or model, cfg, blocking=True)
         if message:
             return json.dumps({"error": message + " Re-dispatch on an available account; do not retry this account."})
     return next_call(args)

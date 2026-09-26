@@ -6,9 +6,12 @@ route pinned to the anthropic provider. These tests cover the wing without any
 network or model call.
 """
 
+import ast
+import inspect
 import json
 import sys
 import tempfile
+import textwrap
 import time
 import types
 import unittest
@@ -55,10 +58,11 @@ def _cfg(**overrides):
 
 
 class DelegationConfigTests(unittest.TestCase):
-    def test_a_config_without_the_block_leaves_the_wing_off(self):
-        """Configuring nothing must change nothing."""
-        self.assertFalse(delegation_config({})["enabled"])
-        self.assertFalse(delegation_config(None)["enabled"])
+    def test_the_block_no_longer_carries_an_on_off_flag(self):
+        """The Claude switches in `callable` decide availability; `enabled` is retired."""
+        self.assertNotIn("enabled", delegation_config({}))
+        self.assertNotIn("enabled", delegation_config(None))
+        self.assertNotIn("enabled", delegation_config({"claude_delegation": {"enabled": True}}))
 
     def test_a_partial_block_keeps_the_other_defaults(self):
         settings = delegation_config({"claude_delegation": {"enabled": True, "default_tier": "haiku"}})
@@ -87,10 +91,10 @@ class DelegationConfigTests(unittest.TestCase):
 
 
 class AvailabilityBlockTests(unittest.TestCase):
-    def test_a_disabled_wing_is_not_offered(self):
+    def test_a_stale_enabled_flag_changes_nothing(self):
         cfg = _cfg()
         cfg["claude_delegation"]["enabled"] = False
-        self.assertIn("enabled", availability_block(cfg))
+        self.assertEqual(availability_block(cfg), "")
 
     def test_every_claude_target_switched_off_is_not_offered(self):
         cfg = _cfg()
@@ -259,12 +263,346 @@ class HandlerTests(unittest.TestCase):
             entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertEqual((entry["session_id"], entry["turn_id"]), ("sess-1", "turn-9"))
 
-    def test_switching_it_off_refuses_on_the_next_call(self):
+    def test_switching_every_claude_model_off_refuses_on_the_next_call(self):
         cfg = _cfg()
-        cfg["claude_delegation"]["enabled"] = False
+        for target in ("haiku", "sonnet5", "opus5"):
+            cfg["callable"][target] = False
         payload, calls = self._call({"tasks": [{"goal": "g"}]}, cfg=cfg)
-        self.assertEqual(payload["error"], "Claude delegation is switched off in router_config.yaml.")
+        self.assertEqual(payload["error"], "Claude delegation is off: every Claude model is switched off in "
+                                           "Settings. Use delegate_task, which runs on the Codex route.")
         self.assertEqual(calls, [])
+
+    def _call_with_resolver_capture(self, args, *, cfg=None, parent=None, usage=40.0, result=None):
+        """Like _call, but the fake delegate_task also calls the installed resolver wrapper
+        (tools.delegate_tool._resolve_child_runtime) with realistic kwargs, so tests can observe
+        whether/how the reasoning-effort bridge substituted reasoning_config -- without any
+        production test seam."""
+        import sys
+        parent = parent if parent is not None else SimpleNamespace(_delegate_depth=0)
+        resolver_calls = []
+
+        def delegate_task(**kwargs):
+            resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+            credentials_cfg = kwargs.get("credentials_cfg") or {}
+            resolved = resolver(
+                parent_agent=kwargs.get("parent_agent"),
+                delegation_cfg={},
+                parent_api_key=None,
+                model=credentials_cfg.get("model"),
+                override_provider=credentials_cfg.get("provider"),
+                override_base_url=None,
+                override_api_key=None,
+                override_api_mode=None,
+                override_acp_command=None,
+                override_acp_args=None,
+            )
+            resolver_calls.append(resolved)
+            return json.dumps(result if result is not None else {"status": "dispatched", "delegation_id": "d1"})
+
+        reading = None if usage is None else _reading(usage)
+        with patch("model_router._load_config", return_value=cfg or _cfg()), \
+             patch.object(claude_delegation, "_host", lambda: (delegate_task, lambda: parent)), \
+             patch.object(usage_guard, "read", return_value=reading):
+            raw = handle_delegate_claude(args)
+        return json.loads(raw), resolver_calls
+
+    def test_an_opus_request_lowered_to_sonnet_scopes_sonnet_effort(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+        def fake_resolver(*, parent_agent, model, override_provider, **_kwargs):
+            return {"provider": override_provider, "model": model, "base_url": "", "requested_provider": override_provider}
+
+        import sys
+        import types
+        fake_module = types.ModuleType("tools.delegate_tool")
+        fake_module._resolve_child_runtime = fake_resolver
+        cfg = _cfg()
+        cfg["claude_delegation"]["reasoning_effort"] = {"sonnet": "high", "opus": "low"}
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake_module,
+                                       "tools.delegate_tool_config": fake_module}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            payload, resolver_results = self._call_with_resolver_capture(
+                {"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg, usage=75.0,
+            )
+        self.assertEqual(payload["claude_tier"], "sonnet")
+        self.assertEqual(len(resolver_results), 1)
+        self.assertEqual(resolver_results[0]["reasoning_config"], {"enabled": True, "effort": "high"})
+
+    def test_a_haiku_call_never_sets_a_scope_and_bypasses_bridge_unavailability(self):
+        """Haiku must delegate normally regardless of bridge state -- extended thinking is
+        unsupported for Haiku, so the bridge is simply irrelevant to it."""
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(False, "boom")):
+            payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "haiku"})
+        self.assertEqual(payload["claude_tier"], "haiku")
+        self.assertEqual(len(calls), 1)
+
+    def test_a_non_haiku_call_is_refused_when_the_bridge_is_unavailable(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(False, "host seam moved")):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertIn("Claude reasoning effort is unavailable", payload["error"])
+        self.assertIn("host seam moved", payload["error"])
+        self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertIn("Claude reasoning effort is unavailable", entry["message"])
+        self.assertIn("host seam moved", entry["message"])
+
+    def test_a_tier_without_a_reasoning_level_is_refused_and_audited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(True, "")), \
+                 patch.object(claude_delegation, "reasoning_effort_config", return_value={}):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(payload["error"], "Claude reasoning effort for sonnet is not configured")
+        self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertEqual(entry["message"], "Claude reasoning effort for sonnet is not configured")
+
+    def test_an_unparseable_reasoning_level_is_refused_as_invalid_and_audited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(True, "")), \
+                 patch.object(claude_delegation, "reasoning_effort_config", return_value={"sonnet": "bogus"}):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(payload["error"], "Claude reasoning effort for sonnet is invalid")
+        self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertEqual(entry["message"], "Claude reasoning effort for sonnet is invalid")
+
+
+class ClaudeReasoningConfigTests(unittest.TestCase):
+    def test_defaults_expose_only_editable_sonnet_and_opus_levels(self):
+        self.assertEqual(
+            claude_delegation.reasoning_effort_config({"claude_delegation": {}}),
+            {"sonnet": "medium", "opus": "medium"},
+        )
+
+    def test_invalid_or_haiku_config_values_fall_back_to_the_safe_default(self):
+        config = {"claude_delegation": {"reasoning_effort": {
+            "sonnet": " HIGH ", "opus": "external", "haiku": "xhigh",
+        }}}
+        self.assertEqual(
+            claude_delegation.reasoning_effort_config(config),
+            {"sonnet": "high", "opus": "medium"},
+        )
+
+
+class ReasoningBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_a_missing_runtime_resolver_is_reported_as_unavailable(self):
+        fake = types.ModuleType("tools.delegate_tool")
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertFalse(ok)
+        self.assertIn("_resolve_child_runtime", reason)
+
+    def test_a_non_callable_runtime_resolver_is_reported_as_unavailable(self):
+        fake = types.ModuleType("tools.delegate_tool")
+        fake._resolve_child_runtime = object()
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        fake_config._resolve_child_runtime = fake._resolve_child_runtime
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertFalse(ok)
+        self.assertIn("not callable", reason)
+
+    def test_the_bridge_install_is_idempotent_and_records_availability(self):
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+        # Re-install must be a no-op that still reports available (idempotent).
+        ok2, reason2 = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok2, reason2)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+    def test_an_unchanged_installed_seam_skips_full_validation(self):
+        def resolver(*, parent_agent, model, override_provider):
+            return {"model": model}
+
+        fake = types.ModuleType("tools.delegate_tool")
+        fake._resolve_child_runtime = resolver
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        fake_config._resolve_child_runtime = resolver
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            wrapper = fake._resolve_child_runtime
+            with patch.object(claude_delegation, "_validate_reasoning_bridge_seam",
+                              side_effect=AssertionError("full validation should not run")):
+                self.assertEqual(claude_delegation.install_reasoning_bridge(), (True, ""))
+        self.assertIs(fake._resolve_child_runtime, wrapper)
+
+    def test_a_replaced_installed_seam_is_revalidated(self):
+        def resolver(*, parent_agent, model, override_provider):
+            return {"model": model}
+
+        fake = types.ModuleType("tools.delegate_tool")
+        fake._resolve_child_runtime = resolver
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        fake_config._resolve_child_runtime = resolver
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            fake._resolve_child_runtime = resolver
+            with patch.object(claude_delegation, "_validate_reasoning_bridge_seam",
+                              return_value=(False, "host seam moved", fake, resolver)) as validate:
+                self.assertEqual(claude_delegation.install_reasoning_bridge(), (False, "host seam moved"))
+            validate.assert_called_once_with()
+
+    def test_install_survives_a_second_module_copy_wrapping_the_seam_first(self):
+        """A second import of this module (plugin reload, or importing it both as
+        ``claude_delegation`` and ``model_router.claude_delegation``) must not
+        permanently disable the bridge for either copy.
+
+        Simulated here by hand-installing a foreign wrapper that carries
+        ``__model_router_original__`` -- exactly what this module's own wrapper
+        looks like from a second copy's point of view -- directly onto the real
+        host seam, bypassing this module's own bookkeeping.
+        """
+        import tools.delegate_tool as delegate_tool
+
+        real_original = delegate_tool._resolve_child_runtime
+
+        def foreign_wrapper(*args, **kwargs):
+            return real_original(*args, **kwargs)
+
+        foreign_wrapper.__model_router_original__ = real_original
+        delegate_tool._resolve_child_runtime = foreign_wrapper
+        try:
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            self.assertEqual(reason, "")
+            installed = delegate_tool._resolve_child_runtime
+            self.assertIs(installed.__model_router_original__, real_original)
+        finally:
+            claude_delegation._reset_reasoning_bridge_for_tests()
+            delegate_tool._resolve_child_runtime = real_original
+        self.assertIs(delegate_tool._resolve_child_runtime, real_original)
+
+    def test_two_module_copies_share_scope_and_lock_for_the_installed_wrapper(self):
+        """A scope from copy A must configure the wrapper installed by copy B."""
+        import importlib.util
+
+        source = Path(claude_delegation.__file__)
+        copy_names = ("model_router._claude_reasoning_copy_a", "model_router._claude_reasoning_copy_b")
+        for name in copy_names:
+            sys.modules.pop(name, None)
+            self.addCleanup(sys.modules.pop, name, None)
+
+        def resolver(*, parent_agent, model, override_provider, **_kwargs):
+            return {"provider": override_provider, "model": model}
+
+        delegate_tool = types.ModuleType("tools.delegate_tool")
+        delegate_tool._resolve_child_runtime = resolver
+        delegate_tool_config = types.ModuleType("tools.delegate_tool_config")
+        delegate_tool_config._resolve_child_runtime = resolver
+        with patch.dict(sys.modules, {
+            "tools.delegate_tool": delegate_tool,
+            "tools.delegate_tool_config": delegate_tool_config,
+        }):
+            copies = []
+            for name in copy_names:
+                spec = importlib.util.spec_from_file_location(name, source)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                spec.loader.exec_module(module)
+                copies.append(module)
+            copy_a, copy_b = copies
+            self.addCleanup(copy_a._reset_reasoning_bridge_for_tests)
+            self.addCleanup(copy_b._reset_reasoning_bridge_for_tests)
+
+            self.assertIs(copy_a._REASONING_BRIDGE_LOCK, copy_b._REASONING_BRIDGE_LOCK)
+            self.assertIs(copy_a._REASONING_SCOPE, copy_b._REASONING_SCOPE)
+            self.assertEqual(copy_b.install_reasoning_bridge(), (True, ""))
+
+            parent = SimpleNamespace()
+            with copy_a.reasoning_scope(parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"}):
+                result = delegate_tool._resolve_child_runtime(
+                    parent_agent=parent, model="claude-sonnet-5", override_provider="anthropic",
+                )
+        self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
+
+    def test_a_newer_copy_backfills_an_older_shared_holder(self):
+        """A copy can start when an existing holder predates newer state fields."""
+        import importlib.util
+
+        source = Path(claude_delegation.__file__)
+        copy_name = "model_router._claude_reasoning_older_holder_copy"
+        sys.modules.pop(copy_name, None)
+        self.addCleanup(sys.modules.pop, copy_name, None)
+        older_scope = claude_delegation.ContextVar("older_claude_delegation_reasoning_scope", default=None)
+        older_lock = claude_delegation.threading.Lock()
+        older_holder = SimpleNamespace(
+            scope=older_scope,
+            lock=older_lock,
+            installed=True,
+            reason="installed by an older copy",
+        )
+        with patch.dict(sys.modules, {claude_delegation._REASONING_BRIDGE_STATE_KEY: older_holder}):
+            spec = importlib.util.spec_from_file_location(copy_name, source)
+            copy = importlib.util.module_from_spec(spec)
+            sys.modules[copy_name] = copy
+            spec.loader.exec_module(copy)
+
+            self.assertIs(copy._REASONING_SCOPE, older_scope)
+            self.assertIs(copy._REASONING_BRIDGE_LOCK, older_lock)
+            self.assertTrue(older_holder.installed)
+            self.assertEqual(older_holder.reason, "installed by an older copy")
+            self.assertIsNone(older_holder.original)
+            self.assertIsNone(older_holder.wrapper)
+
+
+class ReasoningBridgeCompatibilityTests(unittest.TestCase):
+    """The side-effect-free probe a separate dashboard process can call safely."""
+
+    def setUp(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_the_probe_reports_compatible_on_the_real_host_without_installing(self):
+        import tools.delegate_tool as delegate_tool
+
+        before = delegate_tool._resolve_child_runtime
+        ok, reason = claude_delegation.reasoning_bridge_compatibility()
+        self.assertEqual((ok, reason), (True, ""))
+        # Never installs: the real host's resolver is untouched and the module's
+        # own bridge-installed state stays False, unlike install_reasoning_bridge().
+        self.assertIs(delegate_tool._resolve_child_runtime, before)
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_STATE.installed)
+
+    def test_the_probe_reports_incompatible_for_a_fake_module_missing_the_resolver(self):
+        fake = types.ModuleType("tools.delegate_tool")
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake}):
+            ok, reason = claude_delegation.reasoning_bridge_compatibility()
+        self.assertFalse(ok)
+        self.assertIn("_resolve_child_runtime", reason)
+
+    def test_status_reports_available_on_the_real_host_before_any_install(self):
+        # A fresh, uninstalled state (e.g. a standalone dashboard process that
+        # never calls install_reasoning_bridge()) must still see the seam as
+        # available whenever it is compatible: "available" means "the host
+        # seam is compatible", not "this process installed the wrapper".
+        # Force a clean start: another test elsewhere in the suite may have
+        # installed the real bridge without resetting it afterward, and this
+        # test's whole point is to observe the state BEFORE any install.
+        claude_delegation._reset_reasoning_bridge_for_tests()
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_STATE.installed)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
 
 
 class RegisterTests(unittest.TestCase):
@@ -325,13 +663,13 @@ class RegisterTests(unittest.TestCase):
             with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
                  patch.object(claude_delegation, "_independent_completions", return_value=False), \
                  patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=True):
-                cfg["claude_delegation"]["enabled"] = False
+                cfg["callable"].update(haiku=False, sonnet5=False, opus5=False)
                 claude_delegation.register(MagicMock(), cfg)
             lines = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([(l["event"], l["registered"]) for l in lines],
                          [("registration", False), ("registration", True)])
         self.assertIn("credentials_cfg", lines[0]["reason"])
-        self.assertFalse(lines[1]["available"], "registered, but switched off until the config allows it")
+        self.assertFalse(lines[1]["available"], "registered, but unavailable until a Claude model is switched on")
 
 
 class SequentialDeadlineExemptionTests(unittest.TestCase):
@@ -363,6 +701,69 @@ def _hermes_importable():
         return False
 
 
+class _StaleInstallMapFinder:
+    """Fails the named Hermes imports the way an outdated editable-install map does.
+
+    A Hermes update can add a top-level module (``hermes_yaml``) that the venv's
+    install map does not list yet; the standalone dashboard, which has no
+    PYTHONPATH, then cannot import ``tools.*`` / ``agent.*`` until the Hermes
+    checkout is put on ``sys.path``. The test harness always puts it there, so
+    this finder stands in for the stale map: it refuses the names until
+    ``checkout`` is on ``sys.path``, then steps aside for the normal finders.
+    """
+
+    def __init__(self, names, checkout):
+        self.names = set(names)
+        self.checkout = checkout
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in self.names and self.checkout not in sys.path:
+            raise ModuleNotFoundError("No module named 'hermes_yaml'", name="hermes_yaml")
+        return None
+
+
+@unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
+class StaleInstallMapTests(unittest.TestCase):
+    """The dashboard must see the Claude seam without a usage Refresh having run first."""
+
+    NAMES = ("tools.delegate_tool", "tools.delegate_tool_config", "agent.subagent_lifecycle")
+
+    def setUp(self):
+        import importlib
+        import agent
+        import tools
+
+        importlib.import_module("tools.delegate_tool")
+        importlib.import_module("agent.subagent_lifecycle")
+        checkout = tempfile.mkdtemp()
+        # Put the real modules and their package attributes back afterwards: the
+        # retried import re-executes them under fresh module objects.
+        saved_attrs = [(tools, "delegate_tool", tools.delegate_tool),
+                       (tools, "delegate_tool_config", tools.delegate_tool_config),
+                       (agent, "subagent_lifecycle", agent.subagent_lifecycle)]
+        modules = patch.dict(sys.modules)
+        modules.start()
+        self.addCleanup(modules.stop)
+        for owner, attr, value in saved_attrs:
+            self.addCleanup(setattr, owner, attr, value)
+        for name in self.NAMES:
+            sys.modules.pop(name, None)
+        finder = _StaleInstallMapFinder(self.NAMES, checkout)
+        sys.meta_path.insert(0, finder)
+        self.addCleanup(sys.meta_path.remove, finder)
+        self.addCleanup(lambda: sys.path.remove(checkout) if checkout in sys.path else None)
+        hermes_path = patch.object(usage_guard, "hermes_path", return_value=Path(checkout))
+        hermes_path.start()
+        self.addCleanup(hermes_path.stop)
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_the_effort_seam_is_found_through_the_hermes_checkout(self):
+        self.assertEqual(claude_delegation.reasoning_bridge_compatibility(), (True, ""))
+
+    def test_the_host_check_finds_the_delegation_api_through_the_hermes_checkout(self):
+        self.assertEqual(claude_delegation.host_check(), (True, ""))
+
+
 @unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
 class RealHostTests(unittest.TestCase):
     """Against the installed Hermes: the guarantees the wing leans on."""
@@ -385,12 +786,244 @@ class RealHostTests(unittest.TestCase):
 
     def test_the_depth_limit_holds_for_delegate_claude(self):
         """Nothing spawns from an agent at max_spawn_depth, whichever tool asked."""
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
         parent = SimpleNamespace(_delegate_depth=99)
         with patch("model_router._load_config", return_value=_cfg()), \
              patch.object(claude_delegation, "_host", lambda: (claude_delegation._host_delegate_task(), lambda: parent)), \
              patch.object(usage_guard, "read", return_value=_reading(10)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("depth limit", payload["error"].lower())
+
+    def test_the_child_builder_forwards_the_resolved_runtime_to_aiagent(self):
+        import tools.delegate_tool as delegate_tool
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(delegate_tool._build_child_agent)))
+        resolver_assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "_resolve_child_runtime"
+        ]
+        self.assertTrue(resolver_assignments, "_build_child_agent must call _resolve_child_runtime(...)")
+        resolved_names = {
+            target.id
+            for node in resolver_assignments
+            for target in ((node.targets if isinstance(node, ast.Assign) else [node.target]))
+            if isinstance(target, ast.Name)
+        }
+        self.assertTrue(resolved_names,
+                        "_build_child_agent must assign the resolved runtime to a plain name")
+        forwards_resolved_runtime = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AIAgent"
+            and any(keyword.arg is None and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id in resolved_names for keyword in node.keywords)
+            for node in ast.walk(tree)
+        )
+        self.assertTrue(forwards_resolved_runtime,
+                        "_build_child_agent must pass its resolved runtime to AIAgent as **<resolved name>")
+
+    def test_a_scoped_child_construction_receives_the_scoped_reasoning_config(self):
+        """Proves the bridge on the real host seam, called the way real construction calls it.
+
+        The brief's preferred shape is a real ``tools.delegate_tool._build_child_agent`` call
+        with ``run_agent.AIAgent`` patched to a recorder. In this interpreter that path is
+        impractical: ``_build_child_agent`` calls the real ``_load_config()`` from
+        ``tools.delegate_tool_config``, which (independent of anything this plugin does) can kick
+        off a real, network-bound `hermes update` dependency/build sync outside the sandbox
+        (reproduced with a standalone probe: the hang starts inside ``_build_child_agent``, not at
+        import time, and is unrelated to reasoning_config). So this proves the same guarantee one
+        layer down: calling the real, installed ``tools.delegate_tool._resolve_child_runtime`` --
+        already wrapped by ``install_reasoning_bridge()`` -- with the exact kwargs
+        ``_build_child_agent`` passes it (see tools/delegate_tool.py:219-225), while the scope is
+        active for that exact child. This is the same call ``ReasoningScopeIsolationTests`` below
+        exercises repeatedly; kept here too since it is this test class's natural home per the
+        brief's Step 5/6.
+        """
+        import sys
+        import tools.delegate_tool as real_delegate_tool
+
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+
+        parent = SimpleNamespace(
+            _delegate_depth=0, model="claude-opus-5-5", provider="anthropic", base_url="https://api.anthropic.com",
+            api_key="k", request_overrides={}, session_id="sess-real",
+        )
+        resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+        with claude_delegation.reasoning_scope(
+            parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"},
+        ):
+            # Same call shape as tools/delegate_tool.py's _build_child_agent, ~219-225.
+            rt = resolver(
+                parent, delegation_cfg={}, parent_api_key="k", model="claude-sonnet-5",
+                override_provider="anthropic", override_base_url=None, override_api_key=None,
+                override_api_mode=None, override_acp_command=None, override_acp_args=None,
+                routing_cfg=None,
+            )
+        self.assertEqual(rt.get("reasoning_config"), {"enabled": True, "effort": "high"})
+
+    def test_the_scoped_config_produces_the_real_anthropic_wire_shape(self):
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            "claude-sonnet-5", [], [], 4096, {"enabled": True, "effort": "high"},
+        )
+        self.assertEqual(kwargs["thinking"]["type"], "adaptive")
+        self.assertEqual(kwargs["output_config"]["effort"], "high")
+
+        haiku = build_anthropic_kwargs(
+            "claude-haiku-4-5-20251001", [], [], 4096, {"enabled": True, "effort": "high"},
+        )
+        self.assertNotIn("thinking", haiku)
+        self.assertNotIn("output_config", haiku)
+
+    def test_a_disabled_bridge_fixture_refuses_a_non_haiku_call_on_the_real_host(self):
+        """The compatibility refusal path, proven against the real host_check-passing
+        interpreter with a deliberately disabled bridge fixture."""
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(False, "disabled for this test")):
+            with patch("model_router._load_config", return_value=_cfg()), \
+                 patch.object(claude_delegation, "_host",
+                              lambda: (claude_delegation._host_delegate_task(), lambda: SimpleNamespace(_delegate_depth=0))), \
+                 patch.object(usage_guard, "read", return_value=_reading(10)):
+                payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}], "tier": "sonnet"}))
+        self.assertIn("Claude reasoning effort is unavailable", payload["error"])
+        self.assertIn("disabled for this test", payload["error"])
+
+
+class ReasoningScopeIsolationTests(unittest.TestCase):
+    """Deferred Task 1 finding: the wrapper's substitution/non-substitution logic, covered
+    directly against the real installed host seam."""
+
+    def setUp(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+        import sys
+        self.resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+
+    def _resolve(self, *, parent_agent, model, override_provider="anthropic"):
+        return self.resolver(
+            parent_agent=parent_agent, delegation_cfg={}, parent_api_key=None, model=model,
+            override_provider=override_provider, override_base_url=None, override_api_key=None,
+            override_api_mode=None, override_acp_command=None, override_acp_args=None,
+        )
+
+    def test_a_matching_scope_substitutes_the_reasoning_config(self):
+        parent = SimpleNamespace()
+        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"}):
+            result = self._resolve(parent_agent=parent, model="claude-sonnet-5")
+        self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
+
+    def _stub_original_resolver(self, sentinel):
+        """Re-point the *real* host's ``_resolve_child_runtime`` at a stub returning
+        ``sentinel``, then reinstall the bridge so the wrapper's ``original`` closure
+        captures that stub instead of the real Hermes resolver -- restored on cleanup.
+
+        ``install_reasoning_bridge()``'s wrapper closes over its ``original`` argument
+        directly (see ``_wrap_resolve_child_runtime``); it does not re-read
+        ``_REASONING_BRIDGE_STATE.original`` on every call. So proving identity passthrough
+        requires the stub to be the thing the wrapper actually calls, not just a
+        bookkeeping global -- otherwise this test would pass against a real resolver's
+        freshly built dict and never catch a wrapper bug that returns a copy.
+        """
+        import sys
+        delegate_tool = sys.modules["tools.delegate_tool"]
+        delegate_tool_config = sys.modules["tools.delegate_tool_config"]
+        real_original = claude_delegation._REASONING_BRIDGE_STATE.original
+        self.assertIsNotNone(real_original, "bridge must already be installed")
+
+        def stub(*, parent_agent=None, delegation_cfg=None, parent_api_key=None, model=None,
+                 override_provider=None, override_base_url=None, override_api_key=None,
+                 override_api_mode=None, override_acp_command=None, override_acp_args=None,
+                 routing_cfg=None):
+            return sentinel
+
+        # Uninstall first so install_reasoning_bridge() sees an unwrapped resolver and
+        # is willing to wrap again (it treats an already-wrapped current as a no-op).
+        claude_delegation._reset_reasoning_bridge_for_tests()
+        delegate_tool._resolve_child_runtime = stub
+        delegate_tool_config._resolve_child_runtime = stub
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+        self.resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+
+        def _restore():
+            claude_delegation._reset_reasoning_bridge_for_tests()
+            delegate_tool._resolve_child_runtime = real_original
+            delegate_tool_config._resolve_child_runtime = real_original
+            ok2, reason2 = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok2, reason2)
+            self.resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
+
+        self.addCleanup(_restore)
+
+    def test_an_unscoped_call_returns_the_original_result_object(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
+        parent = SimpleNamespace()
+        # No scope active: the wrapper must pass the host's object straight through,
+        # unchanged, not a copy of it.
+        returned = self._resolve(parent_agent=parent, model="claude-sonnet-5")
+        self.assertIs(returned, sentinel)
+
+    def test_a_different_parent_object_is_not_substituted(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
+        scoped_parent, other_parent = SimpleNamespace(), SimpleNamespace()
+        with claude_delegation.reasoning_scope(scoped_parent, "sonnet", "claude-sonnet-5",
+                                                {"enabled": True, "effort": "high"}):
+            returned = self._resolve(parent_agent=other_parent, model="claude-sonnet-5")
+        self.assertIs(returned, sentinel)
+
+    def test_a_non_anthropic_override_provider_is_not_substituted(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
+        parent = SimpleNamespace()
+        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
+                                                {"enabled": True, "effort": "high"}):
+            returned = self._resolve(parent_agent=parent, model="claude-sonnet-5", override_provider="openai-codex")
+        self.assertIs(returned, sentinel)
+
+    def test_a_different_model_is_not_substituted(self):
+        sentinel = {"marker": object()}
+        self._stub_original_resolver(sentinel)
+        parent = SimpleNamespace()
+        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
+                                                {"enabled": True, "effort": "high"}):
+            returned = self._resolve(parent_agent=parent, model="claude-opus-5-5")
+        self.assertIs(returned, sentinel)
+
+    def test_two_threads_each_get_their_own_scoped_effort(self):
+        import threading
+
+        results = {}
+        errors = []
+
+        def worker(name, parent, model, effort):
+            try:
+                with claude_delegation.reasoning_scope(parent, "sonnet", model, {"enabled": True, "effort": effort}):
+                    results[name] = self._resolve(parent_agent=parent, model=model)
+            except Exception as exc:  # pragma: no cover - surfaced via errors list
+                errors.append((name, exc))
+
+        parent_a, parent_b = SimpleNamespace(), SimpleNamespace()
+        t1 = threading.Thread(target=worker, args=("a", parent_a, "claude-sonnet-5", "high"))
+        t2 = threading.Thread(target=worker, args=("b", parent_b, "claude-opus-5-5", "low"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertFalse(t1.is_alive())
+        self.assertFalse(t2.is_alive())
+        self.assertEqual(results["a"]["reasoning_config"], {"enabled": True, "effort": "high"})
+        self.assertEqual(results["b"]["reasoning_config"], {"enabled": True, "effort": "low"})
 
 
 import model_router  # noqa: E402
@@ -435,12 +1068,11 @@ class ShippedConfigTests(unittest.TestCase):
         path = Path(model_router.__file__).resolve().parent / "router_config.yaml"
         self.cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    def test_the_wing_ships_in_step_with_the_workflow_and_with_its_files(self):
-        # router_config.yaml is also the live config, and the dashboard's Workflow
-        # switch keeps `enabled` in step with it -- so either workflow is valid here.
+    def test_the_wing_ships_with_its_files_and_without_an_on_off_switch(self):
+        # Availability is the Claude switches in `callable`, which ship off.
         settings = self.cfg["claude_delegation"]
-        self.assertIn(self.cfg.get("workflow", "claude_delegation"), ("claude_delegation", "codex"))
-        self.assertEqual(settings["enabled"], self.cfg.get("workflow", "claude_delegation") == "claude_delegation")
+        self.assertNotIn("workflow", self.cfg)
+        self.assertNotIn("enabled", settings)
         self.assertEqual(settings["tiers"], CLAUDE_DELEGATION["tiers"])
         self.assertEqual(settings["default_tier"], "sonnet")
         self.assertNotIn("usage_guard", settings)
@@ -459,7 +1091,8 @@ class ShippedConfigTests(unittest.TestCase):
             self.assertTrue(0 < soft < hard <= 100, (account, soft, hard))
 
     def test_haiku_is_a_known_claude_target(self):
-        self.assertIs(self.cfg["callable"]["haiku"], True)
+        # Shipped off like every Claude model: it needs a Claude login first.
+        self.assertIs(self.cfg["callable"]["haiku"], False)
         self.assertEqual(self.cfg["tier_providers"]["haiku"], "anthropic")
         self.assertIn("haiku", self.cfg["peer_groups"]["light"])
 

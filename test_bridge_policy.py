@@ -1,9 +1,13 @@
+import shutil
+import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from model_router import _maybe_run_opus5, usage_guard
+import model_router as router
+from model_router import _maybe_run_opus5, route_llm_request, usage_guard
 
 
 class BridgePolicyTests(unittest.TestCase):
@@ -32,6 +36,343 @@ class BridgePolicyTests(unittest.TestCase):
         self.assertEqual(bridge.call_args.kwargs["requested_alias"], "opus")
         self.assertIn("opus5→sonnet5", bridge.call_args.kwargs["adjustment"])
         self.run_bridge("opus", {"sonnet5": False, "opus5": True}, weekly=75).assert_not_called()
+
+
+class DelegatedReviewRepositoryTests(unittest.TestCase):
+    def setUp(self):
+        for cache_name in ("_REPO_DIRECTORY_CACHE", "_DISPATCH_REVIEW_REPOSITORIES"):
+            cache = getattr(router, cache_name, None)
+            if cache is not None:
+                cache.clear()
+        self.addCleanup(self._clear_router_caches)
+
+    def _clear_router_caches(self):
+        for cache_name in ("_REPO_DIRECTORY_CACHE", "_DISPATCH_REVIEW_REPOSITORIES"):
+            cache = getattr(router, cache_name, None)
+            if cache is not None:
+                cache.clear()
+
+    def _config(self, **coding_overrides):
+        coding = {"delegated_review": {"enabled": True, "models": ["sonnet", "opus"]}}
+        coding.update(coding_overrides)
+        return {"callable": {"sonnet5": True, "opus5": True}, "coding_agent": coding}
+
+    def _git_repo(self, directory):
+        repo = Path(directory) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        return repo
+
+    def test_goal_absolute_path_uses_its_git_top_level(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            child = repo / "nested"
+            child.mkdir()
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    f"[sonnet-review] Review repository {child}.", self._config())
+        self.assertEqual(routed, (repo.resolve(), "sonnet"))
+
+    def test_git_probe_timeout_is_not_a_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("model_router.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)) as run:
+                resolved = router._repo_directory(directory, git_top_level=True)
+        self.assertIsNone(resolved)
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
+
+    def test_git_probe_is_memoised_for_sixty_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            completed = subprocess.CompletedProcess([], 0, stdout=str(root) + "\n")
+            with patch("model_router.subprocess.run", return_value=completed) as run, \
+                 patch("model_router.time.monotonic", side_effect=[100.0, 159.0]):
+                first = router._repo_directory(root, git_top_level=True)
+                second = router._repo_directory(root, git_top_level=True)
+        self.assertEqual(first, root)
+        self.assertEqual(second, root)
+        run.assert_called_once()
+
+    def test_failed_git_probe_is_memoised_for_sixty_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with patch("model_router.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)) as run, \
+                 patch("model_router.time.monotonic", side_effect=[100.0, 159.0]):
+                first = router._repo_directory(root, git_top_level=True)
+                second = router._repo_directory(root, git_top_level=True)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        run.assert_called_once()
+
+    def test_goal_repository_skips_a_non_git_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / "scratch-notes"
+            scratch.mkdir()
+            resolved = router._goal_repository(f"[sonnet-review] Review {scratch}")
+        self.assertIsNone(resolved)
+
+    def test_goal_repository_skips_a_non_git_directory_before_a_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / "scratch-notes"
+            scratch.mkdir()
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review {scratch} then {repo}")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_resolves_a_backticked_repository_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review `{repo}`")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_resolves_a_parenthesised_repository_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review ({repo})")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_still_resolves_a_plain_repository_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review {repo}")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_does_not_take_a_url_as_a_path(self):
+        self.assertIsNone(router._goal_repository("[sonnet-review] Review https://example.com/a"))
+
+    def test_workspace_path_in_child_request_resolves_a_review_without_goal_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            request = {
+                "instructions": f"WORKSPACE PATH:\n{repo}\nUse this exact path.",
+                "messages": [{"role": "user", "content": "[sonnet-review] Review parser"}],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    "[sonnet-review] Review parser", self._config(), request=request)
+        self.assertEqual(routed, (repo.resolve(), "sonnet"))
+
+    def test_workspace_path_in_a_chat_system_message_resolves_a_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            request = {
+                "messages": [
+                    {"role": "system", "content": f"WORKSPACE PATH:\n{repo}\nUse this exact path."},
+                    {"role": "user", "content": "[sonnet-review] Review parser"},
+                ],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    "[sonnet-review] Review parser", self._config(), request=request)
+        self.assertEqual(routed, (repo.resolve(), "sonnet"))
+
+    def test_nonexistent_goal_and_shipped_aliases_are_skipped(self):
+        cfg = self._config(repo_aliases={"router": "/home/deepwell/hermes-model-router"})
+        with patch("model_router.shutil.which", return_value="/claude"):
+            routed = router._verified_delegated_claude_review(
+                "[sonnet-review] Review /not/a/repository, router", cfg)
+        self.assertIsNone(routed)
+
+    def test_resolved_sonnet_review_calls_the_cli_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            request = {
+                "instructions": f"WORKSPACE PATH:\n{repo}\nUse this exact path.",
+                "messages": [{"role": "user", "content": "[sonnet-review] Review parser"}],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"), \
+                 patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
+                 patch("model_router._run_opus5_bridge", return_value={
+                     "result": "reviewed", "effective_model": "claude-sonnet-5"}) as bridge:
+                result = _maybe_run_opus5(request, self._config(), platform="subagent",
+                                          api_mode="codex_responses")
+        self.assertEqual(result.model, "claude-sonnet-5")
+        bridge.assert_called_once()
+        self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
+
+    def test_dispatch_resolved_repository_carries_to_child_without_workspace_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review parser"
+            child_request = {"messages": [{"role": "user", "content": goal}]}
+            with patch("model_router.shutil.which", return_value="/claude"), \
+                 patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
+                 patch("model_router._run_opus5_bridge", return_value={
+                     "result": "reviewed", "effective_model": "claude-sonnet-5"}) as bridge:
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                result = _maybe_run_opus5(child_request, self._config(), platform="subagent",
+                                          api_mode="codex_responses")
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertEqual(result.model, "claude-sonnet-5")
+        self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
+
+    def test_dispatch_resolved_repository_expires_after_one_hour(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review parser"
+            clock = {"value": 100.0}
+            with patch("model_router.shutil.which", return_value="/claude"), \
+                 patch("model_router.time.monotonic", side_effect=lambda: clock["value"]):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                clock["value"] = 3701.0
+                execution = router._verified_delegated_claude_review(
+                    goal, self._config(), request={"messages": [{"role": "user", "content": goal}]})
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertIsNone(execution)
+
+    def test_dispatch_repository_matches_a_goal_with_an_appended_worktree_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review the parser's isolated worktree behavior"
+            execution_text = goal + "\n\nWorktree: child isolation appended this note."
+            with patch("model_router.shutil.which", return_value="/claude"):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                execution = router._verified_delegated_claude_review(
+                    execution_text, self._config(), request={
+                        "messages": [{"role": "user", "content": execution_text}],
+                    })
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertEqual(execution, (repo.resolve(), "sonnet"))
+
+    def test_a_too_short_goal_does_not_prefix_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] hi"
+            execution_text = goal + " please, this is urgent"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                execution = router._verified_delegated_claude_review(
+                    execution_text, self._config(), request={
+                        "messages": [{"role": "user", "content": execution_text}],
+                    })
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertIsNone(execution)
+
+    def test_same_goal_with_two_repositories_falls_through_to_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = self._git_repo(directory)
+            second = Path(directory) / "second"
+            second.mkdir()
+            subprocess.run(["git", "init", str(second)], check=True, capture_output=True)
+            goal = "[sonnet-review] Review the parser's isolated worktree behavior"
+            router._remember_dispatch_review_repository(goal, first)
+            router._remember_dispatch_review_repository(goal, second)
+            request = {
+                "instructions": f"WORKSPACE PATH:\n{first}\nUse this exact path.",
+                "messages": [{"role": "user", "content": goal}],
+            }
+            resolved = router._delegated_review_repository(goal, self._config(), request=request)
+        self.assertIsNone(router._remembered_dispatch_review_repository(goal))
+        self.assertEqual(resolved, first.resolve())
+
+    def test_dispatch_from_a_second_repository_is_not_overridden_by_the_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = self._git_repo(directory)
+            second = Path(directory) / "second"
+            second.mkdir()
+            subprocess.run(["git", "init", str(second)], check=True, capture_output=True)
+            goal = "[sonnet-review] Review the parser's isolated worktree behavior"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                first_dispatch, first_reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=first)
+                second_dispatch, second_reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=second)
+        self.assertEqual(first_reason, "")
+        self.assertEqual(second_reason, "")
+        self.assertEqual(first_dispatch, (first.resolve(), "sonnet"))
+        self.assertEqual(second_dispatch, (second.resolve(), "sonnet"))
+        self.assertIsNone(router._remembered_dispatch_review_repository(goal))
+
+    def test_prefix_match_requires_a_word_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review the parser"
+            execution_text = "[sonnet-review] Review the parsers of the other project"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                execution = router._verified_delegated_claude_review(
+                    execution_text, self._config(), request={
+                        "messages": [{"role": "user", "content": execution_text}],
+                    })
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertIsNone(execution)
+
+    def test_a_remembered_repository_that_vanished_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review parser"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                shutil.rmtree(repo)
+                execution = router._verified_delegated_claude_review(
+                    goal, self._config(), request={
+                        "messages": [{"role": "user", "content": goal}],
+                    })
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertIsNone(execution)
+
+    def test_cache_helpers_use_the_shared_repository_cache_lock(self):
+        class CountingLock:
+            def __init__(self):
+                self.entries = 0
+
+            def __enter__(self):
+                self.entries += 1
+
+            def __exit__(self, *_):
+                return False
+
+        cache = router.OrderedDict()
+        lock = CountingLock()
+        with patch.object(router, "_REPOSITORY_CACHE_LOCK", lock):
+            router._bounded_cache_put(cache, "repo", Path("/tmp"), max_entries=1)
+            found, value = router._bounded_cache_get(cache, "repo", 60)
+        self.assertTrue(found)
+        self.assertEqual(value, Path("/tmp"))
+        self.assertEqual(lock.entries, 2)
+
+    def test_review_model_must_match_its_claude_tier_before_admission(self):
+        cfg = self._config()
+        with patch("model_router.shutil.which", return_value="/claude"), \
+             patch("model_router._delegation_targets_detail", return_value={
+                 "sonnet5": {"provider": "anthropic", "model": "claude-sonnet-5"},
+                 "terra": {"provider": "openai-codex", "model": "gpt-terra"},
+             }):
+            claude, claude_reason = router._delegated_claude_review_status(
+                "[sonnet-review] Review parser", cfg, requested_model="sonnet5")
+            other, other_reason = router._delegated_claude_review_status(
+                "[sonnet-review] Review parser", cfg, requested_model="terra")
+        self.assertIsNone(claude)
+        self.assertEqual(claude_reason, "no repository could be resolved")
+        self.assertIsNone(other)
+        self.assertEqual(other_reason, "task names model terra")
+
+    def test_route_reason_names_a_missing_claude_cli_for_a_review_leaf(self):
+        cfg = {
+            "enabled": True, "provider": "openai-codex", "models": {"terra": "gpt-terra"},
+            "callable": {"terra": True, "sonnet5": True},
+            "tier_providers": {"terra": "openai-codex", "sonnet5": "openai-codex"},
+            "coding_agent": {"delegated_review": {"enabled": True, "models": ["sonnet"]}},
+        }
+        request = {"model": "gpt-terra", "messages": [{"role": "user", "content":
+                   "[sonnet-review] Review parser"}]}
+        with patch("model_router._load_config", return_value=cfg), \
+             patch("model_router.shutil.which", return_value=None), \
+             patch("model_router._log_decision"):
+            routed = route_llm_request(request=request, provider="openai-codex", model="gpt-terra",
+                                       platform="subagent", turn_id="root:sa-1", api_call_count=1)
+        self.assertIn("Claude review not taken (Claude CLI is unavailable)", routed["reason"])
 
 
 class AccountOfExecutionTests(unittest.TestCase):

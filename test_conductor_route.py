@@ -107,11 +107,12 @@ class QwenMisdispatchTests(unittest.TestCase):
         )
 
 class HostCapabilityTests(unittest.TestCase):
-    def test_codex_workflow_avoids_claude_conductor_on_both_host_shapes(self):
+    def test_switched_off_claude_is_never_the_conductor_on_either_host_shape(self):
         from copy import deepcopy
         from tools.delegate_tool import DELEGATE_TASK_SCHEMA
         cfg = _load_config()
-        cfg.update(workflow="codex", orchestration={"conductor": "opus5"})
+        cfg.update(orchestration={"conductor": "opus5"},
+                   callable={**cfg["callable"], "opus5": False, "sonnet5": False, "haiku": False})
         current = {"tools": [deepcopy(DELEGATE_TASK_SCHEMA)]}
         self.assertEqual(_conductor_tier(cfg, current), "terra")
         self.assertEqual(_conductor_tier(cfg, _request_with_delegate_tool()), "terra")

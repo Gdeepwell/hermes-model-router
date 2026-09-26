@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import model_router
 from model_router import claude_delegation, route_llm_request, usage_guard
-from model_router.test_claude_preflight import CODE, REVIEW, _anthropic_request
+from model_router.test_claude_preflight import CODE, REVIEW, _anthropic_request, _openai_request
 from model_router.test_model_router import CALLABLE, MODELS
 from model_router.usage_guard import Reading
 
@@ -24,7 +24,7 @@ PROVIDERS = {"luna": "openai-codex", "spark": "openai-codex", "terra": "openai-c
              "opus5": "anthropic", "sonnet5": "anthropic", "haiku": "anthropic"}
 
 
-def _cfg(temp_dir, *, balance=None, workflow="claude_delegation"):
+def _cfg(temp_dir, *, balance=None):
     return {
         "enabled": True, "provider": "openai-codex", "models": MODELS,
         "callable": {**CALLABLE, "opus5": True, "sonnet5": True, "haiku": True},
@@ -34,8 +34,6 @@ def _cfg(temp_dir, *, balance=None, workflow="claude_delegation"):
         "shadow": {"enabled": False},
         "preferences": {"review": ["sonnet5", "opus5", "terra"], "code": ["terra", "sonnet5"],
                         "chat": ["luna", "spark"]},
-        "claude_delegation": {"enabled": workflow == "claude_delegation"},
-        "workflow": workflow,
         "usage_guard": {
             "cache_seconds": 300,
             "balance": {"enabled": True, "busy_percent": 60, "margin_percent": 40, **(balance or {})},
@@ -236,6 +234,43 @@ class ForcedCallTests(unittest.TestCase):
                  patch.object(model_router, "_delegation_target_names", return_value=("haiku",)), \
                  patch.object(usage_guard, "peek", side_effect=lambda a, c: _reading(0, 65 if a == "openai-codex" else 0)):
                 self.assertIn("explore: haiku > luna", model_router._worker_order_note(request, cfg))
+
+
+class WorkerOrderNoteTests(unittest.TestCase):
+    _BRIDGE = ("tool_search", "tool_describe", "tool_call")
+
+    def _route_leaf(self, *, model, provider, request):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg(directory)
+            with patch("model_router._load_config", return_value=cfg), \
+                 patch("model_router._log_decision"), \
+                 patch("model_router._hermes_delegation_target_names", return_value=("sonnet5", "terra")), \
+                 patch.object(usage_guard, "read", return_value=None), \
+                 patch.object(usage_guard, "peek", return_value=None), \
+                 patch.object(claude_delegation, "_ACTIVE", True):
+                routed = route_llm_request(
+                    request=request, provider=provider, model=model,
+                    api_call_count=1, turn_id="parent:sa-1", platform="subagent",
+                )
+        routed_request = routed["request"] if routed is not None else request
+        return str(routed_request["messages"][-1]["content"])
+
+    def test_a_leaf_with_only_the_tool_search_bridge_gets_no_worker_order_note(self):
+        cases = (
+            ("claude-sonnet-5", "anthropic", _anthropic_request("Inspect the parser.", self._BRIDGE)),
+            ("gpt-5.6-terra", "openai-codex", _openai_request("Inspect the parser.", self._BRIDGE)),
+        )
+        for model, provider, request in cases:
+            with self.subTest(model=model):
+                instruction = self._route_leaf(model=model, provider=provider, request=request)
+                self.assertNotIn("[ROUTER] Current worker order", instruction)
+
+    def test_a_leaf_with_a_direct_delegation_tool_still_gets_the_worker_order_note(self):
+        for tools in (("delegate_task",), ("delegate_claude",), ("mcp__delegate_claude",)):
+            with self.subTest(tools=tools):
+                request = _openai_request("Inspect the parser.", tools)
+                instruction = self._route_leaf(model="gpt-5.6-terra", provider="openai-codex", request=request)
+                self.assertIn("[ROUTER] Current worker order", instruction)
 
 
 if __name__ == "__main__":

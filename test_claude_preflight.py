@@ -1,10 +1,10 @@
 """The forced planning call offers Claude delegation next to delegate_task.
 
 Measured 2026-09-19: under Claude delegation a review turn -- whose first choice is
-sonnet5 -- was forced through a delegate_task-only preflight, so the parent could
-not reach delegate_claude and the review ran on Terra. In the Claude delegation
-workflow the forced call now offers both routes and still requires one of them;
-the Codex workflow keeps the original delegate_task-only call.
+sonnet5, was forced through a delegate_task-only preflight, so the parent could
+not reach delegate_claude and the review ran on Terra. With Claude switched on the
+forced call now offers both routes and still requires one of them; with every
+Claude model switched off it keeps the original delegate_task-only call.
 """
 
 import tempfile
@@ -24,10 +24,10 @@ CODE = ("Javitsd meg a naptar komponens hibajat a repoban: a 15 perces racs akko
 SCHEMA = {"type": "object", "properties": {"goal": {"type": "string"}, "role": {"type": "string"}}}
 
 
-def _cfg(temp_dir, workflow="claude_delegation"):
+def _cfg(temp_dir, claude=True):
     cfg = {
         "enabled": True, "provider": "openai-codex", "models": MODELS,
-        "callable": {**CALLABLE, "opus5": True, "sonnet5": True, "haiku": True},
+        "callable": {**CALLABLE, "opus5": claude, "sonnet5": claude, "haiku": claude},
         "tier_providers": {"opus5": "anthropic", "sonnet5": "anthropic", "haiku": "anthropic"},
         "default_model": "terra",
         "effort": {"terra": "medium", "spark": "medium", "sol": "medium", "luna": "low"},
@@ -36,8 +36,6 @@ def _cfg(temp_dir, workflow="claude_delegation"):
         "shadow": {"enabled": False},
         "fallbacks": {"terra": "luna", "luna": "sol"},
         "preferences": {"review": ["sonnet5", "opus5", "terra"], "code": ["terra", "sonnet5"]},
-        "claude_delegation": {"enabled": workflow == "claude_delegation"},
-        "workflow": workflow,
     }
     return cfg
 
@@ -62,9 +60,9 @@ def _names(request):
 
 
 class ForcedPreflightTests(unittest.TestCase):
-    def _route(self, request, workflow="claude_delegation", model="claude-opus-5-5", provider="anthropic"):
+    def _route(self, request, claude=True, model="claude-opus-5-5", provider="anthropic"):
         with tempfile.TemporaryDirectory() as d, \
-             patch("model_router._load_config", return_value=_cfg(d, workflow)), \
+             patch("model_router._load_config", return_value=_cfg(d, claude)), \
              patch("model_router._log_decision"), \
              patch("model_router._hermes_delegation_target_names", return_value=("sonnet5", "opus5")), \
              patch.object(claude_delegation, "_ACTIVE", True):
@@ -104,9 +102,9 @@ class ForcedPreflightTests(unittest.TestCase):
         self.assertEqual(request["tool_choice"], "required")
         self.assertFalse(request["parallel_tool_calls"])
 
-    def test_the_codex_workflow_keeps_the_original_delegate_task_only_call(self):
+    def test_claude_switched_off_keeps_the_original_delegate_task_only_call(self):
         request = self._route(_anthropic_request(REVIEW, ["mcp__delegate_task", "mcp__tool_call"]),
-                              workflow="codex")
+                              claude=False)
         self.assertEqual(_names(request), ["mcp__delegate_task"])
         self.assertEqual(request["tool_choice"], {"type": "tool", "name": "mcp__delegate_task"})
         self.assertNotIn("delegate_claude(", self._instruction(request))

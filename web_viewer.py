@@ -8,6 +8,7 @@ import hashlib
 import io
 import tempfile
 import threading
+import traceback
 import json
 import os
 import time
@@ -50,6 +51,22 @@ def _read_hermes_config() -> dict:
         return loaded if isinstance(loaded, dict) else {}
     except Exception:
         return {}
+
+
+def _hermes_unreadable_message() -> str:
+    """Why a save refuses to touch the Hermes config, with the parse error when there is one."""
+    message = "The Hermes config could not be read; refusing to overwrite it"
+    if yaml is None or not HERMES_CONFIG_PATH.exists():
+        return message
+    try:
+        with open(HERMES_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle)
+    except Exception as exc:
+        detail = " ".join(str(exc).split())
+        return f"{message}: {HERMES_CONFIG_PATH} is not valid YAML ({detail}). Fix it and reload settings."
+    if loaded is not None and not isinstance(loaded, dict):
+        return f"{message}: {HERMES_CONFIG_PATH} is not a YAML mapping."
+    return message
 
 
 class HermesConfigChanged(RuntimeError):
@@ -149,7 +166,7 @@ def _save_hermes_fallback(payload, router_cfg: dict, *, hermes=None, persist=Tru
     options = _fallback_chain_options(router_cfg)
     stamp, config = _read_hermes_snapshot() if hermes is None else (None, hermes)
     if not config:
-        return "The Hermes config could not be read; refusing to overwrite it"
+        return _hermes_unreadable_message()
     # Whatever is already saved is always accepted, even when it names a route the
     # picker no longer (or never did) offer -- a chain the operator already has
     # configured, elsewhere, must never be the reason a save 400s.
@@ -304,6 +321,70 @@ def _save_default_model(requested: str, config: dict, *, hermes=None, persist=Tr
     return None
 
 
+def _claude_parent_options(config: dict) -> list:
+    """Claude models Hermes itself may start on: {key, provider, model} per switched-on tier.
+
+    A Claude tier is no router tier (no ``models`` entry), so it can never be the
+    router's ``default_model``; it can still be the model Hermes launches with, on
+    Hermes's own ``anthropic`` provider. A switched-off tier is not offered.
+    """
+    tiers = (config.get("claude_delegation") or {}).get("tiers") or {}
+    callable_tiers = config.get("callable") or {}
+    options = []
+    for tier, target in _CLAUDE_TARGET_FOR_TIER.items():
+        model = str(tiers.get(tier) or "")
+        if model and callable_tiers.get(target) is True:
+            options.append({"key": target, "provider": "anthropic", "model": model})
+    return options
+
+
+def _save_main_parent(key, config: dict, *, hermes=None, persist=True) -> str | None:
+    """Move the model Hermes starts on to ``key``: a router tier or a Claude target.
+
+    Posted only when the operator picks a parent, never on unrelated saves, so it
+    may move a parent that is on another account (``_save_default_model`` never
+    does). A router tier also becomes ``default_model``; a Claude parent leaves the
+    router's default route and conductor where they are. An error string, or None.
+    """
+    key = str(key or "")
+    stamp, hermes = _read_hermes_snapshot() if hermes is None else (None, hermes)
+    if not hermes:
+        return _hermes_unreadable_message()
+    if (config.get("callable") or {}).get(key) is False:
+        return f"'{key}' is switched off; switch it on before starting Hermes on it"
+    claude = next((o for o in _claude_parent_options(config) if o["key"] == key), None)
+    if claude is None:
+        if not str((config.get("models") or {}).get(key) or ""):
+            return f"'{key}' is not a model Hermes can start on"
+        if _hermes_parent(hermes) != {"provider": _tier_provider(key, config),
+                                      "model": str(config["models"][key])}:
+            error = _sync_hermes_default_model(key, config, hermes, stamp, persist=persist)
+            if error:
+                return error
+        config["default_model"] = key
+        return None
+    if _hermes_parent(hermes) == {"provider": claude["provider"], "model": claude["model"]}:
+        return None
+    model = hermes.get("model")
+    if not isinstance(model, dict):
+        model = {}
+        hermes["model"] = model
+    model["default"], model["provider"] = claude["model"], claude["provider"]
+    # What Hermes's own `hermes model` anthropic flow writes: the anthropic runtime
+    # fixes its endpoint itself, and a Codex api_mode or a stale base URL / key left
+    # behind would send the Claude parent down the wrong transport.
+    for stale in ("api_mode", "base_url", "api_key"):
+        model.pop(stale, None)
+    if persist:
+        try:
+            _write_hermes_config(hermes, stamp)
+        except HermesConfigChanged as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"Could not move Hermes's parent to {claude['model']}: {exc}"
+    return None
+
+
 def _tier_provider(tier: str, config: dict) -> str:
     return str((config.get("tier_providers") or {}).get(tier) or "openai-codex")
 
@@ -353,7 +434,7 @@ def _save_worker_model(tier, config: dict, *, hermes=None, persist=True):
         return f"'{tier}' cannot be the delegate_task worker model"
     stamp, hermes = _read_hermes_snapshot() if hermes is None else (None, hermes)
     if not hermes:
-        return "The Hermes config could not be read; refusing to overwrite it"
+        return _hermes_unreadable_message()
     delegation = hermes.get("delegation")
     if not isinstance(delegation, dict):
         delegation = {}
@@ -698,12 +779,15 @@ def _accounts_status(config: dict) -> dict:
         }
         if account == "anthropic":
             block = config.get("claude_delegation") or {}
-            workflow = _workflow_name(config)
-            enabled = workflow == "claude_delegation" and bool(block.get("enabled"))
+            # delegate_claude is offered exactly while a Claude model is switched on.
+            if delegation is not None and hasattr(delegation, "availability_block"):
+                enabled = delegation.availability_block(config) == ""
+            else:
+                enabled = any(known_tiers.get(tier) is True for tier in tiers)
             registered = bool(registration and registration.get("registered"))
             item["delegation"] = {
-                "tool": "delegate_claude", "enabled": enabled, "registered": registered, "workflow": workflow,
-                # The tool is registered whatever the workflow, and offered per session
+                "tool": "delegate_claude", "enabled": enabled, "registered": registered,
+                # The tool is registered whatever the switches say, and offered per session
                 # by its check_fn, so only an unregistered tool still needs a restart.
                 "restart_needed": enabled and not registered,
                 "default_tier": str(block.get("default_tier") or "sonnet"),
@@ -738,12 +822,13 @@ def _save_usage_limits(raw, config: dict):
     return None
 
 
-MANAGED_EFFORT_TIERS = ("luna", "spark", "terra", "sol")
+MANAGED_EFFORT_TIERS = ("luna", "spark", "terra", "sol", "grok")
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
+_DEFAULT_MANAGED_EFFORT = {"grok": "medium"}
 
 
 def _save_effort(raw, config: dict):
-    """Update only the four plain routed-tier effort levels from the Settings tab.
+    """Update only dashboard-managed routed-tier effort levels from Settings.
 
     Every submitted key and value is checked before ``config`` changes, so a
     partial payload cannot leave an earlier tier changed after a later one fails.
@@ -763,36 +848,27 @@ def _save_effort(raw, config: dict):
     if not cleaned:
         # Leave an absent effort block absent when a client posts no changes.
         return None
+    existing_effort = config.get("effort")
+    existing_effort = existing_effort if isinstance(existing_effort, dict) else {}
+    router = _router_module()
+    router_defaults = getattr(router, "_DEFAULT_CONFIG", {}) if router is not None else {}
+    effective_defaults = dict(_DEFAULT_MANAGED_EFFORT)
+    if isinstance(router_defaults, dict) and isinstance(router_defaults.get("effort"), dict):
+        effective_defaults.update(router_defaults["effort"])
+    to_write = {}
+    for tier, value in cleaned.items():
+        if tier not in existing_effort and value == effective_defaults.get(tier):
+            # The frontend posts every visible level. Do not pin an effective
+            # default that an older shipped config did not explicitly contain.
+            continue
+        to_write[tier] = value
+    if not to_write:
+        return None
     effort = config.get("effort")
     if not isinstance(effort, dict):
         effort = config["effort"] = {}
-    for tier, value in cleaned.items():
+    for tier, value in to_write.items():
         effort[tier] = value
-    return None
-
-
-WORKFLOWS = ("claude_delegation", "codex")
-
-
-def _workflow_name(config: dict) -> str:
-    """The router's reading of ``workflow``; mirrored here only for a dashboard without the router."""
-    router = _router_module()
-    if router is not None and hasattr(router, "workflow_name"):
-        return router.workflow_name(config)
-    raw = str((config or {}).get("workflow") or "").strip().casefold()
-    return raw if raw in WORKFLOWS else "claude_delegation"
-
-
-def _save_workflow(raw, config: dict):
-    """Switch workflows, keeping ``claude_delegation.enabled`` in step so the file reads the same way."""
-    name = str(raw or "").strip().casefold()
-    if name not in WORKFLOWS:
-        return f"Unknown workflow '{raw}'; use one of: {', '.join(WORKFLOWS)}"
-    config["workflow"] = name
-    block = config.get("claude_delegation")
-    if not isinstance(block, dict):
-        block = config["claude_delegation"] = {}
-    block["enabled"] = name == "claude_delegation"
     return None
 
 
@@ -907,6 +983,40 @@ def _load_yaml_mapping(path: Path) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+CLAUDE_SWITCHES = ("opus5", "sonnet5", "haiku")
+
+
+def _has_legacy_claude_keys(local: dict) -> bool:
+    """Whether router_config.local.yaml still carries ``workflow`` or ``claude_delegation.enabled``.
+
+    Both are retired: the router turns them into Claude ``callable`` switches at
+    load time, and the dashboard's next save writes those switches instead.
+    """
+    block = local.get("claude_delegation") if isinstance(local, dict) else None
+    return isinstance(local, dict) and ("workflow" in local or (isinstance(block, dict) and "enabled" in block))
+
+
+def _effective_router_config(shipped: dict, local: dict) -> dict:
+    """``local`` over ``shipped``, with the retired keys translated exactly as the router does.
+
+    The translation is the router's own ``_apply_legacy_claude_switches``, not a
+    copy of it. When the local file carries a legacy key and the router cannot be
+    imported, this raises rather than showing Claude switched off while the
+    router treats it as on (and a save then writing that off state).
+    """
+    merged = _merge(shipped, local)
+    if not _has_legacy_claude_keys(local):
+        return merged
+    router = _router_module()
+    translate = getattr(router, "_apply_legacy_claude_switches", None) if router is not None else None
+    if translate is None:
+        raise RuntimeError(
+            "The router package could not be imported in this dashboard process, so the retired "
+            "'workflow' / 'claude_delegation.enabled' keys in router_config.local.yaml cannot be "
+            "translated into Claude switches. Settings are not shown or saved until it can be.")
+    return translate(merged, local)
+
+
 def _read_router_config() -> dict:
     """The shipped router_config.yaml with router_config.local.yaml over it, as the router reads it."""
     shipped = _load_yaml_mapping(CONFIG_PATH)
@@ -914,7 +1024,7 @@ def _read_router_config() -> dict:
         local = _load_yaml_mapping(_local_config_path())
     except Exception:
         local = {}
-    return _merge(shipped, local)
+    return _effective_router_config(shipped, local)
 
 
 def _read_router_config_for_update(path: Path | None = None):
@@ -946,18 +1056,173 @@ def _read_router_config_for_update(path: Path | None = None):
 
 
 def _save_claude_delegation(raw, config: dict):
+    """Set ``claude_delegation.default_tier``.
+
+    ``enabled`` is retired (the Claude switches decide), so a payload from an
+    old open tab that still carries it is accepted and the key is ignored.
+    """
     if not isinstance(raw, dict):
         return "claude_delegation must be an object"
-    block = config.setdefault("claude_delegation", {})
-    if "enabled" in raw:
-        if not isinstance(raw["enabled"], bool):
-            return "claude_delegation.enabled must be true or false"
-        block["enabled"] = raw["enabled"]
     if "default_tier" in raw:
         tier = str(raw["default_tier"])
         if tier not in ("haiku", "sonnet", "opus"):
             return f"Unknown Claude tier '{tier}'"
-        block["default_tier"] = tier
+        config.setdefault("claude_delegation", {})["default_tier"] = tier
+    return None
+
+
+def _claude_delegation_module():
+    """The router's ``claude_delegation`` submodule, or None when not importable.
+
+    Reached through ``_router_module()`` (the same standalone/plugin import
+    fallback every other dashboard reader uses) rather than importing the
+    module directly, so a dashboard run outside the router package degrades
+    to the unavailable status below instead of raising.
+    """
+    router = _router_module()
+    return getattr(router, "claude_delegation", None) if router else None
+
+
+CLAUDE_REASONING_TIERS = ("sonnet", "opus")
+_CLAUDE_REASONING_DEFAULT_LEVELS = {"sonnet": "medium", "opus": "medium"}
+_CLAUDE_REASONING_TRACEBACKS: set[tuple[type[BaseException], str]] = set()
+_CLAUDE_REASONING_TRACEBACK_LOCK = threading.Lock()
+_CLAUDE_REASONING_TRACEBACKS_MAX = 64
+
+
+def _claude_reasoning_defaults(delegation) -> dict:
+    defaults = getattr(delegation, "DEFAULT_REASONING_EFFORT", None) if delegation is not None else None
+    if not isinstance(defaults, dict):
+        defaults = _CLAUDE_REASONING_DEFAULT_LEVELS
+    return {tier: str(defaults.get(tier, _CLAUDE_REASONING_DEFAULT_LEVELS[tier])) for tier in CLAUDE_REASONING_TIERS}
+
+
+def _claude_reasoning_pinned(config: dict) -> dict:
+    block = config.get("claude_delegation")
+    effort = block.get("reasoning_effort") if isinstance(block, dict) else None
+    return {tier: isinstance(effort, dict) and tier in effort for tier in CLAUDE_REASONING_TIERS}
+
+
+def _haiku_reasoning_supported(delegation) -> bool:
+    """Whether Haiku is one of this router's editable reasoning-effort tiers.
+
+    Derived from ``claude_delegation.EDITABLE_REASONING_TIERS`` rather than a
+    hardcoded literal, so a future tier change is reflected here automatically
+    instead of silently drifting. False whenever the router module (or the
+    tuple on it) isn't available -- the safe default the fallback branches
+    already use.
+    """
+    tiers = getattr(delegation, "EDITABLE_REASONING_TIERS", ()) if delegation is not None else ()
+    return "haiku" in tiers
+
+
+def _claude_reasoning_status(config: dict) -> dict:
+    """``claude_reasoning_effort`` for ``GET /api/config``: levels plus bridge availability.
+
+    Falls back to the router's own defaults, unavailable, with a nonempty
+    reason, whenever the router package (or the reasoning-effort API on it)
+    cannot be imported -- the dashboard must keep serving even without it.
+    """
+    delegation = _claude_delegation_module()
+    defaults = _claude_reasoning_defaults(delegation)
+    pinned = _claude_reasoning_pinned(config)
+    if delegation is None:
+        return {
+            "available": False,
+            "reason": "Router package not importable in this dashboard process",
+            "levels": dict(defaults),
+            "defaults": defaults,
+            "pinned": pinned,
+            "haiku_supported": False,
+        }
+    try:
+        levels = delegation.reasoning_effort_config(config)
+        available, reason = delegation.reasoning_bridge_status()
+    except Exception as exc:
+        signature = (type(exc), str(exc))
+        should_print = False
+        with _CLAUDE_REASONING_TRACEBACK_LOCK:
+            if signature not in _CLAUDE_REASONING_TRACEBACKS and len(_CLAUDE_REASONING_TRACEBACKS) < _CLAUDE_REASONING_TRACEBACKS_MAX:
+                _CLAUDE_REASONING_TRACEBACKS.add(signature)
+                should_print = True
+        if should_print:
+            traceback.print_exc()
+        return {
+            "available": False,
+            "reason": f"claude_delegation reasoning-effort API not usable ({type(exc).__name__}: {exc})",
+            "levels": dict(defaults),
+            "defaults": defaults,
+            "pinned": pinned,
+            "haiku_supported": _haiku_reasoning_supported(delegation),
+        }
+    return {
+        "available": bool(available),
+        "reason": str(reason or ""),
+        "levels": {tier: levels[tier] for tier in CLAUDE_REASONING_TIERS},
+        "defaults": defaults,
+        "pinned": pinned,
+        "haiku_supported": _haiku_reasoning_supported(delegation),
+    }
+
+
+def _save_claude_reasoning_effort(raw, config: dict):
+    """Update only ``claude_delegation.reasoning_effort``'s two editable tiers.
+
+    Every submitted key and value is checked into a temporary ``cleaned``
+    mapping before ``config`` changes, matching ``_save_effort``'s rule that a
+    partial payload cannot leave an earlier tier changed after a later one
+    fails.
+    """
+    if not isinstance(raw, dict):
+        return "claude_reasoning_effort must be an object of tier -> low, medium, high, or xhigh"
+    cleaned = {}
+    for tier, value in raw.items():
+        if tier not in CLAUDE_REASONING_TIERS:
+            return f"The dashboard cannot edit Claude reasoning-effort key '{tier}'"
+        if value is None or value == "":
+            cleaned[tier] = None
+            continue
+        if not isinstance(value, str):
+            return f"claude_reasoning_effort.{tier} must be one of: low, medium, high, xhigh"
+        normalized = value.strip().casefold()
+        if normalized not in EFFORT_LEVELS:
+            return f"claude_reasoning_effort.{tier} must be one of: low, medium, high, xhigh"
+        cleaned[tier] = normalized
+    if not cleaned:
+        # Leave an absent reasoning_effort block absent when a client posts no changes.
+        return None
+    existing_block = config.get("claude_delegation")
+    existing_effort = existing_block.get("reasoning_effort") if isinstance(existing_block, dict) else None
+    existing_effort = existing_effort if isinstance(existing_effort, dict) else {}
+    delegation = _claude_delegation_module()
+    defaults = _claude_reasoning_defaults(delegation)
+    to_write = {}
+    to_remove = set()
+    for tier, value in cleaned.items():
+        if value is None:
+            if tier in existing_effort:
+                to_remove.add(tier)
+        elif tier not in existing_effort and value == defaults[tier]:
+            # No live override exists and the posted value already matches the
+            # effective default: writing it would pin today's default forever
+            # (a future default change would never reach this dashboard).
+            continue
+        else:
+            to_write[tier] = value
+    if not to_write and not to_remove:
+        return None
+    block = config.get("claude_delegation")
+    if not isinstance(block, dict):
+        block = config["claude_delegation"] = {}
+    reasoning_effort = block.get("reasoning_effort")
+    if not isinstance(reasoning_effort, dict):
+        reasoning_effort = block["reasoning_effort"] = {}
+    for tier in to_remove:
+        reasoning_effort.pop(tier, None)
+    for tier, value in to_write.items():
+        reasoning_effort[tier] = value
+    if not reasoning_effort:
+        block.pop("reasoning_effort", None)
     return None
 
 
@@ -974,10 +1239,10 @@ main{max-width:1500px;margin:auto;padding:28px}h1{font-size:26px;margin:0}.sub{c
 label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button{background:#0b111c;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font:inherit}input[type=search]{min-width:260px}button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{cursor:wait;opacity:.72}.status.refreshing{color:#c4b5fd}.check{display:flex;align-items:center;gap:7px;padding:9px 2px}.check input{accent-color:var(--accent)}
 .card{min-width:135px;flex:1;background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.card .n{font-size:25px;font-weight:750}.card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.luna .n{color:var(--luna)}.spark .n{color:var(--spark)}.terra .n{color:var(--terra)}.sol .n{color:var(--sol)}.opus5 .n{color:var(--opus5)}.sonnet5 .n{color:var(--sonnet5)}.haiku .n{color:var(--haiku)}.qwen .n{color:var(--qwen)}.grok .n{color:var(--grok)}
 .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:14px;background:rgba(13,18,29,.92)}table{border-collapse:collapse;table-layout:fixed;width:1405px;min-width:100%}th{position:sticky;top:0;background:#161e2c;color:var(--muted);font-size:11px;letter-spacing:.07em;text-align:left;text-transform:uppercase;user-select:none}th,td{padding:11px 13px;border-bottom:1px solid #1e2838;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.prompt-text{min-width:0}.word-wrap .prompt-text{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}.resizer{position:absolute;z-index:2;top:0;right:-4px;width:9px;height:100%;cursor:col-resize;touch-action:none}.resizer::after{content:'';position:absolute;left:4px;top:20%;width:1px;height:60%;background:#3b4a62}.resizer:hover::after,.resizer.dragging::after{width:2px;background:var(--accent)}body.resizing{cursor:col-resize;user-select:none}tbody tr:hover{background:#151d2b}code{color:#b9c5d8}.pill{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:2px 8px;font-size:12px;font-weight:700;margin-right:4px}.pill.luna{color:var(--luna)}.pill.spark{color:var(--spark)}.pill.terra{color:var(--terra)}.pill.sol{color:var(--sol)}.pill.opus5{color:var(--opus5)}.pill.sonnet5{color:var(--sonnet5)}.pill.haiku{color:var(--haiku)}.pill.qwen{color:var(--qwen)}.pill.grok{color:var(--grok)}.route{white-space:nowrap}.reason{color:#c2ccdb}.running-agent-pill{display:inline-block;margin-left:8px;padding:2px 7px;border:1px solid #88e36f;border-radius:99px;color:#88e36f;font-size:10px;font-weight:800;letter-spacing:.06em;vertical-align:middle;animation:agentPulse 1.4s ease-in-out infinite}@keyframes agentPulse{50%{box-shadow:0 0 11px rgba(136,227,111,.7)}}.play-indicator{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;margin-left:8px;border-radius:50%;background:#54d66a;color:#07110b;font-size:10px;font-weight:900;vertical-align:middle;box-shadow:0 0 12px rgba(84,214,106,.75);animation:agentPulse 1.4s ease-in-out infinite}.active-router-row{background:rgba(84,214,106,.055)}.calls,.expand{text-align:center}.prompt-toggle{border:0;background:transparent;padding:0;color:var(--accent);font-size:15px;line-height:1}.prompt-toggle:hover{border:0;color:#c4b5fd}.detail>td{padding:10px 13px 14px;background:#0b111c;overflow:visible}.details-table{width:calc(100% - 28px);min-width:0;margin-left:28px;border:1px solid #253044;border-radius:8px;table-layout:fixed}.details-table th{position:static;background:#111927}.details-table th,.details-table td{padding:8px 10px;font-size:12px}.details-table tbody tr:last-child td{border-bottom:0}.status{margin-left:auto;color:var(--muted);padding:9px 4px}.empty{text-align:center;color:#8997ad;padding:40px}.error{color:#ff6b7a} @media(max-width:700px){main{padding:16px}input[type=search]{min-width:180px}.status{width:100%;margin:0}}
-.account-cards{display:grid;gap:14px}.account-card{background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.account-card.anthropic{border-color:var(--opus5)}.account-card.openai-codex{border-color:var(--terra)}.account-card.qwen-token{border-color:var(--qwen)}.account-card.xai-oauth{border-color:var(--grok)}.account-row{display:grid;grid-template-columns:110px 1fr;gap:10px;padding:8px 0;border-top:1px solid #1e2838}.pref-chip.primary select{padding:3px 6px;margin-right:4px}.panel-heading .settings-status{font-size:12px;font-weight:400;margin-left:10px}.account-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));column-gap:22px;margin-top:8px}.account-grid .account-row{display:flex;flex-direction:column;gap:6px;min-width:0}.account-grid .account-row>span{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.account-grid .account-row.usage{grid-column:1/-1}.account-card .model-switch{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:2px 0}.account-card .model-switch.disabled>span{color:var(--muted)}.account-card .limits label{display:inline-flex;align-items:center;gap:6px;margin-right:10px}.account-card .limits input{width:64px;padding:5px 7px}.account-card .stepdown{margin-top:6px;font-size:12px;color:var(--muted)}.account-card .usage-line{display:grid;grid-template-columns:60px minmax(0,1fr) 42px 150px;align-items:center;gap:10px;padding:2px 0}.account-card .usage-value{text-align:right}.account-card .usage-reset{font-size:12px;color:var(--muted)}.account-card .usage-age{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--muted)}.account-card .usage-load{margin-left:auto}@media (max-width:760px){.account-grid{grid-template-columns:1fr}.account-card .usage-line{grid-template-columns:50px minmax(0,1fr) 40px}.account-card .usage-reset{grid-column:2/-1}}.usage-bar{position:relative;height:10px;border-radius:99px;background:#1e2838;overflow:hidden}.usage-fill{height:100%}.usage-tick{position:absolute;top:0;width:2px;height:100%;background:#8997ad}.state-badge.open{color:#88e36f}.state-badge.soft{color:#ffb454}.state-badge.closed{color:#ff6b7a}.state-badge.unknown{color:#8997ad}.account-card.stale .usage-bar{opacity:.45}
+.account-cards{display:grid;gap:14px}.account-card{background:linear-gradient(145deg,#151d2c,#0e1420);border:1px solid var(--border);border-radius:14px;padding:15px}.account-card.anthropic{border-color:var(--opus5)}.account-card.openai-codex{border-color:var(--terra)}.account-card.qwen-token{border-color:var(--qwen)}.account-card.xai-oauth{border-color:var(--grok)}.account-row{display:grid;grid-template-columns:110px 1fr;gap:10px;padding:8px 0;border-top:1px solid #1e2838}.pref-chip.primary select{padding:3px 6px;margin-right:4px}.panel-heading .settings-status{font-size:12px;font-weight:400;margin-left:10px}.account-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));column-gap:22px;margin-top:8px}.account-grid .account-row{display:flex;flex-direction:column;gap:6px;min-width:0}.account-grid .account-row>span{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.account-grid .account-row.usage{grid-column:1/-1}.account-card .model-list{display:grid;grid-template-columns:44px max-content 190px;column-gap:8px}.account-card .model-list.no-effort{grid-template-columns:44px max-content}.account-card .model-switch{display:grid;grid-column:1/-1;grid-template-columns:subgrid;align-items:center;min-height:50px}.account-card .model-switch select{width:190px;min-width:0;line-height:20px;padding:7px 8px;height:auto}.account-card .model-switch select.effort-none{opacity:.45;background:#1a2130;color:#8997ad;border-style:dashed;cursor:not-allowed}.account-card .model-switch .cooldown-pill{grid-column:1/-1;justify-self:start;width:100%;min-width:0;contain:inline-size}.account-card .model-switch.disabled>span{color:var(--muted)}.account-card .limits label{display:inline-flex;align-items:center;gap:6px;margin-right:10px}.account-card .limits input{width:64px;padding:5px 7px}.account-card .stepdown{margin-top:6px;font-size:12px;color:var(--muted)}.account-card .usage-line{display:grid;grid-template-columns:60px minmax(0,1fr) 42px 150px;align-items:center;gap:10px;padding:2px 0}.account-card .usage-value{text-align:right}.account-card .usage-reset{font-size:12px;color:var(--muted)}.account-card .usage-age{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:12px;color:var(--muted)}.account-card .usage-load{margin-left:auto}.account-card .usage-error{color:#ff6b7a;flex-basis:100%}@media (max-width:760px){.account-grid{grid-template-columns:1fr}.account-card .usage-line{grid-template-columns:50px minmax(0,1fr) 40px}.account-card .usage-reset{grid-column:2/-1}}.usage-bar{position:relative;height:10px;border-radius:99px;background:#1e2838;overflow:hidden}.usage-fill{height:100%}.usage-tick{position:absolute;top:0;width:2px;height:100%;background:#8997ad}.state-badge.open{color:#88e36f}.state-badge.soft{color:#ffb454}.state-badge.closed{color:#ff6b7a}.state-badge.unknown{color:#8997ad}.account-card.stale .usage-bar{opacity:.45}
 .account-groups{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}.account-group{flex:1;min-width:280px;border:1px solid var(--border);border-radius:14px;padding:10px}.account-group.anthropic{border-color:var(--opus5)}.account-group.openai-codex{border-color:var(--terra)}.account-group.qwen-token{border-color:var(--qwen)}.account-group.xai-oauth{border-color:var(--grok)}.account-group-head{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}.account-group-cards{display:flex;gap:8px;flex-wrap:wrap}.account-group-usage{margin-top:8px}.account-usage{font-size:12px}.account-usage.none{color:var(--muted)}.account-usage.stale .usage-bar{opacity:.45}
 .delegation-chips{display:inline-flex;flex-wrap:wrap;gap:4px;margin-left:8px;vertical-align:middle}.delegation-chip{border:1px solid currentColor;border-radius:99px;padding:1px 7px;font-size:11px}.delegation-chip.openai-codex{color:var(--terra)}.delegation-chip.anthropic{color:var(--opus5)}.delegation-chip.qwen-token{color:var(--qwen)}.delegation-chip.xai-oauth{color:var(--grok)}.delegation-chip.marked{font-weight:700}
-</style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:0 0 44px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:normal;overflow-wrap:anywhere;max-width:100%}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip.anthropic{border-color:var(--opus5)}.pref-chip.openai-codex{border-color:var(--terra)}.pref-chip.qwen-token{border-color:var(--qwen)}.pref-chip.xai-oauth{border-color:var(--grok)}.chain-account{color:var(--muted);font-weight:600}.chain-account-mark{color:#ffb454;font-weight:700}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}.workflow-options{display:inline-flex;border:1px solid var(--border);border-radius:10px;overflow:hidden}.workflow-options button{border:0;border-radius:0;background:#0b111c;color:var(--muted)}.workflow-options button+button{border-left:1px solid var(--border)}.workflow-options button.active{background:#241b3d;color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}.workflow-desc{margin-top:10px;color:var(--text)}.balance-row{margin-top:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}.balance-row .pref-note{margin-top:0;flex-basis:100%}.balance-row .balance-field{display:inline-flex;align-items:center;gap:6px;margin-left:6px}.balance-field input{width:64px;padding:5px 7px}.pref-kinds.paused .pref-kind{opacity:.5}.pref-paused{padding:8px 10px;border:1px dashed var(--accent);border-radius:8px;color:#c4b5fd;font-size:12px}.fb-file{display:block;margin-top:6px;color:#ffbe8a;font-size:11px;font-weight:700}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
+</style><style>.agents{margin-top:22px;padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.agents h2{margin:0;font-size:18px}.agent-parent{margin-top:12px;border-top:1px solid #253044;padding-top:12px}.agent-session{color:#c4b5fd;font-size:12px;letter-spacing:.06em}.agent-child{display:grid;grid-template-columns:10px 1fr auto;gap:10px;align-items:center;margin-top:9px;padding:10px 12px;border-radius:10px;background:#0b111c}.agent-dot{width:9px;height:9px;border-radius:50%;background:#8997ad}.agent-dot.running{background:#88e36f;box-shadow:0 0 12px #88e36f}.agent-goal{font-weight:700}.agent-activity{color:#a78bfa;font-size:12px;margin-top:2px}.agent-meta{color:var(--muted);font-size:12px;text-align:right}.agent-empty{color:var(--muted);padding:12px 0}</style><style>.lab-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:18px}.lab-kicker{color:#a78bfa;font-size:11px;font-weight:800;letter-spacing:.14em}.lab-title{font-size:30px;font-weight:800;letter-spacing:-.04em}.tabs{display:flex;gap:6px;padding:5px;border:1px solid var(--border);border-radius:12px;background:#0b111c}.tab{border:0;background:transparent;color:var(--muted);font-weight:700}.tab.active{background:#252039;color:#e9ddff}.panel[hidden]{display:none}.panel-heading{font-size:18px;font-weight:750;margin:0 0 4px}</style><style>.console{margin:10px 0 4px 19px;border:1px solid #2c3951;border-radius:10px;background:#080d16}.console summary,.agent-history summary{cursor:pointer;padding:9px 11px;color:#c4b5fd;font-weight:700}.console-event{border-top:1px solid #1e2838}.console-event.compact{padding:6px 11px;color:#c6d0df;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console-label{padding:7px 11px;color:#88e36f;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.console pre{margin:0;padding:0 11px 11px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:#c6d0df;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}.console-empty{padding:11px;color:var(--muted)}.agent-history{margin-top:20px;border-top:1px solid #253044}.history-item{padding:7px 12px;color:var(--muted);border-top:1px solid #1e2838}</style><style>.settings{margin-top:22px;display:flex;flex-direction:column;gap:18px}.settings-section{padding:18px;border:1px solid var(--border);border-radius:14px;background:linear-gradient(145deg,#151d2c,#0e1420)}.settings-section h3{margin:0 0 14px;font-size:16px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}.toggle-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}.toggle-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.toggle-item.disabled{opacity:.5;border-color:#1a2033}.toggle-label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}.toggle-name{font-weight:700;font-size:14px}.toggle-desc{font-size:11px;color:var(--muted)}.switch{position:relative;width:44px;height:24px;flex:0 0 44px}.switch input{opacity:0;width:0;height:0}.switch .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#253044;border-radius:24px;transition:.2s}.switch .slider::before{position:absolute;content:'';height:18px;width:18px;left:3px;bottom:3px;background:#8997ad;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#88e36f}.switch input:checked+.slider::before{transform:translateX(20px);background:#07110b}.default-model-row{display:flex;align-items:end;gap:12px;padding:14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.default-model-row label{flex:0 0 auto}.default-model-row select{min-width:200px}.save-settings{align-self:flex-end;padding:10px 20px;background:var(--accent);color:#fff;border:0;border-radius:8px;font-weight:700;cursor:pointer}.save-settings:hover{background:#8b72f0}.save-settings:disabled{opacity:.6;cursor:wait}.settings-status{margin-left:auto;font-size:12px;color:var(--muted)}.cooldown-pill{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:999px;background:#3a2418;border:1px solid #7c4a25;color:#ffbe8a;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:normal;overflow-wrap:anywhere;max-width:100%}.toggle-item.cooling{border-color:#7c4a25}.account-load{margin-top:14px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c;font-size:12px;color:var(--muted)}.account-load b{color:#e6edf6;font-weight:700}.account-load .idle{color:#88e36f}</style><style>.pref-kinds{display:flex;flex-direction:column;gap:10px}.pref-kind{padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0b111c}.pref-kind-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.pref-kind-name{font-weight:700;font-size:14px}.pref-kind-desc{font-size:11px;color:var(--muted);margin-top:2px}.pref-chain{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}.pref-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1b2437;border:1px solid #2c3951;font-size:12px;font-weight:700}.pref-chip.external{border-color:#4b3a7a;background:#241d3a;color:#c9b8ff}.pref-chip.anthropic{border-color:var(--opus5)}.pref-chip.openai-codex{border-color:var(--terra)}.pref-chip.qwen-token{border-color:var(--qwen)}.pref-chip.xai-oauth{border-color:var(--grok)}.chain-account{color:var(--muted);font-weight:600}.chain-account-mark{color:#ffb454;font-weight:700}.pref-chip button{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 2px;font-size:12px}.pref-chip button:hover{color:#e6edf6}.pref-chip .rank{color:var(--muted);font-weight:600}.pref-add{min-width:150px}.pref-empty{color:var(--muted);font-size:12px}.pref-note{margin-top:10px;font-size:11px;color:var(--muted)}.balance-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.balance-row .pref-note{margin-top:0;flex-basis:100%}.balance-row .balance-field{display:inline-flex;align-items:center;gap:6px;margin-left:6px}.balance-field input{width:64px;padding:5px 7px}.fb-file{display:block;margin-top:6px;color:#ffbe8a;font-size:11px;font-weight:700}</style><style>.command-frame{display:block;width:100%;height:calc(100vh - 180px);min-height:680px;border:1px solid var(--border);border-radius:14px;background:#111723}</style>
 </head>
 <body><main>
 <div class="lab-header"><div><div class="lab-kicker" data-i18n="lab.kicker">HERMES · LOCAL OBSERVABILITY</div><div class="lab-title" data-i18n="lab.title">AI Home Lab</div><div class="sub" data-i18n="lab.sub">Modellek, háttéragentek és élő munkafolyamatok egy helyen</div></div><nav class="tabs" aria-label="AI Home Lab nézetek"><button class="tab active" data-tab="router"><span data-i18n="tab.router">Model Router</span></button><button class="tab" data-tab="settings"><span data-i18n="tab.settings">Beállítások</span></button><button class="tab" data-tab="command"><span data-i18n="tab.command">Hermes Command Center</span></button></nav></div>
@@ -994,7 +1259,7 @@ label{display:grid;gap:5px;color:var(--muted);font-size:12px}input,select,button
 <div class="cards"><div class="card"><div class="n" id="total">0</div><div class="k" data-i18n="card.total">Összes routing döntés</div></div><div class="card luna"><div class="n" id="luna">0</div><div class="k" data-i18n="card.luna">GPT-6 Luna</div></div><div class="card spark"><div class="n" id="spark">0</div><div class="k" data-i18n="card.spark">GPT-5.3 Spark</div></div><div class="card terra"><div class="n" id="terra">0</div><div class="k" data-i18n="card.terra">GPT-5.6 Terra</div></div><div class="card sol"><div class="n" id="sol">0</div><div class="k" data-i18n="card.sol">GPT-6 Sol</div></div><div class="card opus5"><div class="n" id="opus5">0</div><div class="k" data-i18n="card.opus5">Claude Opus 5.5</div></div><div class="card sonnet5"><div class="n" id="sonnet5">0</div><div class="k" data-i18n="card.sonnet5">Claude Sonnet 5</div></div><div class="card haiku"><div class="n" id="haiku">0</div><div class="k" data-i18n="card.haiku">Claude Haiku 4.5</div></div><div class="card qwen"><div class="n" id="qwen">0</div><div class="k" data-i18n="card.qwen">Qwen 3.7 Plus</div></div><div class="card grok"><div class="n" id="grok">0</div><div class="k" data-i18n="card.grok">Grok 4.7</div></div></div>
 <div class="account-groups" id="account-groups"></div>
 <div id="runs" class="router-runs" aria-live="polite"></div><div class="table-wrap" hidden><table id="log-table"><colgroup><col style="width:55px"><col style="width:110px"><col style="width:90px"><col style="width:350px"><col style="width:90px"><col style="width:230px"><col style="width:480px"></colgroup><thead><tr><th class="expand"></th><th data-i18n="th.date">Dátum</th><th data-i18n="th.time">Idő (CET/CEST)</th><th data-i18n="th.prompt">Prompt</th><th class="calls" data-i18n="th.calls">Hívások</th><th data-i18n="th.route">Útvonal</th><th data-i18n="th.reason">Indok</th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span> <span class="settings-status" id="settings-status"></span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.workflow.heading">Munkafolyamat</h3><div class="workflow-switch" id="workflow-switch"></div></div><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section"><h3 data-i18n="settings.main.heading">Fő agent</h3><div class="sub"><span data-i18n="settings.main.sub"></span> <b class="fb-file" data-i18n="settings.fb.file"></b></div><div class="pref-kinds" id="main-chain"></div></div><div class="settings-section"><h3 data-i18n="settings.workers.heading">Workerek</h3><div class="sub" data-i18n="settings.workers.sub"></div><div class="pref-kinds" id="worker-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.effort.heading">Gondolkodási erőfeszítés</h3><div class="pref-kinds" id="effort-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
+<section id="settings-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="settings.heading">Beállítások</span> <span class="settings-status" id="settings-status"></span></h2><div class="sub" data-i18n="settings.sub">Modellek hívhatósága és alapértelmezett modell</div><div class="settings"><div class="settings-section"><h3 data-i18n="settings.accounts.heading">Fiókok</h3><div class="account-cards" id="account-cards"></div></div><div class="settings-section" id="balance-section" hidden><h3 data-i18n="settings.balance.heading">Terheléselosztás</h3><div id="balance-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.main.heading">Fő agent</h3><div class="sub"><span data-i18n="settings.main.sub"></span> <b class="fb-file" data-i18n="settings.fb.file"></b></div><div class="pref-kinds" id="main-chain"></div></div><div class="settings-section"><h3 data-i18n="settings.workers.heading">Workerek</h3><div class="sub" data-i18n="settings.workers.sub"></div><div class="pref-kinds" id="worker-settings"></div></div><div class="settings-section"><h3 data-i18n="settings.prefs.heading">Preferált modellek munkatípusonként</h3><div class="sub" data-i18n="settings.prefs.sub">Sorrendben, a legjobb elöl. A router az első hívható elemet választja.</div><div class="pref-kinds" id="pref-kinds"></div></div><div class="settings-section"><h3 data-i18n="settings.language">Nyelv</h3><div class="default-model-row"><label><span data-i18n="settings.language">Nyelv</span><select id="language-select"><option value="en" data-i18n="settings.lang.en">English</option><option value="hu" data-i18n="settings.lang.hu">Magyar</option></select></label></div></div></div></section>
 <section id="command-panel" class="panel" hidden><h2 class="panel-heading"><span data-i18n="tab.command">Hermes Command Center</span></h2><div class="sub">A Hermes hivatalos helyi kezelőfelülete</div><iframe class="command-frame" title="Hermes Command Center" src="http://127.0.0.1:9119/"></iframe></section>
 </main>
 <script>
@@ -1084,11 +1349,12 @@ const I18N = {
     'agents.requested.ro.title': 'The main agent explicitly requested this sub-agent for read-only/verification only.',
     // Settings panel
     'settings.heading': 'Settings',
-    'settings.sub': 'Workflow, accounts, main agent, workers and routing',
+    'settings.sub': 'Accounts, load balancing, main agent, workers and routing',
     'settings.main.heading': 'Main agent',
     'settings.main.sub': 'Hermes starts on the first model; when its provider is out, the rest take over in order. The first one also takes the default route and coordinates (conductor).',
     'settings.main.primary': 'starts here',
     'settings.main.external': 'Hermes currently starts on {model}, set outside the router: the first entry here only sets the default route and the conductor.',
+    'settings.main.claude': 'Hermes starts on Claude. The router\'s default route and conductor stay on {tier}.',
     'settings.workers.heading': 'Workers',
     'settings.workers.sub': 'Delegated agents: which model they get when the call names none, and where they go when it is out.',
     'settings.workers.codex': 'Codex workers',
@@ -1098,18 +1364,13 @@ const I18N = {
     'settings.workers.fallback': 'Worker fallback',
     'settings.workers.fallback.desc': 'A leaf pinned to a target never inherits the main agent chain',
     'settings.accounts.heading': 'Accounts',
-    'settings.workflow.heading': 'Workflow',
-    'settings.workflow.codex': 'Codex only',
-    'settings.workflow.claude': 'Codex + Claude',
-    'settings.workflow.desc.codex': 'One account works: Codex does it all through delegate_task, and Claude only stays available as the Hermes parent. No delegate_claude, and the built-in routes apply instead of the preference chains below.',
-    'settings.workflow.desc.claude': 'Both accounts work: Claude workers run next to Codex through delegate_claude, and the preference chains below decide the route.',
+    'settings.balance.heading': 'Load balancing',
     'settings.balance.label': 'Load balancing',
     'settings.balance.busy': 'from',
     'settings.balance.window.5-hour': '5-hour',
     'settings.balance.window.tighter': 'tighter (weekly or 5-hour)',
     'settings.balance.margin': 'gap',
     'settings.balance.desc': 'Evens out the {window} windows: when the preferred account is at {busy}% or more and the other is at least {margin} points freer, the freer one goes first. The parent counts on its own account. The soft/hard limits still apply.',
-    'settings.workflow.live': 'Applies from the next request. New sessions gain or lose delegate_claude without a restart; a session already running is still pointed at the right route.',
     'account.state.open': 'open',
     'account.state.soft': 'soft limit',
     'account.state.closed': 'closed',
@@ -1133,7 +1394,7 @@ const I18N = {
     'account.delegation.default_tier': 'default tier',
     'account.delegation.live': 'delegate_claude live',
     'account.delegation.restart': 'restart Hermes to apply',
-    'account.delegation.off': 'off — see Workflow above',
+    'account.delegation.off': 'off — every Claude model is switched off',
     'account.load': 'Load',
     'account.load.calls': '{n} calls in the last {m} min',
     'settings.cooling': 'cooling down',
@@ -1144,15 +1405,12 @@ const I18N = {
     'settings.load.empty': 'No routed calls in the window.',
     'settings.default.heading': 'Default model (Orchestrator)',
     'settings.default.desc': 'The model Hermes itself starts on, and the tier that counts as the orchestrator. A preference chain below can re-route a turn, but not change this.',
-    'settings.effort.heading': 'Reasoning effort',
-    'settings.effort.luna': 'Luna',
-    'settings.effort.spark': 'Spark',
-    'settings.effort.terra': 'Terra',
-    'settings.effort.sol': 'Sol',
     'settings.effort.low': 'low',
     'settings.effort.medium': 'medium',
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
+    'settings.claude_effort.haiku_no_reasoning': 'no reasoning allowed',
+    'settings.claude_effort.default': 'Default ({level})',
     'settings.prefs.heading': 'Routing: preferred models per kind of work',
     'settings.prefs.sub': 'In order, best first. The router takes the first callable entry. This re-routes a turn; it does not change the model Hermes starts on.',
     'settings.prefs.add': 'add model...',
@@ -1161,7 +1419,6 @@ const I18N = {
     'settings.prefs.up': 'move up',
     'settings.prefs.down': 'move down',
     'settings.prefs.remove': 'remove',
-    'settings.prefs.paused': 'Paused by the Codex workflow: the built-in routes apply. Your chains are kept for when you switch back.',
     'kind.design': 'UI and visual design',
     'kind.code': 'Writing code',
     'kind.explore': 'Exploring, read-only inspection',
@@ -1325,11 +1582,12 @@ const I18N = {
     'agents.requested.ro': 'KÉRT READ-ONLY',
     'agents.requested.ro.title': 'A fő agent kifejezetten csak olvasási/ellenőrzési feladatra kérte ezt a mellékszálat.',
     'settings.heading': 'Beállítások',
-    'settings.sub': 'Munkafolyamat, fiókok, fő agent, workerek és útválasztás',
+    'settings.sub': 'Fiókok, terheléselosztás, fő agent, workerek és útválasztás',
     'settings.main.heading': 'Fő agent',
     'settings.main.sub': 'A Hermes az első modellen indul; ha annak a szolgáltatója kiesik, a többi sorban átveszi. Az első viszi az alapértelmezett routingot és a koordinálást (conductor) is.',
     'settings.main.primary': 'itt indul',
     'settings.main.external': 'A Hermes most a(z) {model} modellen indul, amit a routeren kívül állítottak be: az első elem itt csak az alapértelmezett routingot és a conductort állítja.',
+    'settings.main.claude': 'A Hermes Claude-dal indul. A router alapértelmezett routingja és conductora marad: {tier}.',
     'settings.workers.heading': 'Workerek',
     'settings.workers.sub': 'Delegált agentek: melyik modellt kapják, ha a hívás nem nevez meg egyet, és hová mennek, ha az kiesik.',
     'settings.workers.codex': 'Codex workerek',
@@ -1339,18 +1597,13 @@ const I18N = {
     'settings.workers.fallback': 'Worker tartaléklánc',
     'settings.workers.fallback.desc': 'A célhoz rögzített levél soha nem örökli a fő agent láncát',
     'settings.accounts.heading': 'Fiókok',
-    'settings.workflow.heading': 'Munkafolyamat',
-    'settings.workflow.codex': 'Csak Codex',
-    'settings.workflow.claude': 'Codex + Claude',
-    'settings.workflow.desc.codex': 'Egy fiók dolgozik: a munkát a Codex végzi a delegate_task eszközzel, a Claude csak Hermes-szülőként marad elérhető. Nincs delegate_claude, és a lenti preferencia-láncok helyett a beépített útvonalak érvényesek.',
-    'settings.workflow.desc.claude': 'Mindkét fiók dolgozik: a Codex mellett Claude-munkások is futnak a delegate_claude eszközzel, és a lenti preferencia-láncok döntik el az útvonalat.',
+    'settings.balance.heading': 'Terheléselosztás',
     'settings.balance.label': 'Terheléselosztás',
     'settings.balance.busy': 'ettől',
     'settings.balance.window.5-hour': '5 órás',
     'settings.balance.window.tighter': 'szűkebb (heti vagy 5 órás)',
     'settings.balance.margin': 'különbség',
     'settings.balance.desc': 'Kiegyenlíti a(z) {window} kereteket: ha a preferált fiók legalább {busy}%-on áll, és a másik legalább {margin} ponttal szabadabb, a szabadabb kerül előre. A szülő a saját fiókját terheli. A soft/hard limitek továbbra is érvényesek.',
-    'settings.workflow.live': 'A következő kéréstől érvényes. Az új munkamenetek újraindítás nélkül kapják meg vagy vesztik el a delegate_claude eszközt; egy már futó munkamenetet a router akkor is a helyes útvonalra irányít.',
     'account.state.open': 'nyitva',
     'account.state.soft': 'lágy korlát',
     'account.state.closed': 'lezárva',
@@ -1374,7 +1627,7 @@ const I18N = {
     'account.delegation.default_tier': 'alapértelmezett szint',
     'account.delegation.live': 'delegate_claude aktív',
     'account.delegation.restart': 'a Hermes újraindítása szükséges',
-    'account.delegation.off': 'kikapcsolva — lásd fent: Munkafolyamat',
+    'account.delegation.off': 'kikapcsolva — minden Claude-modell ki van kapcsolva',
     'account.load': 'Terhelés',
     'account.load.calls': '{n} hívás az utolsó {m} percben',
     'settings.cooling': 'hűl',
@@ -1385,15 +1638,12 @@ const I18N = {
     'settings.load.empty': 'Nincs routolt hívás az ablakban.',
     'settings.default.heading': 'Alapértelmezett modell (Orchestrator)',
     'settings.default.desc': 'Ezzel a modellel indul maga a Hermes, és ez számít orchestratornak. Az alábbi preferencia-lánc egy fordulót átirányíthat, ezt viszont nem írja felül.',
-    'settings.effort.heading': 'Gondolkodási erőfeszítés',
-    'settings.effort.luna': 'Luna',
-    'settings.effort.spark': 'Spark',
-    'settings.effort.terra': 'Terra',
-    'settings.effort.sol': 'Sol',
     'settings.effort.low': 'low',
     'settings.effort.medium': 'medium',
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
+    'settings.claude_effort.haiku_no_reasoning': 'nincs gondolkodás',
+    'settings.claude_effort.default': 'Alapértelmezett ({level})',
     'settings.prefs.heading': 'Útválasztás: preferált modellek munkatípusonként',
     'settings.prefs.sub': 'Sorrendben, a legjobb elöl. A router az első hívható elemet választja. Ez egy fordulót irányít át; a Hermes indulási modelljét nem változtatja meg.',
     'settings.prefs.add': 'modell hozzáadása...',
@@ -1402,7 +1652,6 @@ const I18N = {
     'settings.prefs.up': 'előrébb',
     'settings.prefs.down': 'hátrébb',
     'settings.prefs.remove': 'eltávolítás',
-    'settings.prefs.paused': 'A Codex munkafolyamat szünetelteti ezeket: a beépített útvonalak érvényesek. A láncok megmaradnak, amikor visszaváltasz.',
     'kind.design': 'UI és vizuális tervezés',
     'kind.code': 'Kódírás',
     'kind.explore': 'Feltárás, csak olvasó vizsgálat',
@@ -1540,13 +1789,12 @@ function renderSettings(){
   const models=['luna','spark','terra','sol','opus5','sonnet5','haiku','qwen','grok'];
   const modelLabels={luna:t('card.luna'),spark:t('card.spark'),terra:t('card.terra'),sol:t('card.sol'),opus5:t('card.opus5'),sonnet5:t('card.sonnet5'),haiku:t('card.haiku'),qwen:t('card.qwen'),grok:t('card.grok')};
   const modelDescriptions={luna:t('model.desc.luna'),spark:t('model.desc.spark'),terra:t('model.desc.terra'),sol:t('model.desc.sol'),opus5:t('model.desc.opus5'),sonnet5:t('model.desc.sonnet5'),haiku:t('model.desc.haiku'),qwen:t('model.desc.qwen'),grok:t('model.desc.grok')};
-    $('workflow-switch').innerHTML=workflowControl(currentConfig.workflow,currentConfig.balance);
-  if(currentConfig.delegation_limits){const limits=currentConfig.delegation_limits,note=document.createElement('div');note.className='pref-note';note.textContent=t('settings.worker.limits').replace('{depth}',limits.max_spawn_depth??'—').replace('{children}',limits.max_concurrent_children??'—').replace('{iterations}',limits.max_iterations??'—');$('workflow-switch').append(note)}
   renderAccounts();
-  renderEffort();
+  renderBalance();
   renderPreferences(modelLabels);
   renderMainChain(modelLabels,models);
   renderWorkers(modelLabels);
+  if(currentConfig.delegation_limits){const limits=currentConfig.delegation_limits,note=document.createElement('div');note.className='pref-note';note.textContent=t('settings.worker.limits').replace('{depth}',limits.max_spawn_depth??'—').replace('{children}',limits.max_concurrent_children??'—').replace('{iterations}',limits.max_iterations??'—');$('worker-settings').append(note)}
 }
 function ageText(seconds){if(seconds==null)return '';const m=Math.round(seconds/60);return t('account.usage.age').replace('{n}',m<60?`${m} min`:`${Math.round(m/60)} h`)}
 function resetText(iso){if(!iso)return '';const d=new Date(iso);return Number.isNaN(d.getTime())?'':`${t('account.usage.resets')} ${d.toLocaleString(t('status.locale'),{weekday:'short',hour:'2-digit',minute:'2-digit'})}`}
@@ -1570,13 +1818,26 @@ async function loadAccounts(){try{const r=await fetch('/api/config',{cache:'no-s
 // The card header already names the vendor, so the switches drop the repeated
 // "Claude "/"GPT-" prefix: "GPT-5.6 Luna" -> "Luna 5.6", "Claude Opus 5.5" -> "Opus 5.5".
 function shortModelName(label){const gpt=/^GPT-(\S+)\s+(.+)$/.exec(label);return gpt?`${gpt[2]} ${gpt[1]}`:label.replace(/^Claude\s+/,'')}
+function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
+const ROUTER_EFFORT_TIERS=['luna','spark','terra','sol','grok'];
+function renderEffort(tiers,off=false){const effort=currentConfig.effort||{},levels=['low','medium','high','xhigh'];
+  return tiers.filter(tier=>ROUTER_EFFORT_TIERS.includes(tier)).map(tier=>`<select data-effort="${tier}"${off?' disabled':''}>${levels.map(level=>`<option value="${level}"${effort[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`).join('')}
+function renderClaudeReasoningEffort(tiers,off=false){const state=currentConfig.claude_reasoning_effort||{available:false,levels:{}},levels=state.levels||{},defaults=state.defaults||{},pinned=state.pinned||{},options=['low','medium','high','xhigh'],disabled=state.available&&!off?'':' disabled',title=state.available?'':` title="${escapeHtml(state.reason||'')}"`;
+  return tiers.map(model=>{const tier={sonnet5:'sonnet',opus5:'opus'}[model];
+    if(!tier)return model==='haiku'?`<select class="effort-none" disabled><option>${t('settings.claude_effort.haiku_no_reasoning')}</option></select>`:'';
+    const isPinned=!!pinned[tier],defaultLabel=t('settings.claude_effort.default').replace('{level}',t('settings.effort.'+(defaults[tier]||levels[tier]||'medium')));
+    return `<select data-claude-effort="${tier}"${disabled}${title}><option value=""${isPinned?'':' selected'}>${defaultLabel}</option>${options.map(level=>`<option value="${level}"${isPinned&&levels[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`;
+  }).join('')}
+function usageError(account){const message=((currentConfig||{}).usage_errors||{})[account];return message?`<span class="usage-error">${escapeHtml(message)}</span>`:''}
 function accountCard(account,info){const callable=currentConfig.callable||{},cooldowns=currentConfig.cooldowns||{},load=(currentConfig.load||{})[account]||0,d=info.delegation||{};
   const loadText=`<span class="usage-load">${t('account.load')}: ${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</span>`;
-  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m];return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
-  const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${loadText}</div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${loadText}</div>`):`<div class="usage-none">${t('account.usage.none')}</div><div class="usage-age">${loadText}</div>`;
+  const hasEffort=info.tiers.some(m=>ROUTER_EFFORT_TIERS.includes(m))||account==='anthropic';
+  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m],effort=ROUTER_EFFORT_TIERS.includes(m)?renderEffort([m],!on):account==='anthropic'?renderClaudeReasoningEffort([m],!on):'';return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${effort}${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
+  const modelControls=`<div class="account-row models"><span>${t('account.models')}</span><div class="model-list${hasEffort?'':' no-effort'}">${models}</div></div>`;
+  const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${usageError(account)}${loadText}</div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${usageError(account)}${loadText}</div>`):`<div class="usage-none">${t('account.usage.none')}</div><div class="usage-age">${loadText}</div>`;
   const off=info.guard?'':'disabled',step=Object.entries(info.step_down||{}).map(([a,b])=>`${a} → ${b}`).join(', ');
   const limits=`<label>${t('account.limits.soft')} <input type="number" min="1" max="99" data-limit="soft" data-account="${account}" value="${info.soft_percent??''}" ${off}>%</label> <label>${t('account.limits.hard')} <input type="number" min="2" max="100" data-limit="hard" data-account="${account}" value="${info.hard_percent??''}" ${off}>%</label>${step?`<div class="stepdown">${t('account.limits.stepdown')}: ${step}</div>`:''}`;
-  // The Workflow switch owns delegate_claude being on; the card only reports it.
+  // delegate_claude is on while a Claude model is switched on; the row only reports it.
   // The default tier is chosen under Workers, next to the other worker defaults.
   const delegation=d.tool==='delegate_claude'?`${d.enabled?t('account.delegation.via').replace('{tool}','delegate_claude'):t('account.delegation.off')}`:`${t('account.delegation.via').replace('{tool}',d.tool||'delegate_task')} · ${t('account.delegation.always')}`;
   // M7: the live/restart badge moved out of the Delegation row and into the
@@ -1587,37 +1848,23 @@ function accountCard(account,info){const callable=currentConfig.callable||{},coo
   const stale=info.usage_age_seconds!=null&&info.usage_age_seconds>2*(info.cache_seconds||300);
   return `<div class="account-card ${account}${stale?' stale':''}"><div class="account-head"><b>${info.label}</b> <span class="state-badge ${info.state}">${t('account.state.'+info.state)}</span>${liveBadge}</div>`
     +`<div class="account-grid">`
-    +`<div class="account-row models"><span>${t('account.models')}</span><div>${models}</div></div>`
+    +modelControls
     +`<div class="account-row limits"><span>${t('account.limits')}</span><div>${limits}</div></div>`
     +`<div class="account-row delegation"><span>${t('account.delegation')}</span><div>${delegation}</div></div>`
     +`<div class="account-row usage"><span>${t('account.usage')}</span><div>${usage}</div></div>`
     +`</div></div>`}
-function workflowControl(workflow,balance){const current=workflow==='codex'?'codex':'claude_delegation';
-  const option=(name,label)=>`<button type="button" data-workflow="${name}"${name===current?' class="active"':''}>${t(label)}</button>`;
-  return `<div class="workflow-options">${option('codex','settings.workflow.codex')}${option('claude_delegation','settings.workflow.claude')}</div>`
-    +`<div class="workflow-desc">${t(current==='codex'?'settings.workflow.desc.codex':'settings.workflow.desc.claude')}</div>`
-    // Load balancing is a Claude delegation feature: in the Codex workflow there is one account to delegate to.
-    +(current==='claude_delegation'&&balance?`<div class="balance-row"><label class="switch"><input type="checkbox" data-balance-toggle${balance.enabled?' checked':''}><span class="slider"></span></label><b>${t('settings.balance.label')}</b>`
-      +`<label class="balance-field">${t('settings.balance.busy')} <input type="number" min="0" max="100" data-balance-field="busy_percent" value="${balance.busy_percent}">%</label>`
-      +`<label class="balance-field">${t('settings.balance.margin')} <input type="number" min="1" max="100" data-balance-field="margin_percent" value="${balance.margin_percent}"></label>`
-      +`<span class="pref-note">${t('settings.balance.desc').replace('{window}',t('settings.balance.window.'+(balance.window||'5-hour'))).replace('{busy}',balance.busy_percent).replace('{margin}',balance.margin_percent)}</span></div>`:'')
-    +`<div class="pref-note">${t('settings.workflow.live')}</div>`}
+// Load balancing picks between accounts, so it needs two with a model switched on.
+function balanceAccounts(accounts,callable){return Object.values(accounts||{}).filter(info=>(info.tiers||[]).some(m=>callable[m]!==false)).length}
+function balanceControl(balance){if(!balance)return '';
+  return `<div class="balance-row"><label class="switch"><input type="checkbox" data-balance-toggle${balance.enabled?' checked':''}><span class="slider"></span></label><b>${t('settings.balance.label')}</b>`
+    +`<label class="balance-field">${t('settings.balance.busy')} <input type="number" min="0" max="100" data-balance-field="busy_percent" value="${balance.busy_percent}">%</label>`
+    +`<label class="balance-field">${t('settings.balance.margin')} <input type="number" min="1" max="100" data-balance-field="margin_percent" value="${balance.margin_percent}"></label>`
+    +`<span class="pref-note">${t('settings.balance.desc').replace('{window}',t('settings.balance.window.'+(balance.window||'5-hour'))).replace('{busy}',balance.busy_percent).replace('{margin}',balance.margin_percent)}</span></div>`}
+function renderBalance(){const section=$('balance-section');if(!section)return;
+  const shown=!!currentConfig.balance&&balanceAccounts(currentConfig.accounts,currentConfig.callable||{})>=2;
+  section.hidden=!shown;$('balance-settings').innerHTML=shown?balanceControl(currentConfig.balance):''}
 function renderAccounts(){const box=$('account-cards');if(!box)return;const accounts=currentConfig.accounts||{};box.innerHTML=Object.entries(accounts).map(([a,info])=>accountCard(a,info)).join('')}
-function renderEffort(){
-  const box=$('effort-settings');
-  if(!box)return;
-  const effort=currentConfig.effort||{};
-  const levels=['low','medium','high','xhigh'];
-  box.innerHTML='';
-  for(const tier of ['luna','spark','terra','sol']){
-    const row=document.createElement('div');
-    row.className='pref-kind';
-    row.innerHTML=`<div class="pref-kind-head"><div class="pref-kind-name">${t('settings.effort.'+tier)}</div></div>`
-      +`<div class="pref-chain"><select data-effort="${tier}">${levels.map(level=>`<option value="${level}"${effort[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select></div>`;
-    box.appendChild(row);
-  }
-}
-async function refreshUsage(account){try{const r=await fetch(`/api/usage/refresh?account=${encodeURIComponent(account)}`,{method:'POST'});if(r.ok){const body=await r.json();currentConfig.accounts[account]=body.account;renderAccounts()}}catch(e){}}
+async function refreshUsage(account){const errors=currentConfig.usage_errors=currentConfig.usage_errors||{};try{const r=await fetch(`/api/usage/refresh?account=${encodeURIComponent(account)}`,{method:'POST'});const body=await r.json().catch(()=>({}));if(r.ok){delete errors[account];currentConfig.accounts[account]=body.account}else errors[account]=body.error||`HTTP ${r.status}`}catch(e){errors[account]=String(e.message||e)}renderAccounts()}
 const defaultWidths=[55,110,90,350,90,230,480],widthStore='model-router-column-widths-v3';
 function saveWidths(table,cols){localStorage.setItem(widthStore,JSON.stringify({columns:cols.map(c=>parseFloat(c.style.width)),table:parseFloat(table.style.width)}))}
 function initColumnResize(){const table=$('log-table'),cols=[...table.querySelectorAll('col')],heads=[...table.querySelectorAll('th')];let saved=null;try{saved=JSON.parse(localStorage.getItem(widthStore))}catch(e){}
@@ -1660,7 +1907,9 @@ for(const id of ['main-chain','worker-settings']){
       chains[el.dataset.fb]=(chains[el.dataset.fb]||[]).concat([{provider,model}]);
       renderSettings();await saveSettings();return;
     }
-    if(el.id==='default-model-select')currentConfig.default_model=el.value;
+    // A pick here moves Hermes's own parent, whichever account it is on; posted
+    // once, with this save only, so no unrelated save can move the parent.
+    if(el.id==='default-model-select'){if(!el.value)return;currentConfig.main_parent=el.value;if((currentConfig.routable||[]).includes(el.value))currentConfig.default_model=el.value}
     else if(el.matches('[data-worker-model]'))currentConfig.worker_model=Object.assign({},currentConfig.worker_model,{tier:el.value});
     else if(el.dataset.defaultTier)currentConfig.accounts[el.dataset.defaultTier].delegation.default_tier=el.value;
     else return;
@@ -1688,18 +1937,13 @@ document.getElementById('pref-kinds').addEventListener('change',(e)=>{
 document.getElementById('account-cards').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
   if(el.dataset.model){currentConfig.callable[el.dataset.model]=el.checked}
   else if(el.dataset.limit){const info=currentConfig.accounts[el.dataset.account];info[el.dataset.limit==='soft'?'soft_percent':'hard_percent']=Number(el.value)}
+  else if(el.dataset.effort){currentConfig.effort=Object.assign({},currentConfig.effort,{[el.dataset.effort]:el.value})}
+  else if(el.dataset.claudeEffort){const state=currentConfig.claude_reasoning_effort||{levels:{}};currentConfig.claude_reasoning_effort=Object.assign({},state,{levels:Object.assign({},state.levels,{[el.dataset.claudeEffort]:el.value})})}
   else return;await saveSettings();await loadSettings()});
-document.getElementById('workflow-switch').addEventListener('click',async(e)=>{const b=e.target.closest('[data-workflow]');
-  if(!b||!currentConfig||b.dataset.workflow===currentConfig.workflow)return;
-  currentConfig.workflow=b.dataset.workflow;await saveSettings();await loadSettings()});
-document.getElementById('workflow-switch').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
+document.getElementById('balance-settings').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
   if(el.matches('[data-balance-toggle]'))currentConfig.balance=Object.assign({},currentConfig.balance,{enabled:el.checked});
   else if(el.dataset.balanceField)currentConfig.balance=Object.assign({},currentConfig.balance,{[el.dataset.balanceField]:Number(el.value)});
   else return;await saveSettings();await loadSettings()});
-document.getElementById('effort-settings').addEventListener('change',async(e)=>{if(!currentConfig)return;const el=e.target;
-  if(!el.dataset.effort)return;
-  currentConfig.effort=Object.assign({},currentConfig.effort,{[el.dataset.effort]:el.value});
-  await saveSettings();await loadSettings()});
 document.getElementById('account-cards').addEventListener('click',e=>{const b=e.target.closest('[data-refresh-usage]');if(b)refreshUsage(b.dataset.refreshUsage)});
 document.getElementById('language-select').addEventListener('change',async(e)=>{
   currentLang=e.target.value;
@@ -1731,10 +1975,6 @@ function renderPreferences(modelLabels){
   // setting that silently does nothing.
   const available=Object.keys(modelLabels).filter(m=>callable[m]!==false);
   box.innerHTML='';
-  // workflow: codex ignores these chains; they stay editable and come back on switching.
-  const paused=currentConfig.workflow==='codex';
-  box.classList.toggle('paused',paused);
-  if(paused){const banner=document.createElement('div');banner.className='pref-paused';banner.textContent=t('settings.prefs.paused');box.appendChild(banner)}
   for(const kind of kinds){
     const chain=prefs[kind]||[];
     const row=document.createElement('div');
@@ -1793,23 +2033,34 @@ function chainRow(name,desc,body){return `<div class="pref-kind">${name?`<div cl
 // The pair the main agent starts on: Hermes's own parent when this router serves
 // it, else the router tier picked as first entry.
 function mainPrimary(){const parent=currentConfig.hermes_parent||{};if(parent.model&&!parent.router_model)return parent;const o=(currentConfig.fallback_options||[]).find(x=>x.key===currentConfig.default_model);return o?{provider:o.provider,model:o.model}:parent}
-// Main agent: ONE chain. Entry 1 is default_model (the model Hermes starts on,
-// the default route and the conductor); the rest is Hermes's fallback_providers.
-// It used to be two settings, and the primary kept showing up as its own fallback.
+// Main agent: ONE chain. Entry 1 is the model Hermes starts on; the rest is
+// Hermes's fallback_providers. It used to be two settings, and the primary kept
+// showing up as its own fallback. Entry 1 offers the router's own tiers (which
+// also become default_model: the default route and the conductor) and the
+// switched-on Claude models (Hermes's anthropic provider; the router's default
+// route and conductor stay where they are).
 function renderMainChain(modelLabels,models){
   const box=$('main-chain');if(!box)return;
   const chains=currentConfig.hermes_fallback=currentConfig.hermes_fallback||{};
   const primary=mainPrimary(),parent=currentConfig.hermes_parent||{};
   chains.orchestrator=(chains.orchestrator||[]).filter(e=>!(e.provider===primary.provider&&e.model===primary.model)&&!fallbackRouteOff(e));
-  const chain=chains.orchestrator,defaultModel=currentConfig.default_model||'terra';
-  // Only a routable tier can start Hermes; a delegation-only target has no model
-  // entry in the router and raises on the first decision.
-  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m));
+  const chain=chains.orchestrator,defaultModel=currentConfig.default_model||'terra',callable=currentConfig.callable||{};
+  // Only a routable tier can start Hermes as a router tier; a delegation-only target has
+  // no model entry in the router and raises on the first decision. A switched-off tier
+  // is not offered, except the current default, which must stay visible.
+  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m)&&(callable[m]!==false||m===defaultModel));
+  const claude=currentConfig.parent_options||[];
+  const external=!!(parent.model&&!parent.router_model);
+  const claudeParent=external?claude.find(o=>o.provider===parent.provider&&o.model===parent.model):null;
+  const selected=external?(claudeParent?claudeParent.key:''):defaultModel;
   const first=`<span class="pref-chip primary"><span class="rank">1.</span><select id="default-model-select">`
-    +(orchestrators.length?orchestrators:models).map(m=>`<option value="${m}"${m===defaultModel?' selected':''}>${modelLabels[m]}</option>`).join('')
+    +(external&&!claudeParent?`<option value="" selected disabled>${escapeHtml(parent.model)}</option>`:'')
+    +(orchestrators.length?orchestrators:models).map(m=>`<option value="${m}"${m===selected?' selected':''}>${modelLabels[m]}</option>`).join('')
+    +claude.map(o=>`<option value="${o.key}"${o.key===selected?' selected':''}>${modelLabels[o.key]||o.key}</option>`).join('')
     +`</select><span class="chain-account">${t('settings.main.primary')}</span></span>`;
   box.innerHTML=chainRow('','',first+fallbackChips('orchestrator',chain,modelLabels,2)+fallbackPicker('orchestrator',chain,modelLabels,primary))
-    +(parent.model&&!parent.router_model?`<div class="pref-note">${t('settings.main.external').replace('{model}',parent.model)}</div>`:'')}
+    +(external&&!claudeParent?`<div class="pref-note">${t('settings.main.external').replace('{model}',escapeHtml(parent.model))}</div>`
+      :claudeParent?`<div class="pref-note">${t('settings.main.claude').replace('{tier}',modelLabels[defaultModel]||defaultModel)}</div>`:'')}
 function renderWorkers(modelLabels){
   const box=$('worker-settings');if(!box)return;
   const worker=currentConfig.worker_model||{},options=worker.options||[];
@@ -1857,7 +2108,8 @@ function mutatePreference(kind,index,act){
 
 function saveSettings(){
   if(!currentConfig)return Promise.resolve();
-  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,workflow:currentConfig.workflow,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,main_parent:currentConfig.main_parent||undefined,effort:currentConfig.effort||{},claude_reasoning_effort:(currentConfig.claude_reasoning_effort||{}).levels||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  delete currentConfig.main_parent;
   settingsPending++;settingsLoadGeneration++;
   settingsSaveQueue=settingsSaveQueue.then(async()=>{
     const statusEl=$('settings-status');
@@ -2063,7 +2315,9 @@ def _save_config_payload(data):
         shipped = _load_yaml_mapping(CONFIG_PATH)
         local_path = _local_config_path()
         local, dump = _read_router_config_for_update(local_path)
-        config = _merge(shipped, _load_yaml_mapping(local_path))
+        local_plain = _load_yaml_mapping(local_path)
+        legacy = _has_legacy_claude_keys(local_plain)
+        config = _effective_router_config(shipped, local_plain)
         hermes_before = HERMES_CONFIG_PATH.read_bytes() if HERMES_CONFIG_PATH.exists() else None
         stamp, hermes = _read_hermes_snapshot()
         original_hermes = json.dumps(hermes, sort_keys=True)
@@ -2079,13 +2333,19 @@ def _save_config_payload(data):
             _assign_in_place(config, "preferences", cleaned)
         for key, save in (("usage_limits", _save_usage_limits), ("effort", _save_effort),
                           ("claude_delegation", _save_claude_delegation), ("balance", _save_balance),
-                          ("workflow", _save_workflow)):
+                          ("claude_reasoning_effort", _save_claude_reasoning_effort)):
+            # ``workflow`` is retired: an old open tab may still post it, and it is ignored.
             if key in data:
                 error = save(data[key], config)
                 if error:
                     return 400, {"success": False, "error": error}
         if "default_model" in data:
             error = _save_default_model(str(data["default_model"]), config, hermes=hermes, persist=False)
+            if error:
+                return 400, {"success": False, "error": error}
+        # Before the fallback chain: that save drops the (new) parent from its own chain.
+        if "main_parent" in data:
+            error = _save_main_parent(data["main_parent"], config, hermes=hermes, persist=False)
             if error:
                 return 400, {"success": False, "error": error}
         if "hermes_fallback" in data:
@@ -2097,6 +2357,14 @@ def _save_config_payload(data):
             if error:
                 return 400, {"success": False, "error": error}
         delta = _overlay(shipped, config)
+        if legacy:
+            # The first save after the upgrade writes the Claude switches the legacy
+            # keys stood for, explicitly, so the file reads the same without them
+            # (the keys themselves go: the effective config no longer has them).
+            switches = delta.setdefault("callable", {})
+            for name in CLAUDE_SWITCHES:
+                if name in (config.get("callable") or {}):
+                    switches[name] = config["callable"][name]
         holder = {"local": local}
         _assign_in_place(holder, "local", delta)
         output = io.StringIO()
@@ -2158,7 +2426,11 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 # The button is a person asking now; the cache_seconds gate exists
                 # to throttle background reads, not this.
-                router.usage_guard.read(account, config, force=True)
+                if router.usage_guard.read(account, config, force=True) is None:
+                    reason = router.usage_guard.last_failure(account) or "the usage endpoint returned no reading"
+                    self._send(502, json.dumps({"error": f"Could not refresh usage: {reason}"}).encode("utf-8"),
+                               "application/json")
+                    return
                 self._send(200, json.dumps({"account": _accounts_status(config)[account]}).encode("utf-8"),
                            "application/json")
             except Exception as e:
@@ -2231,11 +2503,11 @@ class Handler(BaseHTTPRequestHandler):
                     response = {
                         "revision": _config_revision(),
                         "callable": config.get("callable", {}),
-                        "workflow": _workflow_name(config),
                         "delegation_limits": router._host_delegation_limits() if router else {},
                         "balance": _balance_status(config),
                         "default_model": config.get("default_model", "terra"),
                         "effort": {tier: (config.get("effort") or {}).get(tier) for tier in MANAGED_EFFORT_TIERS},
+                        "claude_reasoning_effort": _claude_reasoning_status(config),
                         "preferences": config.get("preferences") or {},
                         "work_kinds": work_kinds,
                         # Hermes's own chains, not the router's. Kept separate in the payload
@@ -2247,6 +2519,7 @@ class Handler(BaseHTTPRequestHandler):
                         "fallback_options": _fallback_chain_options(config),
                         "hermes_parent": dict(_hermes_parent(_read_hermes_config()),
                                               router_model=_parent_is_router_model(config)),
+                        "parent_options": _claude_parent_options(config),
                         "worker_model": _worker_model_status(config),
                         "accounts": _accounts_status(config),
                         "tier_accounts": _tier_accounts(config),

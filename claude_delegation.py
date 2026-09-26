@@ -17,11 +17,13 @@ import inspect
 import json
 import logging
 import os
+import sys
 import threading
+import types
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
@@ -37,17 +39,21 @@ TIERS: Tuple[str, ...] = ("haiku", "sonnet", "opus")
 TARGET_FOR_TIER: Dict[str, str] = {"haiku": "haiku", "sonnet": "sonnet5", "opus": "opus5"}
 TIER_FOR_TARGET: Dict[str, str] = {target: tier for tier, target in TARGET_FOR_TIER.items()}
 
+EDITABLE_REASONING_TIERS: Tuple[str, ...] = ("sonnet", "opus")
+REASONING_LEVELS: Tuple[str, ...] = ("low", "medium", "high", "xhigh")
+DEFAULT_REASONING_EFFORT: Dict[str, str] = {"sonnet": "medium", "opus": "medium"}
+
 DEFAULTS: Dict[str, Any] = {
-    "enabled": False,
     "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
     "log_path": "",
+    "reasoning_effort": dict(DEFAULT_REASONING_EFFORT),
 }
 
 _ACTIVE = False
 # Set by the router for the request it is routing: whether *this* request can use
 # delegate_claude. A session's tool list is fixed when its agent is built, so the
-# live workflow and the tools the request actually carries can disagree; the
+# live Claude switches and the tools the request actually carries can disagree; the
 # request is what the conductor sees, so it decides.
 _REQUEST_ACTIVE: ContextVar[Optional[bool]] = ContextVar("claude_delegation_request_active", default=None)
 # The last availability the router saw, so a flip can drop Hermes's tool-list memo.
@@ -57,8 +63,8 @@ _LAST_AVAILABLE: Optional[bool] = None
 def is_active() -> bool:
     """Whether Claude delegation may be offered right now.
 
-    Inside a routed request: the request's own answer (workflow allows it AND the
-    request offers the tool). Outside one: whether the tool is registered.
+    Inside a routed request: the request's own answer (a Claude model is switched
+    on AND the request offers the tool). Outside one: whether the tool is registered.
     """
     scoped = _REQUEST_ACTIVE.get()
     return _ACTIVE if scoped is None else scoped
@@ -71,6 +77,307 @@ def request_scope(active: bool) -> Iterator[None]:
         yield
     finally:
         _REQUEST_ACTIVE.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-effort compatibility bridge
+#
+# Hermes copies a delegating parent's ``reasoning_config`` verbatim into every
+# child it spawns (see ``tools.delegate_tool_config._resolve_child_runtime``).
+# That leaves no way for this plugin to give a Claude Sonnet/Opus child its own
+# per-tier reasoning effort without either forking Hermes's private resolver or
+# mutating shared parent/config state (which would leak across concurrent
+# delegations). Instead, install_reasoning_bridge() wraps the *module global*
+# Hermes's own call site (tools.delegate_tool._resolve_child_runtime) actually
+# calls, and the wrapper only ever substitutes ``reasoning_config`` while a
+# ContextVar scope set by the active delegate_claude call is live, and only for
+# the exact child it was set for. Outside that narrow window -- including any
+# other concurrent delegation, any non-Anthropic child, or any host that lacks
+# this private seam -- the original Hermes behavior is untouched.
+
+
+@dataclass(frozen=True)
+class _ReasoningScope:
+    """One delegate_claude call's claim on the next matching child's reasoning.
+
+    ``parent`` is compared by identity, so unrelated concurrent delegations from
+    other parents (or other tasks under the same parent) never match.
+    """
+
+    parent: Any
+    tier: str
+    model: str
+    reasoning_config: Dict[str, Any]
+
+
+_REASONING_BRIDGE_STATE_KEY = "_hermes_model_router_claude_reasoning_state"
+
+
+def _new_reasoning_bridge_state() -> Any:
+    return types.SimpleNamespace(
+        scope=ContextVar("claude_delegation_reasoning_scope", default=None),
+        lock=threading.Lock(),
+        installed=False,
+        reason="not yet installed",
+        original=None,
+        wrapper=None,
+    )
+
+
+# ``sys.modules`` is only a per-process identity registry here: this holder is
+# deliberately an ordinary object, not a module. A newer copy backfills fields
+# it knows about on an older holder; a non-holder or incompatible field type is
+# still unsupported rather than silently replaced.
+_REASONING_BRIDGE_STATE: Any = sys.modules.setdefault(
+    _REASONING_BRIDGE_STATE_KEY,
+    _new_reasoning_bridge_state(),
+)
+for _state_field, _state_default in (
+    ("scope", lambda: ContextVar("claude_delegation_reasoning_scope", default=None)),
+    ("lock", threading.Lock),
+    ("installed", lambda: False),
+    ("reason", lambda: "not yet installed"),
+    ("original", lambda: None),
+    ("wrapper", lambda: None),
+):
+    _REASONING_BRIDGE_STATE.__dict__.setdefault(_state_field, _state_default())
+
+# These aliases retain the test-visible names. They are safe to alias directly
+# because ContextVar and Lock are already shared objects; plain state stays on
+# the per-process holder above for reloads and alternate imports.
+_REASONING_SCOPE: ContextVar[Optional[_ReasoningScope]] = _REASONING_BRIDGE_STATE.scope
+_REASONING_BRIDGE_LOCK = _REASONING_BRIDGE_STATE.lock
+
+
+def __getattr__(name: str) -> Any:
+    """Keep private bridge-state reads compatible while the holder owns mutation."""
+    state_fields = {
+        "_REASONING_BRIDGE_INSTALLED": "installed",
+        "_REASONING_BRIDGE_REASON": "reason",
+        "_REASONING_BRIDGE_ORIGINAL": "original",
+        "_REASONING_BRIDGE_WRAPPER": "wrapper",
+    }
+    try:
+        return getattr(_REASONING_BRIDGE_STATE, state_fields[name])
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
+
+@contextmanager
+def reasoning_scope(parent: Any, tier: str, model: str, reasoning_config: Dict[str, Any]) -> Iterator[None]:
+    """Claim the next matching Anthropic child's reasoning_config for this call.
+
+    Held for the duration of the ``delegate_task`` call inside ``_dispatch``:
+    the wrapped ``_resolve_child_runtime`` only applies ``reasoning_config``
+    when it sees a call whose ``parent_agent``/``model``/provider match this
+    scope, so the claim cannot leak onto some other concurrent delegation.
+    """
+    token = _REASONING_SCOPE.set(_ReasoningScope(parent, tier, model, dict(reasoning_config)))
+    try:
+        yield
+    finally:
+        _REASONING_SCOPE.reset(token)
+
+
+def _wrap_resolve_child_runtime(original: Callable[..., Any]) -> Callable[..., Any]:
+    signature = inspect.signature(original)
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        scope = _REASONING_SCOPE.get()
+        if scope is None:
+            return result
+        try:
+            bound = signature.bind_partial(*args, **kwargs)
+        except TypeError:
+            return result
+        arguments = bound.arguments
+        parent_agent = arguments.get("parent_agent")
+        override_provider = arguments.get("override_provider")
+        if parent_agent is not scope.parent or override_provider != "anthropic":
+            return result
+        model = None
+        if isinstance(result, dict):
+            model = result.get("model")
+        if model is None:
+            model = arguments.get("model")
+        if model != scope.model:
+            return result
+        if isinstance(result, dict):
+            return dict(result, reasoning_config=dict(scope.reasoning_config))
+        return result
+
+    wrapper.__model_router_original__ = original
+    return wrapper
+
+
+def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optional[Callable[..., Any]]]:
+    """Check whether the host seam this bridge wraps still looks the way it must.
+
+    Side-effect-free: only imports and inspects ``tools.delegate_tool`` /
+    ``tools.delegate_tool_config`` (both cheap and side-effect-free imports on
+    this host), never assigns anything. Returns
+    ``(ok, reason, delegate_tool_module_or_None, current_resolver_or_None)``;
+    the last two let a caller that wants to actually install reuse the same
+    lookup instead of re-importing.
+
+    This is the single source of truth for "is the seam compatible" -- both
+    ``install_reasoning_bridge()`` (which then also wraps it) and
+    ``reasoning_bridge_compatibility()`` (which never does) call this, so the
+    two validations cannot drift apart.
+    """
+    try:
+        import sys as _sys
+
+        # Read back through sys.modules rather than `import ... as name`: once a
+        # submodule has been imported, a plain dotted import can bind through the
+        # parent package's cached attribute instead of a swapped-in sys.modules
+        # entry (as tests do via unittest.mock.patch.dict(sys.modules, ...)).
+        # _import_hermes also finds them when the venv's install map is stale
+        # (the standalone dashboard has no PYTHONPATH to fall back on).
+        usage_guard._import_hermes("tools.delegate_tool")
+        usage_guard._import_hermes("tools.delegate_tool_config")
+        delegate_tool = _sys.modules["tools.delegate_tool"]
+        delegate_tool_config = _sys.modules["tools.delegate_tool_config"]
+    except Exception as exc:
+        return False, f"Hermes delegation API not importable ({type(exc).__name__}: {exc})", None, None
+
+    current = getattr(delegate_tool, "_resolve_child_runtime", None)
+    if current is None:
+        return False, "tools.delegate_tool has no _resolve_child_runtime to wrap", delegate_tool, None
+    if not callable(current):
+        return False, "tools.delegate_tool._resolve_child_runtime is not callable", delegate_tool, None
+
+    already_wrapped = (
+        _REASONING_BRIDGE_STATE.original is not None
+        and current is _REASONING_BRIDGE_STATE.wrapper
+    )
+    if already_wrapped:
+        return True, "", delegate_tool, current
+
+    # A foreign wrapper -- e.g. installed by an earlier copy of this same module
+    # after a reload/re-import -- carries its own claim on the seam via
+    # ``__model_router_original__``. Unwrap it before comparing: the underlying
+    # original, not the foreign wrapper, is the real host function, so install
+    # can re-wrap that original with THIS module's wrapper.
+    current_original = getattr(current, "__model_router_original__", current)
+
+    original_from_config = getattr(delegate_tool_config, "_resolve_child_runtime", None)
+    if current_original is not original_from_config:
+        return False, (
+            "tools.delegate_tool._resolve_child_runtime is not the same callable as "
+            "tools.delegate_tool_config._resolve_child_runtime; the host seam has moved"
+        ), delegate_tool, current
+
+    try:
+        signature = inspect.signature(current_original)
+    except (TypeError, ValueError) as exc:
+        return False, f"could not inspect _resolve_child_runtime's signature: {exc}", delegate_tool, current
+
+    required = ("parent_agent", "model", "override_provider")
+    missing = [name for name in required if name not in signature.parameters]
+    if missing:
+        return False, "_resolve_child_runtime lacks " + ", ".join(missing), delegate_tool, current
+
+    return True, "", delegate_tool, current
+
+
+def reasoning_bridge_compatibility() -> Tuple[bool, str]:
+    """Whether THIS host's seam is compatible with the reasoning-effort bridge.
+
+    Side-effect-free: never installs, wraps or mutates anything, including the
+    bridge's own module globals -- safe to call from a process (e.g. the
+    standalone dashboard) that must never construct agents or otherwise touch
+    Hermes's delegation machinery. Runs exactly the same checks
+    ``install_reasoning_bridge()`` does, via ``_validate_reasoning_bridge_seam()``,
+    so "the seam is compatible" and "the wrapper installed cleanly" cannot
+    silently diverge.
+    """
+    ok, reason, _delegate_tool, _current = _validate_reasoning_bridge_seam()
+    return ok, reason
+
+
+def install_reasoning_bridge() -> Tuple[bool, str]:
+    """Idempotently install the reasoning-effort bridge onto the real host seam.
+
+    Safe to call repeatedly (e.g. once per registration): a prior successful
+    install is a no-op, and a prior failure is retried since the host may have
+    changed (mainly relevant to tests that swap ``sys.modules`` entries).
+
+    The bridge state is process-wide so a plugin reload observes and uses the
+    same wrapper, lock, and active scope rather than creating a disconnected
+    bridge that can silently lose a child's configured reasoning effort.
+    """
+    state = _REASONING_BRIDGE_STATE
+    with _REASONING_BRIDGE_LOCK:
+        delegate_tool = sys.modules.get("tools.delegate_tool")
+        if (state.installed and state.wrapper is not None
+                and delegate_tool is not None
+                and getattr(delegate_tool, "_resolve_child_runtime", None) is state.wrapper):
+            return True, ""
+        ok, reason, delegate_tool, current = _validate_reasoning_bridge_seam()
+        if not ok:
+            state.installed = False
+            state.reason = reason
+            return False, state.reason
+
+        already_wrapped = state.original is not None and current is state.wrapper
+        if already_wrapped:
+            state.installed = True
+            state.reason = ""
+            return True, ""
+
+        original = getattr(current, "__model_router_original__", current)
+        try:
+            wrapper = _wrap_resolve_child_runtime(original)
+            setattr(delegate_tool, "_resolve_child_runtime", wrapper)
+        except Exception as exc:
+            state.installed = False
+            state.reason = f"installing the reasoning bridge failed: {type(exc).__name__}: {exc}"
+            return False, state.reason
+
+        state.original = original
+        state.wrapper = wrapper
+        state.installed = True
+        state.reason = ""
+        return True, ""
+
+
+def reasoning_bridge_status() -> Tuple[bool, str]:
+    """Whether the reasoning-effort bridge is usable right now, and why not when it isn't.
+
+    ``(True, "")`` when THIS process already installed it. Otherwise falls
+    back to ``reasoning_bridge_compatibility()``'s side-effect-free probe, so
+    a process that queries status before ever installing (the standalone
+    dashboard) still reports "available" whenever the host seam this bridge
+    needs is actually compatible -- "available" means "the host seam is
+    compatible", not "this process installed the wrapper".
+    """
+    if _REASONING_BRIDGE_STATE.installed:
+        return True, ""
+    return reasoning_bridge_compatibility()
+
+
+def _reset_reasoning_bridge_for_tests() -> None:
+    """Test-only: restore the real host's ``_resolve_child_runtime`` and bridge state.
+
+    Never leaves a wrapped host function installed for later, unrelated test
+    modules or a live process.
+    """
+    state = _REASONING_BRIDGE_STATE
+    with _REASONING_BRIDGE_LOCK:
+        original = state.original
+        if original is not None:
+            try:
+                import tools.delegate_tool as delegate_tool
+                if getattr(delegate_tool, "_resolve_child_runtime", None) is state.wrapper:
+                    delegate_tool._resolve_child_runtime = original
+            except Exception:
+                pass
+        state.original = None
+        state.wrapper = None
+        state.installed = False
+        state.reason = "not yet installed"
 
 
 # Hermes's Tool Search defers plugin tools: a live parent request carries only the
@@ -86,11 +393,16 @@ def offered(tool_names: Iterable[str]) -> bool:
 
 
 def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """The ``claude_delegation`` block with defaults filled in; off unless configured on."""
+    """The ``claude_delegation`` block with defaults filled in.
+
+    The retired ``enabled`` flag is dropped: availability comes from ``callable``.
+    """
     raw = (cfg or {}).get("claude_delegation")
     raw = raw if isinstance(raw, dict) else {}
     merged = deepcopy(DEFAULTS)
     for key, value in raw.items():
+        if key == "enabled":
+            continue
         if key in ("tiers",):
             if isinstance(value, dict):
                 merged[key] = {**DEFAULTS[key], **value}
@@ -101,6 +413,23 @@ def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def tier_model(tier: str, cfg: Dict[str, Any]) -> str:
     return str(delegation_config(cfg)["tiers"].get(tier) or "").strip()
+
+
+def reasoning_effort_config(cfg: Dict[str, Any]) -> Dict[str, str]:
+    """Normalized editable per-tier reasoning levels: only ``sonnet`` and ``opus``.
+
+    Unset or invalid values (including ``haiku``, which is not editable here)
+    fall back to the safe default rather than raising or propagating garbage
+    into a child's ``reasoning_config``.
+    """
+    raw = delegation_config(cfg).get("reasoning_effort")
+    raw = raw if isinstance(raw, dict) else {}
+    values = dict(DEFAULT_REASONING_EFFORT)
+    for tier in EDITABLE_REASONING_TIERS:
+        value = raw.get(tier)
+        if isinstance(value, str) and value.strip().casefold() in REASONING_LEVELS:
+            values[tier] = value.strip().casefold()
+    return values
 
 
 def target_names(cfg: Dict[str, Any]) -> Tuple[str, ...]:
@@ -125,6 +454,8 @@ def host_check() -> Tuple[bool, str]:
     delegate_claude must not register rather than fail at call time.
     """
     try:
+        usage_guard._import_hermes("tools.delegate_tool")
+        usage_guard._import_hermes("agent.subagent_lifecycle")
         from tools.delegate_tool import delegate_task
         from agent.subagent_lifecycle import get_active_subagent_parent  # noqa: F401
     except Exception as exc:
@@ -139,12 +470,11 @@ def host_check() -> Tuple[bool, str]:
 def availability_block(cfg: Dict[str, Any]) -> str:
     """Why ``delegate_claude`` must not be offered now, or "" when it may be.
 
-    Config only, so it is cheap enough to run on every tool-list build. The
-    router's ``_load_config`` has already applied ``workflow: codex``, which turns
-    ``claude_delegation.enabled`` off.
+    Config only, so it is cheap enough to run on every tool-list build. Claude is
+    available exactly while one of its models is switched on in ``callable``; the
+    router's ``_load_config`` has already turned a legacy ``workflow`` into those
+    switches.
     """
-    if not delegation_config(cfg).get("enabled"):
-        return "claude_delegation.enabled is false"
     switches = cfg.get("callable") or {}
     if not any(switches.get(target) is True for target in TARGET_FOR_TIER.values()):
         return "every Claude target is switched off in `callable`"
@@ -161,8 +491,9 @@ def tool_available() -> bool:
 def note_availability(available: bool) -> None:
     """Drop Hermes's memoized tool list when availability flips.
 
-    ``model_tools`` memoizes whole tool lists without re-running check_fns, so a
-    flipped workflow would otherwise reach new sessions only after a restart.
+    ``model_tools`` memoizes whole tool lists without re-running check_fns, so
+    flipping the Claude switches would otherwise reach new sessions only after a
+    restart.
     ``_clear_tool_defs_cache`` is private upstream; without it, new sessions
     still follow the switch once the memo is rebuilt for another reason.
     """
@@ -408,11 +739,9 @@ def _dispatch(args: Dict[str, Any]) -> str:
 
     cfg = _load_config()
     settings = delegation_config(cfg)
-    if not settings.get("enabled"):
-        if str(cfg.get("workflow") or "").strip().casefold() == "codex":
-            return _error("Claude delegation is off: router_config.yaml is on workflow: codex. "
-                          "Use delegate_task, which runs on the Codex route.")
-        return _error("Claude delegation is switched off in router_config.yaml.")
+    if availability_block(cfg):
+        return _error("Claude delegation is off: every Claude model is switched off in Settings. "
+                      "Use delegate_task, which runs on the Codex route.")
     requested = str(args.get("tier") or settings.get("default_tier") or "sonnet").strip().casefold()
     if requested not in TIERS:
         return _error(f"Unknown tier {requested!r}; use one of: {', '.join(TIERS)}.")
@@ -439,16 +768,49 @@ def _dispatch(args: Dict[str, Any]) -> str:
     if not model:
         return _error(f"Claude tier \"{tier}\" has no model under claude_delegation.tiers.")
 
-    raw = delegate_task(
-        goal=args.get("goal"),
-        context=args.get("context"),
-        tasks=_strip_hidden(args.get("tasks")),
-        parent_agent=parent,
-        # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
-        # top level, synchronous for an orchestrator child that needs its results.
-        background=not getattr(parent, "_delegate_depth", 0) > 0,
-        credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
-    )
+    # Haiku has no extended-thinking support (see agent.anthropic_adapter.build_anthropic_kwargs),
+    # so the reasoning-effort bridge is simply irrelevant to it: a Haiku call never sets a scope
+    # and must delegate normally even when the bridge is unavailable on this host.
+    if tier == "haiku":
+        raw = delegate_task(
+            goal=args.get("goal"),
+            context=args.get("context"),
+            tasks=_strip_hidden(args.get("tasks")),
+            parent_agent=parent,
+            # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
+            # top level, synchronous for an orchestrator child that needs its results.
+            background=not getattr(parent, "_delegate_depth", 0) > 0,
+            credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
+        )
+    else:
+        bridge_ok, bridge_reason = install_reasoning_bridge()
+        if not bridge_ok:
+            message = f"Claude reasoning effort is unavailable: {bridge_reason}"
+            _audit(cfg, parent, requested, tier, outcome, "refused", message)
+            return _error(message)
+        from hermes_constants import parse_reasoning_effort
+
+        level = reasoning_effort_config(cfg).get(tier)
+        if level is None:
+            message = f"Claude reasoning effort for {tier} is not configured"
+            _audit(cfg, parent, requested, tier, outcome, "refused", message)
+            return _error(message)
+        reasoning_config = parse_reasoning_effort(level)
+        if reasoning_config is None:
+            message = f"Claude reasoning effort for {tier} is invalid"
+            _audit(cfg, parent, requested, tier, outcome, "refused", message)
+            return _error(message)
+        with reasoning_scope(parent, tier, model, reasoning_config):
+            raw = delegate_task(
+                goal=args.get("goal"),
+                context=args.get("context"),
+                tasks=_strip_hidden(args.get("tasks")),
+                parent_agent=parent,
+                # Hermes's own rule (run_agent._dispatch_delegate_task): background at the
+                # top level, synchronous for an orchestrator child that needs its results.
+                background=not getattr(parent, "_delegate_depth", 0) > 0,
+                credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
+            )
     error_message = _raw_error(raw)
     if error_message is not None:
         _audit(cfg, parent, requested, tier, outcome, "error", error_message[:300])
@@ -498,8 +860,8 @@ def _exempt_from_sequential_deadline() -> bool:
 def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
     """Register delegate_claude whenever the host can carry it.
 
-    Registered even while the workflow keeps it off: its check_fn decides, per
-    tool-list build, whether Hermes offers it, so the switch needs no restart.
+    Registered even while every Claude model is switched off: its check_fn decides,
+    per tool-list build, whether Hermes offers it, so the switches need no restart.
     """
     global _ACTIVE
     if cfg is None:

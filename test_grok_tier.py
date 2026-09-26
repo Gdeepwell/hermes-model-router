@@ -61,6 +61,27 @@ class GateTests(unittest.TestCase):
         self.assertIn('model "terra"', result["message"])
 
 
+class GrokReasoningWireTests(unittest.TestCase):
+    def test_the_router_forwards_grok_effort_levels_to_the_xai_request(self):
+        for level in ("high", "xhigh"):
+            with self.subTest(level=level):
+                cfg = shipped()
+                cfg["callable"]["grok"] = True
+                cfg["effort"]["grok"] = level
+                request = {
+                    "model": "grok-4.7",
+                    "input": [{"role": "user", "content": "[grok] implement the parser change in foo.py and run its tests"}],
+                    "tools": [{"type": "function", "name": "terminal"}],
+                    "reasoning": {"effort": "low"},
+                }
+                with patch.object(model_router, "_load_config", return_value=cfg):
+                    routed = model_router._route_llm_request(
+                        model="grok-4.7", provider="xai-oauth", platform="subagent",
+                        turn_id="s1:sa-0-x", api_call_count=1, request=request,
+                    )
+                self.assertEqual(routed["request"]["reasoning"], {"effort": level})
+
+
 class DefaultModelSyncTests(unittest.TestCase):
     def test_a_grok_parent_is_written_with_the_responses_api(self):
         """xAI's OAuth route speaks the Codex Responses API; writing chat_completions
