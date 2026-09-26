@@ -341,7 +341,8 @@ def _resolve_callable_fallback(
         if next_tier and next_tier not in visited:
             if _is_callable_tier(next_tier, cfg):
                 try:
-                    return _decision(next_tier, f"fallback from disabled {chosen_tier}", cfg)
+                    return _decision(next_tier, f"fallback from disabled {chosen_tier}", cfg,
+                                     kind=decision.kind)
                 except (KeyError, ValueError):
                     break
             visited.add(next_tier)
@@ -597,13 +598,13 @@ _CLAUDE_SWITCHES: Tuple[str, ...] = ("opus5", "sonnet5", "haiku")
 def _legacy_claude_verdict(local: Dict[str, Any]) -> Optional[bool]:
     """What a pre-1.20 local file said about Claude, or None when it said nothing.
 
-    ``workflow`` decides when present (``codex`` = off, ``claude_delegation`` = on,
-    anything else = no verdict); otherwise ``claude_delegation.enabled`` if it is a
-    bool. Read from router_config.local.yaml only: the shipped file no longer has
-    either key.
+    ``workflow`` decides when set (``codex`` = off, ``claude_delegation`` = on,
+    anything else = no verdict); a null or blank ``workflow`` counts as absent, so
+    ``claude_delegation.enabled`` then decides if it is a bool. Read from
+    router_config.local.yaml only: the shipped file no longer has either key.
     """
-    if "workflow" in local:
-        name = str(local.get("workflow") or "").strip().casefold()
+    name = str(local.get("workflow") or "").strip().casefold()
+    if name:
         return {"codex": False, "claude_delegation": True}.get(name)
     block = local.get("claude_delegation")
     flag = block.get("enabled") if isinstance(block, dict) else None

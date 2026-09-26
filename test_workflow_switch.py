@@ -155,6 +155,16 @@ class LegacyLocalFileTests(unittest.TestCase):
         self.assertEqual(_claude(cfg), dict.fromkeys(CLAUDE, False))
         self.assertNotIn("enabled", cfg["claude_delegation"])
 
+    def test_a_null_or_blank_workflow_lets_the_delegation_flag_decide(self):
+        for workflow in ("null", "''", "'  '"):
+            with self.subTest(workflow=workflow):
+                cfg = _load(f"workflow: {workflow}\nclaude_delegation:\n  enabled: true\n")
+                self.assertEqual(_claude(cfg), dict.fromkeys(CLAUDE, True))
+                self.assertNotIn("workflow", cfg)
+                cfg = _load(f"workflow: {workflow}\nclaude_delegation:\n  enabled: false\n"
+                            "callable:\n  sonnet5: true\n")
+                self.assertEqual(_claude(cfg), dict.fromkeys(CLAUDE, False))
+
     def test_an_unknown_workflow_or_a_non_bool_flag_gives_no_verdict(self):
         for local in ("workflow: gemini\ncallable: {sonnet5: true}\n",
                       "claude_delegation:\n  enabled: 'yes'\ncallable: {sonnet5: true}\n"):
@@ -383,6 +393,27 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_other_accounts_are_untouched(self):
         self.assertEqual(worker_admission.refusal("openai-codex", "gpt-terra", _switches(False)), "")
 
+    def _spawn(self, switches, target, targets):
+        call = Mock(return_value="spawned")
+        cfg = {"enabled": True, "callable": switches}
+        with patch.object(model_router, "_load_config", return_value=cfg), \
+             patch.object(model_router, "_delegation_targets_detail", return_value=targets), \
+             patch.object(worker_admission, "delegate_task_route", return_value=("openai-codex", "gpt-terra")):
+            result = worker_admission.guard_tool_execution(
+                tool_name="delegate_task", args={"goal": "Review parser", "model": target}, next_call=call)
+        return result, call
+
+    def test_a_switched_off_claude_target_with_an_unlisted_model_is_refused(self):
+        targets = {"opus5": {"provider": "anthropic", "model": "claude-opus-5-5-20260101"},
+                   "terra": {"provider": "openai-codex", "model": "gpt-terra"}}
+        result, call = self._spawn({"opus5": False, "sonnet5": False, "haiku": True}, "opus5", targets)
+        call.assert_not_called()
+        self.assertIn(self.MESSAGE, json.loads(result)["error"])
+        result, call = self._spawn({"opus5": True, "sonnet5": False, "haiku": False}, "opus5", targets)
+        self.assertEqual(result, "spawned")
+        result, call = self._spawn(dict.fromkeys(CLAUDE, False), "terra", targets)
+        self.assertEqual(result, "spawned")
+
     def test_a_running_claude_child_stops_once_its_model_is_switched_off(self):
         cfg = {"enabled": True, "callable": {"sonnet5": True}}
         downstream = Mock(return_value="Claude continued")
@@ -467,6 +498,13 @@ class PreferenceChainTests(unittest.TestCase):
         decision = RouteDecision(tier="sol", model="gpt-sol", reason="long", kind="long")
         self.assertIs(_apply_preferences(decision, cfg), decision)
         self.assertEqual(_require_callable(decision, cfg).tier, "terra")
+
+    def test_the_built_in_fallback_keeps_the_decisions_kind(self):
+        cfg = _pref_cfg(preferences={"review": ["sonnet5", "opus5"]})
+        cfg["callable"]["sol"] = False
+        decision = RouteDecision(tier="sol", model="gpt-sol", reason="review", kind="review")
+        fallen = _require_callable(decision, cfg)
+        self.assertEqual((fallen.tier, fallen.kind), ("terra", "review"))
 
     def test_a_mandatory_route_still_refuses_the_fallback_chain(self):
         cfg = _pref_cfg(preferences={"design": ["opus5"]})
