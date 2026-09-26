@@ -10,7 +10,9 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import unicodedata
+from collections import OrderedDict
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -4332,6 +4334,31 @@ def _recent_verified_opus5_route(cfg: Dict[str, Any]) -> bool:
 _GOAL_ABSOLUTE_PATH = re.compile(r"(?:(?<!\S)|(?<=[`(\"']))(?:/|~/)\S+")
 _WORKSPACE_PATH_BLOCK = re.compile(r"(?im)^WORKSPACE PATH:\s*\r?\n\s*([^\r\n]+)")
 _PATH_TRAILING_PUNCTUATION = ".,;:!?)]}\"'`"
+_REPO_DIRECTORY_CACHE_TTL_SECONDS = 60
+_MAX_REPO_DIRECTORY_CACHE_ENTRIES = 512
+_DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS = 60 * 60
+_MAX_DISPATCH_REVIEW_REPOSITORIES = 256
+_REPO_DIRECTORY_CACHE: OrderedDict[Tuple[str, bool], Tuple[float, Optional[Path]]] = OrderedDict()
+_DISPATCH_REVIEW_REPOSITORIES: OrderedDict[str, Tuple[float, Path]] = OrderedDict()
+
+
+def _bounded_cache_get(cache: OrderedDict, key: Any, ttl_seconds: float) -> Tuple[bool, Any]:
+    entry = cache.get(key)
+    if entry is None:
+        return False, None
+    recorded_at, value = entry
+    if time.monotonic() - recorded_at >= ttl_seconds:
+        cache.pop(key, None)
+        return False, None
+    cache.move_to_end(key)
+    return True, value
+
+
+def _bounded_cache_put(cache: OrderedDict, key: Any, value: Any, *, max_entries: int) -> None:
+    cache[key] = (time.monotonic(), value)
+    cache.move_to_end(key)
+    while len(cache) > max_entries:
+        cache.popitem(last=False)
 
 
 def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path]:
@@ -4340,6 +4367,12 @@ def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path
     if not candidate.is_dir():
         return None
     candidate = candidate.resolve()
+    cache_key = (str(candidate), git_top_level)
+    found, cached = _bounded_cache_get(
+        _REPO_DIRECTORY_CACHE, cache_key, _REPO_DIRECTORY_CACHE_TTL_SECONDS,
+    )
+    if found:
+        return cached
     try:
         completed = subprocess.run(
             ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
@@ -4349,9 +4382,14 @@ def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path
         completed = None
     if completed is not None and completed.returncode == 0:
         root = Path(completed.stdout.strip())
-        if root.is_dir():
-            return root.resolve()
-    return None if git_top_level else candidate
+        result = root.resolve() if root.is_dir() else None
+    else:
+        result = None if git_top_level else candidate
+    _bounded_cache_put(
+        _REPO_DIRECTORY_CACHE, cache_key, result,
+        max_entries=_MAX_REPO_DIRECTORY_CACHE_ENTRIES,
+    )
+    return result
 
 
 def _goal_repository(text: str) -> Optional[Path]:
@@ -4380,6 +4418,21 @@ def _workspace_repository(request: Optional[Dict[str, Any]]) -> Optional[Path]:
     return None
 
 
+def _remember_dispatch_review_repository(text: str, repository: Path) -> None:
+    _bounded_cache_put(
+        _DISPATCH_REVIEW_REPOSITORIES, _normalise(text), repository.resolve(),
+        max_entries=_MAX_DISPATCH_REVIEW_REPOSITORIES,
+    )
+
+
+def _remembered_dispatch_review_repository(text: str) -> Optional[Path]:
+    found, repository = _bounded_cache_get(
+        _DISPATCH_REVIEW_REPOSITORIES, _normalise(text),
+        _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS,
+    )
+    return repository if found else None
+
+
 def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
                                  dispatch_cwd: Optional[Path] = None) -> Optional[Path]:
     """Resolve a labelled review leaf's repository without reading the process cwd.
@@ -4397,6 +4450,9 @@ def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Opt
             candidate = _repo_directory(str(value))
             if candidate is not None:
                 return candidate
+    dispatched_repo = _remembered_dispatch_review_repository(text)
+    if dispatched_repo is not None:
+        return dispatched_repo
     workspace_repo = _workspace_repository(request)
     if workspace_repo is not None:
         return workspace_repo
@@ -4458,7 +4514,8 @@ def _verified_explicit_opus5_review_repo(text: str, cfg: Dict[str, Any]) -> Opti
 
 
 def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
-                                    dispatch_cwd: Optional[Path] = None) -> Tuple[Optional[Tuple[Path, str]], str]:
+                                    dispatch_cwd: Optional[Path] = None,
+                                    requested_model: Optional[str] = None) -> Tuple[Optional[Tuple[Path, str]], str]:
     """Return the static delegated-review route or the reason it cannot be taken."""
     coding_cfg = cfg.get("coding_agent") or {}
     policy = coding_cfg.get("delegated_review") or {}
@@ -4473,6 +4530,12 @@ def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: 
     alias = review_model_alias(text)
     if alias is None:
         return None, "goal has no supported Claude review label"
+    named_model = str(requested_model or "").strip()
+    if named_model:
+        expected_model = CLAUDE_REVIEW_MODELS.get(alias, "")
+        target_model = (_delegation_targets_detail().get(named_model.casefold()) or {}).get("model", "")
+        if named_model.casefold() != expected_model.casefold() and str(target_model).casefold() != expected_model.casefold():
+            return None, f"task names model {named_model}"
     allowed = policy.get("models")
     if isinstance(allowed, list) and alias not in [str(name).casefold() for name in allowed]:
         return None, f"Claude {alias} review tier is not allowed"
@@ -4484,6 +4547,8 @@ def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: 
     repo = _delegated_review_repository(text, cfg, request=request, dispatch_cwd=dispatch_cwd)
     if repo is None:
         return None, "no repository could be resolved"
+    if dispatch_cwd is not None:
+        _remember_dispatch_review_repository(text, repo)
     return (repo, alias), ""
 
 

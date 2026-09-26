@@ -55,7 +55,7 @@ def delegate_task_route():
 def guard_tool_execution(**kwargs):
     from . import _delegated_claude_review_status, _load_config, _delegation_targets_detail
     from .claude_delegation import TIER_FOR_TARGET
-    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS, review_model_alias
+    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS
 
     args, next_call = kwargs.get("args") or {}, kwargs["next_call"]
     name = str(kwargs.get("tool_name") or "").removeprefix("mcp__")
@@ -71,13 +71,15 @@ def guard_tool_execution(**kwargs):
     for task in tasks if isinstance(tasks, list) else [args]:
         task = task if isinstance(task, dict) else {}
         goal = str(task.get("goal") or args.get("goal") or "")
-        review, _reason = ((None, "") if review_model_alias(goal) is None
-                           else _delegated_claude_review_status(goal, cfg, dispatch_cwd=Path.cwd()))
+        requested_model = str(task.get("model") or args.get("model") or "").strip()
+        review, _reason = _delegated_claude_review_status(
+            goal, cfg, dispatch_cwd=Path.cwd(), requested_model=requested_model,
+        )
         if review is not None:
             _repo, alias = review
             message = refusal("anthropic", CLAUDE_REVIEW_MODELS[alias], cfg, blocking=True)
         else:
-            name = str(task.get("model") or args.get("model") or "").strip().casefold()
+            name = requested_model.casefold()
             target = targets.get(name, {})
             # A Claude target named by its switch obeys that switch, even when its
             # model string (a dated snapshot, say) is not one the delegation tiers list.

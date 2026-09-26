@@ -9,6 +9,19 @@ from model_router import worker_admission, usage_guard
 from model_router.test_usage_guard import ROUTER_CFG
 
 class AdmissionTests(unittest.TestCase):
+    def setUp(self):
+        for cache_name in ("_REPO_DIRECTORY_CACHE", "_DISPATCH_REVIEW_REPOSITORIES"):
+            cache = getattr(router, cache_name, None)
+            if cache is not None:
+                cache.clear()
+        self.addCleanup(self._clear_router_caches)
+
+    def _clear_router_caches(self):
+        for cache_name in ("_REPO_DIRECTORY_CACHE", "_DISPATCH_REVIEW_REPOSITORIES"):
+            cache = getattr(router, cache_name, None)
+            if cache is not None:
+                cache.clear()
+
     def test_live_switch_stops_existing_claude_child_on_its_next_call(self):
         switches = {"sonnet5": True}
         downstream = Mock(return_value="Claude continued")
@@ -83,6 +96,40 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(result, 'admitted')
         status.assert_called_once()
         refusal.assert_called_once_with('anthropic', 'claude-sonnet-5', cfg, blocking=True)
+
+    def test_review_task_naming_a_non_claude_model_uses_the_named_target_check(self):
+        call = Mock(return_value='admitted')
+        cfg = {'enabled': True, 'callable': {'sonnet5': True}}
+        targets = {'terra': {'provider': 'openai-codex', 'model': 'gpt-terra'}}
+        with patch.object(router, '_load_config', return_value=cfg), \
+             patch.object(router, '_delegation_targets_detail', return_value=targets), \
+             patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-parent')), \
+             patch.object(router, '_delegated_claude_review_status', return_value=(None, 'task names model terra')) as status, \
+             patch.object(worker_admission, 'refusal', return_value='') as refusal:
+            for args in (
+                {'tasks': [{'goal': '[sonnet-review] Review parser', 'model': 'terra'}]},
+                {'goal': '[sonnet-review] Review parser', 'model': 'terra'},
+            ):
+                with self.subTest(args=args):
+                    result = worker_admission.guard_tool_execution(
+                        tool_name='delegate_task', args=args, next_call=call)
+                    self.assertEqual(result, 'admitted')
+        self.assertEqual(status.call_count, 2)
+        self.assertEqual(refusal.call_args_list[0].args, ('openai-codex', 'gpt-terra', cfg))
+        self.assertEqual(refusal.call_args_list[1].args, ('openai-codex', 'gpt-terra', cfg))
+        self.assertTrue(all(entry.kwargs == {'blocking': True} for entry in refusal.call_args_list))
+
+    def test_non_review_goal_still_asks_review_status_once(self):
+        call = Mock(return_value='admitted')
+        with patch.object(router, '_load_config', return_value={'enabled': True}), \
+             patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-terra')), \
+             patch.object(router, '_delegation_targets_detail', return_value={}), \
+             patch.object(router, '_delegated_claude_review_status', return_value=(None, 'goal has no supported Claude review label')) as status, \
+             patch.object(worker_admission, 'refusal', return_value=''):
+            result = worker_admission.guard_tool_execution(
+                tool_name='delegate_task', args={'goal': 'Implement parser'}, next_call=call)
+        self.assertEqual(result, 'admitted')
+        status.assert_called_once()
 
     def test_resolvable_review_refuses_with_the_claude_account_message(self):
         call = Mock(return_value='admitted')
