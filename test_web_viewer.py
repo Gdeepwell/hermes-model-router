@@ -3291,6 +3291,19 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         "claude_delegation": {"enabled": True, "default_tier": "sonnet"},
     }
 
+    def setUp(self):
+        self._reset_claude_reasoning_tracebacks()
+        self.addCleanup(self._reset_claude_reasoning_tracebacks)
+
+    @staticmethod
+    def _reset_claude_reasoning_tracebacks():
+        lock = getattr(web_viewer, "_CLAUDE_REASONING_TRACEBACK_LOCK", None)
+        if lock is None:
+            web_viewer._CLAUDE_REASONING_TRACEBACKS.clear()
+        else:
+            with lock:
+                web_viewer._CLAUDE_REASONING_TRACEBACKS.clear()
+
     def _write_config(self, directory):
         target = Path(directory) / "router_config.yaml"
         with open(target, "w", encoding="utf-8") as f:
@@ -3334,6 +3347,15 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         self.assertFalse(effort["haiku_supported"])
         self.assertNotIn("haiku", effort["levels"])
 
+    def test_missing_router_status_includes_pinned_tiers_and_defaults(self):
+        config = {
+            "claude_delegation": {"reasoning_effort": {"sonnet": "high"}},
+        }
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=None):
+            status = web_viewer._claude_reasoning_status(config)
+        self.assertEqual(status["defaults"], {"sonnet": "medium", "opus": "medium"})
+        self.assertEqual(status["pinned"], {"sonnet": True, "opus": False})
+
     def test_claude_reasoning_status_fallback_derives_haiku_support_from_the_delegation_module(self):
         # These direct status probes never save, so CONFIG_PATH/HERMES_CONFIG_PATH need no patch.
         class BrokenDelegation:
@@ -3357,13 +3379,31 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
                 raise RuntimeError("reasoning configuration unavailable")
 
         stderr = io.StringIO()
-        with patch.object(web_viewer, "_CLAUDE_REASONING_TRACEBACKS", set(), create=True), \
-             patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
              contextlib.redirect_stderr(stderr):
             web_viewer._claude_reasoning_status(self.CONFIG)
             web_viewer._claude_reasoning_status(self.CONFIG)
 
         self.assertEqual(stderr.getvalue().count("RuntimeError: reasoning configuration unavailable"), 1)
+
+    def test_claude_reasoning_traceback_record_is_locked_and_stops_at_64_signatures(self):
+        class BrokenDelegation:
+            calls = 0
+
+            @classmethod
+            def reasoning_effort_config(cls, config):
+                cls.calls += 1
+                raise RuntimeError(f"reasoning configuration unavailable {cls.calls}")
+
+        self.assertIsInstance(web_viewer._CLAUDE_REASONING_TRACEBACK_LOCK, type(threading.Lock()))
+        stderr = io.StringIO()
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+             contextlib.redirect_stderr(stderr):
+            for _ in range(65):
+                web_viewer._claude_reasoning_status(self.CONFIG)
+
+        self.assertEqual(len(web_viewer._CLAUDE_REASONING_TRACEBACKS), 64)
+        self.assertEqual(stderr.getvalue().count("RuntimeError: reasoning configuration unavailable"), 64)
 
     def test_a_valid_claude_effort_save_writes_only_the_local_delta(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3416,6 +3456,24 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
             self.assertIn("opus", str(body.get("error", "")))
             self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
             self.assertEqual(config_path.read_bytes(), shipped_before)
+
+    def test_a_reset_mixed_with_an_invalid_claude_effort_value_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            local = config_path.with_name("router_config.local.yaml")
+            local.write_text(
+                "claude_delegation:\n  reasoning_effort:\n    sonnet: high\n    opus: low\n",
+                encoding="utf-8",
+            )
+            before = local.read_bytes()
+            status, body = self._request(
+                config_path,
+                "POST",
+                {"claude_reasoning_effort": {"sonnet": "", "opus": "bogus"}},
+            )
+            self.assertEqual(local.read_bytes(), before)
+        self.assertEqual(status, 400)
+        self.assertIn("opus", str(body.get("error", "")))
 
     def test_a_full_defaults_save_with_an_unrelated_change_writes_no_claude_block(self):
         """The exact bug from the final review: saveSettings() always posts the

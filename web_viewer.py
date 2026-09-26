@@ -1086,6 +1086,8 @@ def _claude_delegation_module():
 CLAUDE_REASONING_TIERS = ("sonnet", "opus")
 _CLAUDE_REASONING_DEFAULT_LEVELS = {"sonnet": "medium", "opus": "medium"}
 _CLAUDE_REASONING_TRACEBACKS: set[tuple[type[BaseException], str]] = set()
+_CLAUDE_REASONING_TRACEBACK_LOCK = threading.Lock()
+_CLAUDE_REASONING_TRACEBACKS_MAX = 64
 
 
 def _claude_reasoning_defaults(delegation) -> dict:
@@ -1138,8 +1140,12 @@ def _claude_reasoning_status(config: dict) -> dict:
         available, reason = delegation.reasoning_bridge_status()
     except Exception as exc:
         signature = (type(exc), str(exc))
-        if signature not in _CLAUDE_REASONING_TRACEBACKS:
-            _CLAUDE_REASONING_TRACEBACKS.add(signature)
+        should_print = False
+        with _CLAUDE_REASONING_TRACEBACK_LOCK:
+            if signature not in _CLAUDE_REASONING_TRACEBACKS and len(_CLAUDE_REASONING_TRACEBACKS) < _CLAUDE_REASONING_TRACEBACKS_MAX:
+                _CLAUDE_REASONING_TRACEBACKS.add(signature)
+                should_print = True
+        if should_print:
             traceback.print_exc()
         return {
             "available": False,
