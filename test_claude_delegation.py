@@ -496,7 +496,7 @@ class ReasoningBridgeTests(unittest.TestCase):
         self.assertIs(delegate_tool._resolve_child_runtime, real_original)
 
     def test_two_module_copies_share_scope_and_lock_for_the_installed_wrapper(self):
-        """A scope opened by one reload copy must configure the wrapper from another."""
+        """A scope from copy A must configure the wrapper installed by copy B."""
         import importlib.util
 
         source = Path(claude_delegation.__file__)
@@ -537,6 +537,35 @@ class ReasoningBridgeTests(unittest.TestCase):
                     parent_agent=parent, model="claude-sonnet-5", override_provider="anthropic",
                 )
         self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
+
+    def test_a_newer_copy_backfills_an_older_shared_holder(self):
+        """A copy can start when an existing holder predates newer state fields."""
+        import importlib.util
+
+        source = Path(claude_delegation.__file__)
+        copy_name = "model_router._claude_reasoning_older_holder_copy"
+        sys.modules.pop(copy_name, None)
+        self.addCleanup(sys.modules.pop, copy_name, None)
+        older_scope = claude_delegation.ContextVar("older_claude_delegation_reasoning_scope", default=None)
+        older_lock = claude_delegation.threading.Lock()
+        older_holder = SimpleNamespace(
+            scope=older_scope,
+            lock=older_lock,
+            installed=True,
+            reason="installed by an older copy",
+        )
+        with patch.dict(sys.modules, {claude_delegation._REASONING_BRIDGE_STATE_KEY: older_holder}):
+            spec = importlib.util.spec_from_file_location(copy_name, source)
+            copy = importlib.util.module_from_spec(spec)
+            sys.modules[copy_name] = copy
+            spec.loader.exec_module(copy)
+
+            self.assertIs(copy._REASONING_SCOPE, older_scope)
+            self.assertIs(copy._REASONING_BRIDGE_LOCK, older_lock)
+            self.assertTrue(older_holder.installed)
+            self.assertEqual(older_holder.reason, "installed by an older copy")
+            self.assertIsNone(older_holder.original)
+            self.assertIsNone(older_holder.wrapper)
 
 
 class ReasoningBridgeCompatibilityTests(unittest.TestCase):

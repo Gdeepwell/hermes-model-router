@@ -26,7 +26,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import usage_guard
 from .hermes_paths import hermes_path
@@ -111,22 +111,40 @@ class _ReasoningScope:
 
 
 _REASONING_BRIDGE_STATE_KEY = "_hermes_model_router_claude_reasoning_state"
+
+
+def _new_reasoning_bridge_state() -> Any:
+    return types.SimpleNamespace(
+        scope=ContextVar("claude_delegation_reasoning_scope", default=None),
+        lock=threading.Lock(),
+        installed=False,
+        reason="not yet installed",
+        original=None,
+        wrapper=None,
+    )
+
+
+# ``sys.modules`` is only a per-process identity registry here: this holder is
+# deliberately an ordinary object, not a module. A newer copy backfills fields
+# it knows about on an older holder; a non-holder or incompatible field type is
+# still unsupported rather than silently replaced.
 _REASONING_BRIDGE_STATE: Any = sys.modules.setdefault(
     _REASONING_BRIDGE_STATE_KEY,
-    cast(
-        types.ModuleType,
-        types.SimpleNamespace(
-            scope=ContextVar("claude_delegation_reasoning_scope", default=None),
-            lock=threading.Lock(),
-            installed=False,
-            reason="not yet installed",
-            original=None,
-            wrapper=None,
-        ),
-    ),
+    _new_reasoning_bridge_state(),
 )
-# These aliases retain the test-visible names while every mutable bridge datum
-# lives in the per-process holder above, shared by reloads and alternate imports.
+for _state_field, _state_default in (
+    ("scope", lambda: ContextVar("claude_delegation_reasoning_scope", default=None)),
+    ("lock", threading.Lock),
+    ("installed", lambda: False),
+    ("reason", lambda: "not yet installed"),
+    ("original", lambda: None),
+    ("wrapper", lambda: None),
+):
+    _REASONING_BRIDGE_STATE.__dict__.setdefault(_state_field, _state_default())
+
+# These aliases retain the test-visible names. They are safe to alias directly
+# because ContextVar and Lock are already shared objects; plain state stays on
+# the per-process holder above for reloads and alternate imports.
 _REASONING_SCOPE: ContextVar[Optional[_ReasoningScope]] = _REASONING_BRIDGE_STATE.scope
 _REASONING_BRIDGE_LOCK = _REASONING_BRIDGE_STATE.lock
 
