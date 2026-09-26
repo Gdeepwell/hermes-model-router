@@ -1,9 +1,12 @@
+import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from model_router import _maybe_run_opus5, usage_guard
+import model_router as router
+from model_router import _maybe_run_opus5, route_llm_request, usage_guard
 
 
 class BridgePolicyTests(unittest.TestCase):
@@ -32,6 +35,95 @@ class BridgePolicyTests(unittest.TestCase):
         self.assertEqual(bridge.call_args.kwargs["requested_alias"], "opus")
         self.assertIn("opus5→sonnet5", bridge.call_args.kwargs["adjustment"])
         self.run_bridge("opus", {"sonnet5": False, "opus5": True}, weekly=75).assert_not_called()
+
+
+class DelegatedReviewRepositoryTests(unittest.TestCase):
+    def _config(self, **coding_overrides):
+        coding = {"delegated_review": {"enabled": True, "models": ["sonnet", "opus"]}}
+        coding.update(coding_overrides)
+        return {"callable": {"sonnet5": True, "opus5": True}, "coding_agent": coding}
+
+    def _git_repo(self, directory):
+        repo = Path(directory) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        return repo
+
+    def test_goal_absolute_path_uses_its_git_top_level(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            child = repo / "nested"
+            child.mkdir()
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    f"[sonnet-review] Review repository {child}.", self._config())
+        self.assertEqual(routed, (repo.resolve(), "sonnet"))
+
+    def test_workspace_path_in_child_request_resolves_a_review_without_goal_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            request = {
+                "instructions": f"WORKSPACE PATH:\n{repo}\nUse this exact path.",
+                "messages": [{"role": "user", "content": "[sonnet-review] Review parser"}],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    "[sonnet-review] Review parser", self._config(), request=request)
+        self.assertEqual(routed, (repo.resolve(), "sonnet"))
+
+    def test_workspace_path_in_a_chat_system_message_resolves_a_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            request = {
+                "messages": [
+                    {"role": "system", "content": f"WORKSPACE PATH:\n{repo}\nUse this exact path."},
+                    {"role": "user", "content": "[sonnet-review] Review parser"},
+                ],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    "[sonnet-review] Review parser", self._config(), request=request)
+        self.assertEqual(routed, (repo.resolve(), "sonnet"))
+
+    def test_nonexistent_goal_and_shipped_aliases_are_skipped(self):
+        cfg = self._config(repo_aliases={"router": "/home/deepwell/hermes-model-router"})
+        with patch("model_router.shutil.which", return_value="/claude"):
+            routed = router._verified_delegated_claude_review(
+                "[sonnet-review] Review /not/a/repository, router", cfg)
+        self.assertIsNone(routed)
+
+    def test_resolved_sonnet_review_calls_the_cli_bridge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            request = {
+                "instructions": f"WORKSPACE PATH:\n{repo}\nUse this exact path.",
+                "messages": [{"role": "user", "content": "[sonnet-review] Review parser"}],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"), \
+                 patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
+                 patch("model_router._run_opus5_bridge", return_value={
+                     "result": "reviewed", "effective_model": "claude-sonnet-5"}) as bridge:
+                result = _maybe_run_opus5(request, self._config(), platform="subagent",
+                                          api_mode="codex_responses")
+        self.assertEqual(result.model, "claude-sonnet-5")
+        bridge.assert_called_once()
+        self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
+
+    def test_route_reason_names_a_missing_claude_cli_for_a_review_leaf(self):
+        cfg = {
+            "enabled": True, "provider": "openai-codex", "models": {"terra": "gpt-terra"},
+            "callable": {"terra": True, "sonnet5": True},
+            "tier_providers": {"terra": "openai-codex", "sonnet5": "openai-codex"},
+            "coding_agent": {"delegated_review": {"enabled": True, "models": ["sonnet"]}},
+        }
+        request = {"model": "gpt-terra", "messages": [{"role": "user", "content":
+                   "[sonnet-review] Review parser"}]}
+        with patch("model_router._load_config", return_value=cfg), \
+             patch("model_router.shutil.which", return_value=None), \
+             patch("model_router._log_decision"):
+            routed = route_llm_request(request=request, provider="openai-codex", model="gpt-terra",
+                                       platform="subagent", turn_id="root:sa-1", api_call_count=1)
+        self.assertIn("Claude review not taken (Claude CLI is unavailable)", routed["reason"])
 
 
 class AccountOfExecutionTests(unittest.TestCase):

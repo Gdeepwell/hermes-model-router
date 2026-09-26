@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import threading
 import unicodedata
 from copy import deepcopy
@@ -3114,7 +3115,7 @@ def _prepare_orchestration_delegation(
         properties["context"] = {
             "type": "string",
             "enum": [
-                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] {'and model:sol' if model_param else 'inside the configured provider'}. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg, model_param=model_param)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
+                f"You are the {orchestrator_tier} planning conductor. Do not perform design analysis or design implementation. {_leaf_label_contract(cfg)}Route every visual/product/UI/UX/CSS/layout/design-system task to Sol with a goal beginning [sol] {'and model:sol' if model_param else 'inside the configured provider'}. {_read_only_delegation_clause(cfg)}Read-only does not make a design question non-design: judging visual hierarchy, appearance, spacing or styling is Sol's work even when nothing is written. That worker receives source discovery, tests, logs and research -- questions with a factual answer, including ones whose answer lives in UI source files. {_model_param_contract(orchestrator_tier, cfg, model_param=model_param)} A purely read-only review leaf may instead be labelled [sonnet-review] or [opus-review], which runs it through the Claude Code CLI on a separate subscription. Use [sonnet-review] for routine checks and [opus-review] for consequential ones. Such a leaf takes no 'model' -- its route is its label -- must name the repository by its absolute path, must carry every fact it needs in the goal, and must never be asked to edit, run commands, or implement. Write every leaf goal as objective and acceptance criteria only: never restate this routing policy inside a leaf goal, because a leaf is re-classified from its own goal text and routing vocabulary repeated there is read as the work itself. The orchestrator retains coordination, evidence acceptance/rejection, integration, and final approval. Use zero leaves only when the objective genuinely has no independently useful non-design text-only investigation, test, source-discovery, or research subtask."
             ],
             "description": f"Required immutable routing contract for the {orchestrator_tier} planner.",
         }
@@ -3998,22 +3999,22 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
             cfg,
         )
 
-    # A review leaf that reached another provider cannot be handed to the Claude
-    # bridge: the execution middleware returns early off-provider, and the bridge
-    # answers in the Codex Responses shape. Without saying so it just looks like
-    # an ordinary worker on that model, which is how a [sonnet-review] leaf ran
-    # to completion on Qwen with the Claude subscription untouched.
-    if (
-        str(kwargs.get("provider", "")).casefold() != str(cfg.get("provider", "")).casefold()
-        and _CLAUDE_REVIEW_LABEL.match(_normalise(latest_user_text))
-    ):
-        decision = replace(
-            decision,
-            reason=(
-                f"Claude review unavailable on provider "
-                f"'{kwargs.get('provider')}'; ran as an ordinary {decision.tier} worker"
-            ),
-        )
+    # A delegated review leaf reaches Claude only through the CLI bridge. Explain
+    # every static decline here, before execution, instead of letting its label
+    # silently fall through to an ordinary worker.
+    if subagent_marker and _CLAUDE_REVIEW_LABEL.match(_normalise(latest_user_text)):
+        if str(kwargs.get("provider", "")).casefold() != str(cfg.get("provider", "")).casefold():
+            reason = f"provider '{kwargs.get('provider')}' is unavailable for the Claude CLI bridge"
+        else:
+            source_request = kwargs.get("original_request")
+            if not isinstance(source_request, dict):
+                source_request = request
+            _route, reason = _delegated_claude_review_status(latest_user_text, cfg, request=source_request)
+        if reason:
+            decision = replace(
+                decision,
+                reason=f"Claude review not taken ({reason}); ran as an ordinary {decision.tier} worker",
+            )
 
     routed = forced_preflight_request or forced_shadow_request or dict(request)
     # A worker that died on an account limit is the one failure the conductor
@@ -4328,6 +4329,85 @@ def _recent_verified_opus5_route(cfg: Dict[str, Any]) -> bool:
     return False
 
 
+_GOAL_ABSOLUTE_PATH = re.compile(r"(?<!\S)(?:/|~/)\S+")
+_WORKSPACE_PATH_BLOCK = re.compile(r"(?im)^WORKSPACE PATH:\s*\r?\n\s*([^\r\n]+)")
+_PATH_TRAILING_PUNCTUATION = ".,;:!?)]}\"'"
+
+
+def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path]:
+    """Return an existing directory, collapsing a Git child to its work-tree root."""
+    candidate = Path(str(value).strip()).expanduser()
+    if not candidate.is_dir():
+        return None
+    candidate = candidate.resolve()
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
+            check=False, capture_output=True, text=True,
+        )
+    except OSError:
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        root = Path(completed.stdout.strip())
+        if root.is_dir():
+            return root.resolve()
+    return None if git_top_level else candidate
+
+
+def _goal_repository(text: str) -> Optional[Path]:
+    for token in _GOAL_ABSOLUTE_PATH.findall(text or ""):
+        candidate = _repo_directory(token.rstrip(_PATH_TRAILING_PUNCTUATION))
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _workspace_repository(request: Optional[Dict[str, Any]]) -> Optional[Path]:
+    if not isinstance(request, dict):
+        return None
+    texts = [_text_from_content(request.get("instructions"))]
+    texts.extend(
+        _text_from_content(item.get("content"))
+        for item in _request_items(request)
+        if isinstance(item, dict) and str(item.get("role") or "").casefold() == "system"
+    )
+    for text in texts:
+        match = _WORKSPACE_PATH_BLOCK.search(text or "")
+        if match:
+            candidate = _repo_directory(match.group(1).strip())
+            if candidate is not None:
+                return candidate
+    return None
+
+
+def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
+                                 dispatch_cwd: Optional[Path] = None) -> Optional[Path]:
+    """Resolve a labelled review leaf's repository without reading the process cwd.
+
+    The child request carries its workspace path. Dispatch has no child request, so
+    it may supply the parent's cwd, but only an existing Git work tree is usable.
+    """
+    goal_repo = _goal_repository(text)
+    if goal_repo is not None:
+        return goal_repo
+    coding_cfg = cfg.get("coding_agent") or {}
+    normalised = _normalise(text)
+    for alias, value in (coding_cfg.get("repo_aliases") or {}).items():
+        if _normalise(str(alias)) in normalised:
+            candidate = _repo_directory(str(value))
+            if candidate is not None:
+                return candidate
+    workspace_repo = _workspace_repository(request)
+    if workspace_repo is not None:
+        return workspace_repo
+    if dispatch_cwd is not None:
+        cwd_repo = _repo_directory(str(dispatch_cwd), git_top_level=True)
+        if cwd_repo is not None:
+            return cwd_repo
+    value = str(coding_cfg.get("default_repo") or "").strip()
+    return _repo_directory(value) if value else None
+
+
 def _opus5_repo_for_request(text: str, cfg: Dict[str, Any]) -> Optional[Path]:
     """Resolve only configured local roots; never discover or read credentials."""
     coding_cfg = cfg.get("coding_agent") or {}
@@ -4377,7 +4457,37 @@ def _verified_explicit_opus5_review_repo(text: str, cfg: Dict[str, Any]) -> Opti
     return _opus5_repo_for_request(text, cfg) if eligible else None
 
 
-def _verified_delegated_claude_review(text: str, cfg: Dict[str, Any]) -> Optional[Tuple[Path, str]]:
+def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
+                                    dispatch_cwd: Optional[Path] = None) -> Tuple[Optional[Tuple[Path, str]], str]:
+    """Return the static delegated-review route or the reason it cannot be taken."""
+    coding_cfg = cfg.get("coding_agent") or {}
+    policy = coding_cfg.get("delegated_review") or {}
+    if not policy.get("enabled"):
+        return None, "delegated-review policy is disabled"
+    if len(text or "") > int(policy.get("max_chars", 8000) or 8000):
+        return None, "review goal exceeds the delegated-review character limit"
+    if shutil.which("claude") is None:
+        return None, "Claude CLI is unavailable"
+    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS, review_model_alias
+
+    alias = review_model_alias(text)
+    if alias is None:
+        return None, "goal has no supported Claude review label"
+    allowed = policy.get("models")
+    if isinstance(allowed, list) and alias not in [str(name).casefold() for name in allowed]:
+        return None, f"Claude {alias} review tier is not allowed"
+    if alias not in CLAUDE_REVIEW_MODELS:
+        return None, f"Claude {alias} review tier is unknown"
+    target = {"opus": "opus5", "sonnet": "sonnet5"}[alias]
+    if not _is_callable_tier(target, cfg):
+        return None, f"Claude {alias} review tier is switched off"
+    repo = _delegated_review_repository(text, cfg, request=request, dispatch_cwd=dispatch_cwd)
+    if repo is None:
+        return None, "no repository could be resolved"
+    return (repo, alias), ""
+
+
+def _verified_delegated_claude_review(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None) -> Optional[Tuple[Path, str]]:
     """Resolve a delegated, read-only Claude review leaf to (repo, Claude tier).
 
     Deliberately independent of ``coding_agent.enabled``. That switch also arms
@@ -4387,26 +4497,7 @@ def _verified_delegated_claude_review(text: str, cfg: Dict[str, Any]) -> Optiona
     the planner had to write, and it is the caller's job to admit only delegated
     workers, so a root turn can never be diverted into a subprocess.
     """
-    coding_cfg = cfg.get("coding_agent") or {}
-    policy = coding_cfg.get("delegated_review") or {}
-    if (
-        not policy.get("enabled")
-        or len(text or "") > int(policy.get("max_chars", 8000) or 8000)
-        or shutil.which("claude") is None
-    ):
-        return None
-    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS, review_model_alias
-
-    alias = review_model_alias(text)
-    if alias is None:
-        return None
-    allowed = policy.get("models")
-    if isinstance(allowed, list) and alias not in [str(name).casefold() for name in allowed]:
-        return None
-    if alias not in CLAUDE_REVIEW_MODELS:
-        return None
-    repo = _opus5_repo_for_request(text, cfg)
-    return (repo, alias) if repo is not None else None
+    return _delegated_claude_review_status(text, cfg, request=request)[0]
 
 
 def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False, cfg: Dict[str, Any],
@@ -4518,7 +4609,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         str(kwargs.get("platform", "")).casefold() == "subagent"
         or ":sa-" in str(kwargs.get("turn_id", ""))
     ):
-        delegated = _verified_delegated_claude_review(text, cfg)
+        delegated = _verified_delegated_claude_review(text, cfg, request=source_request)
         if delegated is not None:
             repo, _requested_alias = delegated
             alias = admitted_alias()
