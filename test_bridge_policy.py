@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 import tempfile
 import time
@@ -210,10 +211,12 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = self._git_repo(directory)
             goal = "[sonnet-review] Review parser"
+            clock = {"value": 100.0}
             with patch("model_router.shutil.which", return_value="/claude"), \
-                 patch("model_router.time.monotonic", side_effect=[100.0, 100.0, 3701.0]):
+                 patch("model_router.time.monotonic", side_effect=lambda: clock["value"]):
                 dispatch, reason = router._delegated_claude_review_status(
                     goal, self._config(), dispatch_cwd=repo)
+                clock["value"] = 3701.0
                 execution = router._verified_delegated_claude_review(
                     goal, self._config(), request={"messages": [{"role": "user", "content": goal}]})
         self.assertEqual(reason, "")
@@ -268,6 +271,56 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
             resolved = router._delegated_review_repository(goal, self._config(), request=request)
         self.assertIsNone(router._remembered_dispatch_review_repository(goal))
         self.assertEqual(resolved, first.resolve())
+
+    def test_dispatch_from_a_second_repository_is_not_overridden_by_the_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = self._git_repo(directory)
+            second = Path(directory) / "second"
+            second.mkdir()
+            subprocess.run(["git", "init", str(second)], check=True, capture_output=True)
+            goal = "[sonnet-review] Review the parser's isolated worktree behavior"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                first_dispatch, first_reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=first)
+                second_dispatch, second_reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=second)
+        self.assertEqual(first_reason, "")
+        self.assertEqual(second_reason, "")
+        self.assertEqual(first_dispatch, (first.resolve(), "sonnet"))
+        self.assertEqual(second_dispatch, (second.resolve(), "sonnet"))
+        self.assertIsNone(router._remembered_dispatch_review_repository(goal))
+
+    def test_prefix_match_requires_a_word_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review the parser"
+            execution_text = "[sonnet-review] Review the parsers of the other project"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                execution = router._verified_delegated_claude_review(
+                    execution_text, self._config(), request={
+                        "messages": [{"role": "user", "content": execution_text}],
+                    })
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertIsNone(execution)
+
+    def test_a_remembered_repository_that_vanished_is_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            goal = "[sonnet-review] Review parser"
+            with patch("model_router.shutil.which", return_value="/claude"):
+                dispatch, reason = router._delegated_claude_review_status(
+                    goal, self._config(), dispatch_cwd=repo)
+                shutil.rmtree(repo)
+                execution = router._verified_delegated_claude_review(
+                    goal, self._config(), request={
+                        "messages": [{"role": "user", "content": goal}],
+                    })
+        self.assertEqual(reason, "")
+        self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
+        self.assertIsNone(execution)
 
     def test_cache_helpers_use_the_shared_repository_cache_lock(self):
         class CountingLock:

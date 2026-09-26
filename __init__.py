@@ -4439,6 +4439,12 @@ def _remember_dispatch_review_repository(text: str, repository: Path) -> None:
         )
 
 
+def _dispatch_review_repository_match(normalised: str, goal: str) -> bool:
+    if len(goal) < 20 or not normalised.startswith(goal):
+        return False
+    return len(normalised) == len(goal) or normalised[len(goal)] == " "
+
+
 def _remembered_dispatch_review_repository(text: str) -> Optional[Path]:
     normalised = _normalise(text)
     with _REPOSITORY_CACHE_LOCK:
@@ -4447,19 +4453,25 @@ def _remembered_dispatch_review_repository(text: str) -> Optional[Path]:
             _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS,
         )
         if found:
-            return repository if isinstance(repository, Path) else None
+            return _existing_remembered_directory(repository)
         matching_entry: Optional[Tuple[str, object]] = None
         for goal, (recorded_at, candidate) in list(_DISPATCH_REVIEW_REPOSITORIES.items()):
             if time.monotonic() - recorded_at >= _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS:
                 _DISPATCH_REVIEW_REPOSITORIES.pop(goal, None)
-            elif len(goal) >= 20 and normalised.startswith(goal):
+            elif _dispatch_review_repository_match(normalised, goal):
                 if matching_entry is None or len(goal) > len(matching_entry[0]):
                     matching_entry = (goal, candidate)
         if matching_entry is None:
             return None
         goal, repository = matching_entry
         _DISPATCH_REVIEW_REPOSITORIES.move_to_end(goal)
-        return repository if isinstance(repository, Path) else None
+        return _existing_remembered_directory(repository)
+
+
+def _existing_remembered_directory(repository: object) -> Optional[Path]:
+    if not isinstance(repository, Path):
+        return None
+    return repository if repository.is_dir() else None
 
 
 def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
@@ -4479,9 +4491,10 @@ def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Opt
             candidate = _repo_directory(str(value))
             if candidate is not None:
                 return candidate
-    dispatched_repo = _remembered_dispatch_review_repository(text)
-    if dispatched_repo is not None:
-        return dispatched_repo
+    if dispatch_cwd is None:
+        dispatched_repo = _remembered_dispatch_review_repository(text)
+        if dispatched_repo is not None:
+            return dispatched_repo
     workspace_repo = _workspace_repository(request)
     if workspace_repo is not None:
         return workspace_repo
