@@ -1368,7 +1368,6 @@ class AccountsApiTests(unittest.TestCase):
             "tool": "delegate_claude",
             "enabled": True,
             "registered": True,
-            "workflow": "claude_delegation",
             "restart_needed": False,
             "default_tier": "sonnet",
             "tiers": list(self.model_router.claude_delegation.TIERS),
@@ -1464,15 +1463,17 @@ class AccountsApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config, _, _ = self._build_config(directory)
 
+            before = config["claude_delegation"].get("enabled")
             error = web_viewer._save_claude_delegation(
                 {"enabled": False, "default_tier": "haiku"}, config
             )
             self.assertIsNone(error)
-            self.assertEqual(config["claude_delegation"]["enabled"], False)
+            self.assertEqual(config["claude_delegation"].get("enabled"), before,
+                             "the retired flag from an old tab is ignored, not written")
             self.assertEqual(config["claude_delegation"]["default_tier"], "haiku")
 
             self.assertIsNotNone(web_viewer._save_claude_delegation({"default_tier": "gpt"}, config))
-            self.assertIsNotNone(web_viewer._save_claude_delegation({"enabled": "yes"}, config))
+            self.assertIsNone(web_viewer._save_claude_delegation({"enabled": "yes"}, config))
 
     def test_read_delegation_log_separates_audits_from_registration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1959,7 +1960,7 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
 
     def test_save_payload_includes_usage_limits_and_claude_delegation(self):
         source = self.javascript_function("saveSettings")
-        listener = HTML[HTML.index("document.getElementById('account-cards').addEventListener('change'"):HTML.index("document.getElementById('workflow-switch')")]
+        listener = HTML[HTML.index("document.getElementById('account-cards').addEventListener('change'"):HTML.index("document.getElementById('balance-settings')")]
         self.assertIn("usage_limits:", source)
         self.assertIn("claude_delegation:", source)
         self.assertIn("currentConfig.effort=Object.assign({},currentConfig.effort,{[el.dataset.effort]:el.value})", listener)
@@ -2450,12 +2451,12 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
         self.assertTrue(observed["headerHasRoutes"])
 
 
-class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
-    """One switch between Claude delegation and the original Codex workflow.
+class RetiredWorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
+    """The Codex only / Codex + Claude switch is gone: the Claude model switches decide.
 
-    It writes ``workflow`` and keeps ``claude_delegation.enabled`` in step, saves
-    without stripping the file's comments, and replaces the per-card delegation
-    toggle so there is only one control for one state.
+    A save still keeps the file's comments and flow lists, never writes
+    ``workflow`` or ``claude_delegation.enabled``, and ignores a ``workflow`` an
+    old open tab still posts.
     """
 
     ROUTER_YAML = (
@@ -2467,23 +2468,12 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
         "preferences:\n"
         "  review: [sonnet5, opus5, terra]  # Claude-tuned chain\n"
         "claude_delegation:\n"
-        "  enabled: true\n"
         "  default_tier: sonnet\n"
     )
 
-    def test_save_workflow_keeps_the_delegation_flag_in_step(self):
-        config = {"claude_delegation": {"enabled": True, "default_tier": "opus"}}
-        self.assertIsNone(web_viewer._save_workflow("codex", config))
-        self.assertEqual(config["workflow"], "codex")
-        self.assertEqual(config["claude_delegation"], {"enabled": False, "default_tier": "opus"})
-        self.assertIsNone(web_viewer._save_workflow("claude_delegation", config))
-        self.assertEqual(config["workflow"], "claude_delegation")
-        self.assertTrue(config["claude_delegation"]["enabled"])
-
-    def test_save_workflow_refuses_an_unknown_name_and_touches_nothing(self):
-        config = {"claude_delegation": {"enabled": True}}
-        self.assertIn("Unknown workflow", web_viewer._save_workflow("gemini", config))
-        self.assertEqual(config, {"claude_delegation": {"enabled": True}})
+    def test_the_workflow_helpers_are_gone(self):
+        for name in ("WORKFLOWS", "_workflow_name", "_save_workflow"):
+            self.assertFalse(hasattr(web_viewer, name), name)
 
     def _serve(self, directory, calls):
         # Saves go to router_config.local.yaml; an empty shipped file under it keeps
@@ -2512,20 +2502,24 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
             server.shutdown(); server.server_close(); thread.join(timeout=2)
         return local_path.read_text(encoding="utf-8"), results
 
-    def test_a_workflow_save_round_trips_and_keeps_the_files_comments(self):
+    def test_a_stale_workflow_in_a_post_is_ignored_and_the_files_comments_survive(self):
         with tempfile.TemporaryDirectory() as directory:
-            text, results = self._serve(directory, [("POST", {"workflow": "codex"}), ("GET", None)])
+            text, results = self._serve(directory, [
+                ("POST", {"workflow": "codex", "callable": {"terra": True, "opus5": False}}), ("GET", None)])
         self.assertEqual(results[0][0], 200)
         self.assertTrue(results[0][1]["success"])
-        self.assertIn("revision", results[0][1])
-        self.assertEqual(results[1][1]["workflow"], "codex")
+        self.assertNotIn("workflow", results[1][1])
         self.assertIn("# Router settings -- this comment must survive a dashboard save.", text)
         self.assertIn("# Claude-tuned chain", text)
-        self.assertIn("workflow: codex", text)
-        self.assertIn("review: [sonnet5, opus5, terra]", text, "the chain is kept for switching back")
-        import yaml
-        loaded = yaml.safe_load(text)
-        self.assertFalse(loaded["claude_delegation"]["enabled"])
+        self.assertNotIn("workflow", text)
+        self.assertIn("opus5: false", text)
+        self.assertIn("review: [sonnet5, opus5, terra]", text)
+
+    def test_an_unknown_workflow_is_not_an_error_either(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text, results = self._serve(directory, [("POST", {"workflow": "gemini"})])
+        self.assertEqual(results[0][0], 200)
+        self.assertNotIn("workflow", text)
 
     def test_a_full_page_save_keeps_the_comments_and_flow_lists(self):
         """Measured live 2026-09-19: the page posts callable and preferences on every
@@ -2547,14 +2541,12 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
             "#  chat:      [luna, spark]\n"
             "\n"
             "claude_delegation:\n"
-            "  enabled: true\n"
             "  default_tier: sonnet\n"
         )
         with tempfile.TemporaryDirectory() as directory:
             self.ROUTER_YAML, original = yaml_text, self.ROUTER_YAML
             try:
                 text, results = self._serve(directory, [("POST", {
-                    "workflow": "codex",
                     "callable": {"terra": True, "sol": True, "sonnet5": True, "opus5": True, "qwen": False},
                     "preferences": {"design": ["sol", "opus5"], "review": ["opus5", "terra"]},
                 })])
@@ -2568,82 +2560,81 @@ class WorkflowSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertRegex(text, r"design: +\[sol, opus5\]")
         self.assertRegex(text, r"review: +\[opus5, terra\]")
 
-    def test_the_workflow_wins_over_a_stale_delegation_flag_in_the_same_save(self):
+    def test_a_stale_delegation_flag_is_never_written(self):
         with tempfile.TemporaryDirectory() as directory:
             text, _ = self._serve(directory, [("POST", {
-                "workflow": "codex", "claude_delegation": {"enabled": True, "default_tier": "haiku"}})])
+                "claude_delegation": {"enabled": False, "default_tier": "haiku"}})])
         import yaml
-        loaded = yaml.safe_load(text)
-        self.assertEqual(loaded["claude_delegation"], {"enabled": False, "default_tier": "haiku"})
+        self.assertEqual(yaml.safe_load(text)["claude_delegation"], {"default_tier": "haiku"})
 
-    def test_an_unknown_workflow_is_a_400_and_the_file_is_untouched(self):
-        with tempfile.TemporaryDirectory() as directory:
-            text, results = self._serve(directory, [("POST", {"workflow": "gemini"})])
-        self.assertEqual(results[0][0], 400)
-        self.assertEqual(text, self.ROUTER_YAML)
-
-    def _status(self, workflow, registered):
+    def _status(self, claude_on, registered):
         import model_router
 
         with tempfile.TemporaryDirectory() as directory:
             config, _, log_path = AccountsApiTests()._build_config(directory)
             log_path.write_text(json.dumps({"event": "registration", "registered": registered}), encoding="utf-8")
-            config["workflow"] = workflow
-            config["claude_delegation"]["enabled"] = workflow == "claude_delegation"
+            for tier in ("opus5", "sonnet5", "haiku"):
+                if tier in config["callable"]:
+                    config["callable"][tier] = claude_on
             model_router.usage_guard._reset_cache()
             try:
                 return web_viewer._accounts_status(config)["anthropic"]["delegation"]
             finally:
                 model_router.usage_guard._reset_cache()
 
-    def test_the_codex_workflow_shows_delegation_off_and_never_asks_for_a_restart(self):
-        delegation = self._status("codex", registered=True)
-        self.assertEqual((delegation["enabled"], delegation["restart_needed"], delegation["workflow"]),
-                         (False, False, "codex"))
+    def test_claude_switched_off_shows_delegation_off_and_never_asks_for_a_restart(self):
+        delegation = self._status(False, registered=True)
+        self.assertEqual((delegation["enabled"], delegation["restart_needed"]), (False, False))
+        self.assertNotIn("workflow", delegation)
 
-    def test_claude_delegation_without_a_registered_tool_asks_for_a_restart(self):
-        delegation = self._status("claude_delegation", registered=False)
+    def test_claude_switched_on_without_a_registered_tool_asks_for_a_restart(self):
+        delegation = self._status(True, registered=False)
         self.assertEqual((delegation["enabled"], delegation["restart_needed"]), (True, True))
 
-    def _node(self, script):
-        probe = self.i18n_runtime() + "\n" + script
-        return subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True).stdout.strip()
-
-    def test_the_switch_sits_first_in_settings_and_marks_the_active_workflow(self):
+    def test_settings_has_no_workflow_section_and_balance_follows_the_accounts(self):
         start = HTML.index('id="settings-panel"')
         panel = HTML[start:HTML.index("</section>", start)]
-        self.assertLess(panel.index('id="workflow-switch"'), panel.index('id="account-cards"'))
-        out = self._node(self.javascript_function("workflowControl") + "\nconsole.log(workflowControl('codex'));")
-        self.assertIn('data-workflow="codex" class="active"', out)
-        self.assertIn('data-workflow="claude_delegation"', out)
-        self.assertNotIn('data-workflow="claude_delegation" class="active"', out)
-        self.assertIn("One account works", out)
+        self.assertNotIn("workflow", panel.casefold())
+        self.assertLess(panel.index('id="account-cards"'), panel.index('id="balance-section"'))
+        self.assertIn('data-i18n="settings.balance.heading"', panel)
+        for name in ("workflowControl",):
+            self.assertNotIn(f"function {name}", HTML)
+        self.assertNotIn("data-workflow", HTML)
+        self.assertNotIn("getElementById('workflow-switch')", HTML)
 
-    def test_the_claude_card_no_longer_carries_its_own_toggle(self):
+    def test_the_claude_card_reports_delegation_off_from_the_switches(self):
         card_tests = AccountCardTests()
         off = dict(AccountCardTests.CLAUDE_INFO, delegation=dict(
-            AccountCardTests.CLAUDE_INFO["delegation"], enabled=False, workflow="codex"))
+            AccountCardTests.CLAUDE_INFO["delegation"], enabled=False))
         card = card_tests._card("anthropic", off)
         self.assertNotIn("data-account-toggle", card)
         self.assertIn("account.delegation.off", card)
         self.assertNotIn("account.delegation.live", card, "registered but switched off is not live")
         self.assertIn("data-default-tier", self.javascript_function("renderWorkers"))
+        self.assertNotIn("Workflow", self.i18n("account.delegation.off")[0])
+        self.assertNotIn("Munkafolyamat", self.i18n("account.delegation.off")[1])
 
-    def test_saving_posts_the_workflow_and_no_longer_the_delegation_flag(self):
+    def test_saving_posts_neither_the_workflow_nor_the_delegation_flag(self):
         source = self.javascript_function("saveSettings")
-        self.assertIn("workflow:currentConfig.workflow", source)
+        self.assertNotIn("workflow", source)
         self.assertIn("claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:", source)
         self.assertNotIn("delegation.enabled", source)
 
-    def test_the_preferences_say_when_the_codex_workflow_has_paused_them(self):
+    def test_the_preferences_no_longer_pause_for_a_workflow(self):
         source = self.javascript_function("renderPreferences")
-        self.assertIn("settings.prefs.paused", source)
+        self.assertNotIn("settings.prefs.paused", source)
+        self.assertNotIn("workflow", source)
+        self.assertNotIn("pref-paused", HTML)
 
-    def test_every_new_i18n_key_exists_in_both_languages(self):
-        for key in ("settings.workflow.heading", "settings.workflow.codex", "settings.workflow.claude",
-                    "settings.workflow.desc.codex", "settings.workflow.desc.claude", "settings.workflow.live",
-                    "settings.prefs.paused", "account.delegation.off"):
-            self.i18n(key)
+    def test_no_workflow_i18n_key_is_left_in_either_language(self):
+        import re
+        self.assertEqual(re.findall(r"'settings\.workflow\.[^']*'", HTML), [])
+        self.assertNotIn("'settings.prefs.paused'", HTML)
+        for key in ("settings.balance.heading", "account.delegation.off", "settings.sub"):
+            english, hungarian = self.i18n(key)
+            self.assertNotIn("Workflow", english)
+            self.assertNotIn("Munkafolyamat", hungarian)
+        self.assertEqual(self.i18n("settings.balance.heading"), ("Load balancing", "Terheléselosztás"))
 
 
 class HermesParentGuardTests(unittest.TestCase):
@@ -2802,15 +2793,19 @@ class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
                          {"enabled": True, "busy_percent": 20.0, "margin_percent": 10.0, "window": "5-hour"})
         self.assertFalse(web_viewer._balance_status({})["enabled"])
 
-    def _control(self, workflow, balance):
-        script = (self.javascript_function("workflowControl")
-                  + f"\nconsole.log(workflowControl({json.dumps(workflow)},{json.dumps(balance)}));")
+    def _control(self, balance):
+        script = (self.javascript_function("balanceControl")
+                  + f"\nconsole.log(balanceControl({json.dumps(balance)}));")
         return subprocess.run(["node", "-e", self.i18n_runtime() + "\n" + script],
                               check=True, text=True, capture_output=True).stdout
 
-    def test_the_switch_shows_under_claude_delegation_with_editable_thresholds(self):
-        out = self._control("claude_delegation", {"enabled": True, "busy_percent": 20, "margin_percent": 10,
-                                                  "window": "5-hour"})
+    def _shown(self, accounts, callable_):
+        script = (self.javascript_function("balanceAccounts")
+                  + f"\nconsole.log(balanceAccounts({json.dumps(accounts)},{json.dumps(callable_)}));")
+        return int(subprocess.run(["node", "-e", script], check=True, text=True, capture_output=True).stdout)
+
+    def test_the_switch_shows_with_editable_thresholds(self):
+        out = self._control({"enabled": True, "busy_percent": 20, "margin_percent": 10, "window": "5-hour"})
         self.assertRegex(out, r'<label class="switch"><input type="checkbox" data-balance-toggle checked>')
         self.assertIn('data-balance-field="busy_percent" value="20"', out)
         self.assertIn('data-balance-field="margin_percent" value="10"', out)
@@ -2822,13 +2817,19 @@ class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn(".balance-row .balance-field{display:inline-flex;align-items:center", HTML)
 
     def test_the_switch_is_off_when_balancing_is_off(self):
-        out = self._control("claude_delegation", {"enabled": False, "busy_percent": 20, "margin_percent": 10,
-                                                  "window": "5-hour"})
+        out = self._control({"enabled": False, "busy_percent": 20, "margin_percent": 10, "window": "5-hour"})
         self.assertIn("data-balance-toggle", out)
         self.assertNotIn("data-balance-toggle checked", out)
 
-    def test_the_codex_workflow_hides_it(self):
-        self.assertNotIn("data-balance-toggle", self._control("codex", {"enabled": True}))
+    def test_the_section_needs_two_accounts_with_a_model_switched_on(self):
+        accounts = {"openai-codex": {"tiers": ["terra", "sol"]}, "anthropic": {"tiers": ["opus5", "haiku"]},
+                    "xai-oauth": {"tiers": ["grok"]}}
+        self.assertEqual(self._shown(accounts, {"grok": False, "opus5": False, "haiku": False}), 1)
+        self.assertEqual(self._shown(accounts, {"grok": False, "opus5": False, "haiku": True}), 2)
+        self.assertEqual(self._shown(accounts, {"grok": True, "opus5": False, "haiku": False}), 2)
+        source = self.javascript_function("renderBalance")
+        self.assertIn(">=2", source)
+        self.assertIn("section.hidden=!shown", source)
 
     def test_saving_posts_the_balance_flag_and_thresholds(self):
         source = self.javascript_function("saveSettings")
@@ -2837,7 +2838,7 @@ class BalanceSwitchTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIn("margin_percent:", source)
 
     def test_its_i18n_keys_exist_in_both_languages(self):
-        for key in ("settings.balance.label", "settings.balance.desc", "settings.balance.busy",
+        for key in ("settings.balance.heading", "settings.balance.label", "settings.balance.desc", "settings.balance.busy",
                     "settings.balance.margin", "settings.balance.window.5-hour", "settings.balance.window.tighter"):
             self.i18n(key)
 
@@ -2967,7 +2968,6 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
             config_path.write_text(web_viewer.yaml.safe_dump(older), encoding="utf-8")
             payload = {
                 "callable": {**older["callable"], "luna": False},
-                "workflow": "claude_delegation",
                 "default_model": "terra",
                 "effort": {"luna": "low", "spark": "medium", "terra": "medium", "sol": "medium", "grok": "medium"},
                 "claude_reasoning_effort": {},

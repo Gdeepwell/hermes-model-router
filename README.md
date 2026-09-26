@@ -34,15 +34,16 @@ is what keeps a single quota from carrying everything.
 | `grok` | Grok 4.7 | SuperGrok subscription (`xai-oauth`) | Delegation target, heavy peer of Terra/Opus/Sonnet; ships switched off |
 | `opus5` | Claude Opus 5.5 | Claude subscription | Delegation target for hard or consequential work (see below) |
 | `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
-| `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude`, so offered only under Claude delegation |
+| `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude` |
 
 `qwen`, `grok`, `opus5`, `sonnet5` and `haiku` are delegation targets rather than routable
 tiers: the middleware cannot move a call across providers, so they are reached by a
-plan choosing them, not by the router switching to them mid-turn. Under
-`workflow: codex` the first four are chosen with `model:` on `delegate_task`.
-Under `workflow: claude_delegation` the three Claude targets are reached with
-`delegate_claude(tier=...)` instead, and `haiku` only that way, since it has no
-`delegate_task` target (see [Workflow switch](#workflow-switch) and
+plan choosing them, not by the router switching to them mid-turn. `qwen`, `grok`,
+`opus5` and `sonnet5` are chosen with `model:` on `delegate_task`; the three Claude
+targets are also reached with `delegate_claude(tier=...)`, and `haiku` only that
+way, since it has no `delegate_task` target. Claude, like Grok, needs its own
+subscription, so its three models **ship switched off**; switching one on is what
+makes Claude available (see [Switching Claude on](#switching-claude-on) and
 [Claude targets](#claude-targets)).
 Any tier in `models` can hold the orchestrator role, including one on another
 account — that choice is made at spawn time, where the provider is still open.
@@ -152,8 +153,9 @@ delegation:
 ```
 
 
-**These targets are on.** They shipped switched off for months because every
-call returned:
+**These targets work** once switched on (they ship off only because they need a
+Claude subscription; see [Switching Claude on](#switching-claude-on)). They
+shipped switched off for months before that because every call returned:
 
 ```
 HTTP 400 invalid_request_error
@@ -182,7 +184,7 @@ If you are on an older Hermes and see the 400, update before you buy credit.
 
 The native targets above are Hermes workers, not Claude Code processes. A normal
 `model: "opus5"` / `model: "sonnet5"` target is a Hermes child on the Anthropic
-provider; under Claude delegation, `delegate_claude` reaches the same kind of
+provider; `delegate_claude` reaches the same kind of
 child by passing a pinned `provider: anthropic` / model route to Hermes's own
 `delegate_task`. Hermes resolves that child's credentials and supplies its usual
 worker lifecycle and tool set. That is why these are the normal choice for
@@ -212,14 +214,13 @@ the one account whose usage most needed watching was the one nothing reported on
 They now appear as `opus5`, `sonnet5` and `haiku` alongside the other tiers, and
 their `callable` switches govern whether the conductor is offered them at all.
 
-**Haiku is a third Claude target, reachable only through Claude delegation.**
+**Haiku is a third Claude target, reachable only through `delegate_claude`.**
 It has no `delegation.targets` entry in Hermes's config, so `delegate_task` cannot
 start it; `delegate_claude(tier="haiku")` can (see
 [Claude delegation and the usage guard](#claude-delegation-and-the-usage-guard)).
 While that tool is live, `haiku` joins the conductor's target list with the
 advice "quick lookups", and it can be named in a preference chain like any other
-target — typically for `explore`. With Claude delegation off it is never offered,
-whatever its `callable` switch says.
+target — typically for `explore`. Switched off in `callable`, it is never offered.
 
 When both are offered the contract used to add "use `sonnet5` by default and
 reserve `opus5` for consequential or hard work". That sentence dates from the
@@ -283,8 +284,8 @@ and worked alone. A second gate compounded it by recognising only Sol and
 `default_model` as orchestrators.
 
 The forced conductor uses `orchestration.conductor`, then the callable
-`default_model` and its fallback chain, skipping targets the current workflow
-or `delegate_task` schema cannot reach. On hosts without a `model` parameter,
+`default_model` and its fallback chain, skipping targets that are switched off
+or that the `delegate_task` schema cannot reach. On hosts without a `model` parameter,
 an off-provider goal prefix cannot create an off-provider conductor; if no
 planner route remains, the parent keeps direct worker coordination. Worker preference chains such as `code`
 choose implementation workers independently. The host must allow a conductor
@@ -340,13 +341,20 @@ differently because the difference is not cosmetic:
   to at all: `route_llm_request` runs after the provider is chosen, so it can only
   swap models inside one provider. Such an entry is passed to the conductor as a
   delegation instruction instead — it reaches work through `delegate_task`
-  (or `delegate_claude` for a Claude tier under Claude delegation), and the
+  (or `delegate_claude` for a Claude tier), and the
   conductor is the one that has to honour it.
 
 A kind with no chain keeps its built-in route, so configuring nothing changes
 nothing. A kind with a chain overrides that route **completely**, including the
 safety defaults that send design, security and deployment work to Sol. That is
 deliberate: the operator owns the mapping.
+
+**A switched-off model is skipped, not honoured.** A chain can name a model whose
+switch is off -- `review: [sonnet5, opus5, terra]` with Claude off, say. The
+router passes over it: that review goes to `terra`, and the conductor is not
+advised a Claude target. When nothing in a chain is switched on (`[sonnet5, opus5]`
+with Claude off), the kind falls back to its built-in route, as if it had no
+chain. The chain itself is kept, so switching Claude back on restores it.
 
 **The whole order reaches the conductor, not just its winner.** Availability
 folds in the cooldown, so naming only the first *available* entry meant a cooling
@@ -638,11 +646,7 @@ call rather than routing it, because the model belongs to another provider.
 
 Everything refreshes every 3 seconds.
 
-The Settings tab opens with the **Workflow** section: the *Codex only* /
-*Codex + Claude* switch -- the dashboard's names for `workflow: codex` and
-`workflow: claude_delegation`, chosen to say how many accounts work rather than
-which one came first (see [Workflow switch](#workflow-switch)) -- and, under
-*Codex + Claude*, the load-balancing switch and its two thresholds. Below it is **one
+The Settings tab opens with **one
 card per account**, with Models, Limits and Delegation side by side, then the
 weekly and 5-hour usage bars, whose last line carries the read age, the Refresh
 button and the account's recent call count for the same window the conductor
@@ -655,7 +659,12 @@ incompatible, Claude's disabled selects carry the escaped reason as a tooltip
 select. A tier switched off keeps its switch there, so it can be
 turned back on. A tier that is enabled but cooling carries a pill with the
 remaining time and the reason, since the switch alone would not explain why
-traffic went elsewhere. Then come the main agent chain and the worker defaults
+traffic went elsewhere. The Claude card's Delegation row reports `delegate_claude`
+on while at least one Claude model is switched on (see
+[Switching Claude on](#switching-claude-on)). Below the cards, the **Load
+balancing** section holds its switch and two thresholds (see
+[Load balancing between accounts](#load-balancing-between-accounts)); it appears
+while at least two accounts have a model switched on. Then come the main agent chain and the worker defaults
 (see [Hermes fallback chains](#hermes-fallback-chains)), the per-work-kind
 preference chains described above (each entry shows its account and that
 account's soft/closed state), and the interface language. Everything is read
@@ -677,19 +686,21 @@ which drops comments.
 ## Configuration
 
 The plugin loads `router_config.yaml` from the plugin directory automatically.
-That file holds the shipped defaults -- the original Codex workflow -- and is the
+That file holds the shipped defaults -- Codex and Qwen on, Claude and Grok
+switched off until you have their subscriptions -- and is the
 one under version control. Your own settings go in `router_config.local.yaml`
 beside it: git-ignored, and merged over the shipped file mapping by mapping, so
 it only needs the keys you change:
 
 ```yaml
 # router_config.local.yaml
-workflow: claude_delegation
 default_model: terra
+callable:
+  opus5: true
+  sonnet5: true
+  haiku: true
 preferences:
   review: [sonnet5, opus5, terra]
-claude_delegation:
-  enabled: true
 usage_guard:
   accounts:
     anthropic:
@@ -726,7 +737,7 @@ callable:
   sol: true
   opus5: true
   sonnet5: true
-  haiku: true    # offered only while Claude delegation is live
+  haiku: true    # the shipped file has all three Claude models off
   qwen: true
 
 # Which account each tier spends. Claude tiers are delegation targets rather
@@ -750,7 +761,7 @@ default_model: terra
 preferences:
   review: [sonnet5, terra]
   design: [sol, opus5]
-  explore: [spark, luna, haiku]   # haiku needs Claude delegation
+  explore: [spark, luna, haiku]   # skipped while haiku is switched off
 
 # Delegation limits (in ~/.hermes/config.yaml)
 delegation:
@@ -822,47 +833,56 @@ usage_report:
   window_seconds: 3600
 ```
 
-### Workflow switch
+### Switching Claude on
 
-One setting chooses between the two ways this router has been run:
+Claude needs a Claude subscription, so, like Grok, its three models ship
+switched off:
 
 ```yaml
-workflow: claude_delegation   # or: codex
+callable:
+  opus5: false
+  sonnet5: false
+  haiku: false
 ```
 
-- `codex` is the original workflow, exactly as on master: Codex does the work
-  through `delegate_task`, Opus stays available as the Hermes parent, there is
-  no `delegate_claude`, and the built-in routes apply. `preferences:` and the
-  `claude_delegation:` block stay in the file, unused, so switching back
-  restores them.
-- `claude_delegation` (also what an absent or unknown value means) runs the file
-  as written: Claude workers next to Codex, routed by `preferences:`. When a
-  turn's first choice is a Claude tier (review → `sonnet5`, say), the forced
-  planning call offers `delegate_claude` next to `delegate_task` -- directly when
-  the request lists it, else through Tool Search's `tool_call` -- and still
-  requires one of the two. Every other turn keeps the `delegate_task`-only call.
+To use it, log in with Claude Code (Hermes borrows that login for its
+`anthropic` provider; see [Claude targets](#claude-targets)), then switch the
+models on in the dashboard's Claude card, or in `router_config.local.yaml`:
 
-The dashboard's Settings tab has the switch at the top. Saving it writes
-`workflow` into `router_config.local.yaml` (see [Configuration](#configuration))
-and keeps `claude_delegation.enabled` in step; the Claude account card
-reports the state but no longer has a toggle of its own.
+```yaml
+callable:
+  opus5: true
+  sonnet5: true
+  haiku: true
+```
 
-The switch is read live. The router rereads it on every request, so routing
-follows from the next one. `delegate_claude` is registered whenever the host can
-carry it, and its `check_fn` decides whether Hermes offers it, so a new session
-gains or loses the tool without a restart. A session already running keeps the
-tool list it was built with; the router offers Claude delegation to a request
-only when the workflow allows it *and* that request carries `delegate_claude`,
-and the tool itself refuses calls under `workflow: codex`, so that session is
-still pointed at the right route. Hermes memoizes tool lists without rerunning
-check_fns, so the router clears that memo (a private `model_tools` helper)
-when it sees the workflow flip, on a routed request or before a gateway message
-is dispatched.
-An already-running Claude child is stopped before its next provider call after
-switching to Codex. A Claude parent keeps its current provider; the switch does
-not rewrite host provider configuration or erase historical activity. A
-Hermes-managed child reached through an Anthropic fallback follows the same
-execution rule: it runs in Claude mode and stops in Codex mode.
+Claude is then available exactly while at least one of the three is on:
+`delegate_claude` is offered, the conductor is advised the switched-on Claude
+targets, and preference chains that name them take effect. With all three off,
+none of that happens, chains skip the Claude entries (see
+[Preferred models per kind of work](#preferred-models-per-kind-of-work)), and
+a Claude child already running is stopped before its next provider call. A
+Claude parent keeps its own provider: the switches do not rewrite Hermes's
+provider configuration.
+
+The switches are read live. The router rereads them on every request, so
+routing follows from the next one. `delegate_claude` is registered whenever the
+host can carry it, and its `check_fn` decides whether Hermes offers it, so a new
+session gains or loses the tool without a restart. Hermes memoizes tool lists
+without rerunning check_fns, so the router clears that memo (a private
+`model_tools` helper) when Claude's availability flips, on a routed request or
+before a gateway message is dispatched.
+
+**Older configs.** Up to 1.19 a `workflow: codex | claude_delegation` key (and
+`claude_delegation.enabled`) switched Claude on and off. Both are retired. A
+`router_config.local.yaml` that still has them keeps working: at load time the
+router reads `workflow: codex` (or `enabled: false`) as all three Claude models
+off, and `workflow: claude_delegation` (or `enabled: true`) as on for each Claude
+model the local file does not switch itself. The dashboard shows the same, and
+its next save writes those three switches into the local file and removes
+`workflow` and `claude_delegation.enabled`, so the file says directly what it
+means. A `workflow` posted by a dashboard tab opened before the upgrade is
+ignored.
 
 ### Claude delegation and the usage guard
 
@@ -875,7 +895,6 @@ router's own tier map:
 
 ```yaml
 claude_delegation:
-  enabled: false        # kept in step with `workflow` by the dashboard's switch
   default_tier: sonnet  # used when a call to delegate_claude names no tier
   log_path: ""          # JSONL audit log: registration + one line per delegate_claude call
   tiers:                 # model each short tier name actually starts
@@ -891,8 +910,8 @@ is reachable only this way (it has no `delegate_task` target). Clearing a tier's
 model in `tiers` removes that tier from what the conductor is offered.
 
 The tool is registered whenever the host has the delegation API it needs, and
-offered only while `enabled` is on and a Claude target is callable (see
-[Workflow switch](#workflow-switch)). A host that defers tool registration
+offered while at least one Claude model is switched on in `callable` (see
+[Switching Claude on](#switching-claude-on)). A host that defers tool registration
 until first use (Tool Search) may not offer `delegate_claude` immediately after
 startup; the dashboard's Claude account card shows whether it is actually live
 (`delegate_claude live`), and flags `restart Hermes to apply` only when
@@ -929,8 +948,8 @@ reading, the configured limits, and — while cooling — the pill's reason.
 #### Load balancing between accounts
 
 The soft/hard limits react to one account reaching a line. `balance` compares
-the two, so a busy account is spared before it hits one. It runs only under
-Claude delegation, after the soft/hard guard has ordered the chain:
+the two, so a busy account is spared before it hits one. It runs after the
+soft/hard guard has ordered the chain, and only moves targets that are switched on:
 
 ```yaml
 usage_guard:
@@ -955,8 +974,8 @@ already lists move, so a kind whose chain stays on one account (or has no
 chain) is untouched, and the Opus parent never moves. A reading that is missing,
 or older than twice `cache_seconds`, turns balancing off for that turn.
 
-The switch and both thresholds are also in the dashboard's Workflow section
-while Claude delegation is selected. The routing advice and the forced planning
+The switch and both thresholds are also in the dashboard's own Load balancing
+section, shown while at least two accounts have a model switched on. The routing advice and the forced planning
 call follow the balanced order, and
 say why in one line (`Balanced: review → terra first (Claude 5-hour 86% vs
 Codex 6%)`); the orchestration log's `preflight_forced` event carries the same
@@ -1029,7 +1048,7 @@ continue from what the stopped worker already committed in its worktree instead
 of starting over. Do not re-plan or narrow the goal: only the account changed.
 ```
 
-Under Claude delegation the target is named by the call that reaches it:
+With Claude switched on, the target is named by the call that reaches it:
 `re-dispatch with delegate_claude(tier="opus")` for a Claude target, and
 `delegate_task (goal prefix [terra])` for the others.
 
@@ -1209,7 +1228,7 @@ in its goal — it does not share the conversation:
  "model": "sonnet5"}
 ```
 
-Under `workflow: claude_delegation` the same leaf goes through `delegate_claude`,
+With Claude switched on, the same leaf can also go through `delegate_claude`,
 which takes the same `tasks` shape plus one tier for the whole call:
 
 ```python
@@ -1372,6 +1391,18 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.20.0** — The *Codex only* / *Codex + Claude* workflow switch is retired.
+Claude is an account like Qwen or Grok: available exactly while at least one of
+`opus5`, `sonnet5` and `haiku` is switched on, and all three ship switched off,
+so an install without a Claude subscription works out of the box. A legacy
+`workflow:` or `claude_delegation.enabled` in `router_config.local.yaml` is
+translated into those switches at load time, and the dashboard's next save
+writes them into the file and drops both keys (see
+[Switching Claude on](#switching-claude-on)). Preference chains skip
+switched-off models and fall back to the built-in route when nothing in them is
+on. The dashboard's Workflow section is gone; load balancing has its own
+section, shown while two accounts have a model switched on.
 
 **1.19.2** — The Grok account card now has the same beside-switch reasoning-effort
 picker as the Codex tiers. It edits `effort.grok` (`low`, `medium`, `high`, or
