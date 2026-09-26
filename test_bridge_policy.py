@@ -59,6 +59,28 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
                     f"[sonnet-review] Review repository {child}.", self._config())
         self.assertEqual(routed, (repo.resolve(), "sonnet"))
 
+    def test_git_probe_timeout_is_not_a_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("model_router.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)) as run:
+                resolved = router._repo_directory(directory, git_top_level=True)
+        self.assertIsNone(resolved)
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
+
+    def test_goal_repository_skips_a_non_git_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / "scratch-notes"
+            scratch.mkdir()
+            resolved = router._goal_repository(f"[sonnet-review] Review {scratch}")
+        self.assertIsNone(resolved)
+
+    def test_goal_repository_skips_a_non_git_directory_before_a_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory) / "scratch-notes"
+            scratch.mkdir()
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review {scratch} then {repo}")
+        self.assertEqual(resolved, repo.resolve())
+
     def test_workspace_path_in_child_request_resolves_a_review_without_goal_path(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = self._git_repo(directory)

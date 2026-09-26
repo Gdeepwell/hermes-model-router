@@ -4343,9 +4343,9 @@ def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path
     try:
         completed = subprocess.run(
             ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
-            check=False, capture_output=True, text=True,
+            check=False, capture_output=True, text=True, timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         completed = None
     if completed is not None and completed.returncode == 0:
         root = Path(completed.stdout.strip())
@@ -4356,7 +4356,7 @@ def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path
 
 def _goal_repository(text: str) -> Optional[Path]:
     for token in _GOAL_ABSOLUTE_PATH.findall(text or ""):
-        candidate = _repo_directory(token.rstrip(_PATH_TRAILING_PUNCTUATION))
+        candidate = _repo_directory(token.rstrip(_PATH_TRAILING_PUNCTUATION), git_top_level=True)
         if candidate is not None:
             return candidate
     return None
