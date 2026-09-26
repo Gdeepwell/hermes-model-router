@@ -2657,7 +2657,9 @@ def _preference_sentence(names: Iterable[str], cfg: Dict[str, Any], *, model_par
 
 def _worker_order_note(request: Dict[str, Any], cfg: Dict[str, Any]) -> str:
     """Refresh a conductor's capacity advice without reclassifying its goal."""
-    if _find_delegate_tool(request) is None and not claude_delegation.offered(_tool_names(request)):
+    names = set(_tool_names(request))
+    direct_claude = {claude_delegation.TOOL_NAME, f"mcp__{claude_delegation.TOOL_NAME}"}
+    if _find_delegate_tool(request) is None and not names & direct_claude:
         return ""
     order = _preference_sentence(_delegation_target_names(), cfg, model_param=_host_delegate_has_model(request))
     return ("\n\n[ROUTER] Current worker order replaces earlier capacity advice. " + order) if order else ""
