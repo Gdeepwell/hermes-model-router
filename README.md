@@ -878,10 +878,11 @@ before a gateway message is dispatched.
 `router_config.local.yaml` that still has them keeps working: at load time the
 router reads `workflow: codex` (or `enabled: false`) as all three Claude models
 off, and `workflow: claude_delegation` (or `enabled: true`) as on for each Claude
-model the local file does not switch itself. The dashboard shows the same, and
-its next save writes those three switches into the local file and removes
-`workflow` and `claude_delegation.enabled`, so the file says directly what it
-means. A `workflow` posted by a dashboard tab opened before the upgrade is
+model the local file does not switch itself. The dashboard shows the same. Its
+first save writes those three switches into the local file and drops `workflow`
+and `claude_delegation.enabled`; a later save removes any switch that equals the
+shipped default, as every save keeps only the delta, with no change in effect.
+A `workflow` posted by a dashboard tab opened before the upgrade is
 ignored.
 
 ### Claude delegation and the usage guard

@@ -13,17 +13,21 @@ CLAUDE_OFF = "Claude workers are switched off in Settings. The parent model is u
 def claude_switched_off(account, model, cfg):
     """Whether a Claude worker may not run: the Claude target its model maps to is off.
 
-    A Claude model the delegation tiers do not name needs any Claude switch on.
-    The switch alone decides, not the cooldown: a cooling tier is a wait, not a
-    reason to stop a child mid-task.
+    A model the delegation tiers do not list (a dated snapshot, say) maps to its
+    target through Hermes's own ``delegation.targets``; one neither names needs
+    any Claude switch on. The switch alone decides, not the cooldown: a cooling
+    tier is a wait, not a reason to stop a child mid-task.
     """
     model = str(model or "")
     if account != "anthropic" and not model.startswith("claude-"):
         return False
-    from . import claude_delegation
+    from . import claude_delegation, _delegation_targets_detail
 
-    target = claude_delegation.target_for_model(model, cfg)
-    targets = (target,) if target else tuple(claude_delegation.TARGET_FOR_TIER.values())
+    claude_targets = tuple(claude_delegation.TARGET_FOR_TIER.values())
+    target = claude_delegation.target_for_model(model, cfg) or next(
+        (name for name, spec in _delegation_targets_detail().items()
+         if name in claude_targets and spec.get("model") == model), None)
+    targets = (target,) if target else claude_targets
     switches = cfg.get("callable") or {}
     return not any(switches.get(name) is True for name in targets)
 

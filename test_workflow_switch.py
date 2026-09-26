@@ -165,8 +165,19 @@ class LegacyLocalFileTests(unittest.TestCase):
                             "callable:\n  sonnet5: true\n")
                 self.assertEqual(_claude(cfg), dict.fromkeys(CLAUDE, False))
 
-    def test_an_unknown_workflow_or_a_non_bool_flag_gives_no_verdict(self):
+    def test_an_unknown_workflow_lets_the_delegation_flag_decide(self):
+        # As in 1.19, where an unknown workflow meant claude_delegation only via the flag.
+        cfg = _load("workflow: bogus\nclaude_delegation:\n  enabled: true\n")
+        self.assertEqual(_claude(cfg), dict.fromkeys(CLAUDE, True))
+        self.assertNotIn("workflow", cfg)
+        self.assertNotIn("enabled", cfg["claude_delegation"])
+        cfg = _load("workflow: bogus\nclaude_delegation:\n  enabled: false\ncallable:\n  sonnet5: true\n")
+        self.assertEqual(_claude(cfg), dict.fromkeys(CLAUDE, False))
+
+    def test_an_unknown_workflow_alone_or_a_non_bool_flag_gives_no_verdict(self):
+        self.assertIsNone(model_router._legacy_claude_verdict({"workflow": "bogus"}))
         for local in ("workflow: gemini\ncallable: {sonnet5: true}\n",
+                      "workflow: bogus\ncallable: {sonnet5: true}\n",
                       "claude_delegation:\n  enabled: 'yes'\ncallable: {sonnet5: true}\n"):
             with self.subTest(local=local):
                 cfg = _load(local)
@@ -413,6 +424,29 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(result, "spawned")
         result, call = self._spawn(dict.fromkeys(CLAUDE, False), "terra", targets)
         self.assertEqual(result, "spawned")
+
+    def test_a_running_claude_child_on_an_unlisted_snapshot_obeys_its_targets_switch(self):
+        # Hermes's delegation.targets.opus5 names a dated snapshot the delegation tiers do not list.
+        targets = {"opus5": {"provider": "anthropic", "model": "claude-opus-5-5-20260101"},
+                   "terra": {"provider": "openai-codex", "model": "gpt-terra"}}
+        snapshot = "claude-opus-5-5-20260101"
+        with patch.object(model_router, "_delegation_targets_detail", return_value=targets):
+            self.assertEqual(worker_admission.refusal(
+                "anthropic", snapshot, {"callable": {"opus5": False, "sonnet5": False, "haiku": True}}),
+                self.MESSAGE)
+            self.assertEqual(worker_admission.refusal(
+                "anthropic", snapshot, {"callable": {"opus5": True, "sonnet5": False, "haiku": False}}), "")
+            cfg = {"enabled": True, "callable": {"opus5": True, "haiku": True}}
+            downstream = Mock(return_value="Claude continued")
+            request = {"model": snapshot, "messages": [{"role": "user", "content": "Continue"}]}
+            with patch.object(model_router, "_load_config", side_effect=lambda: json.loads(json.dumps(cfg))):
+                kwargs = dict(request=request, original_request=request, next_call=downstream,
+                              provider="anthropic", platform="subagent", turn_id="root:sa-2")
+                self.assertEqual(model_router.run_llm_with_transient_failover(**kwargs), "Claude continued")
+                cfg["callable"]["opus5"] = False
+                stopped = model_router.run_llm_with_transient_failover(**kwargs)
+            self.assertIn("ROUTER WORKER STOPPED", stopped.output_text)
+            downstream.assert_called_once()
 
     def test_a_running_claude_child_stops_once_its_model_is_switched_off(self):
         cfg = {"enabled": True, "callable": {"sonnet5": True}}

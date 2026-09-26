@@ -598,14 +598,15 @@ _CLAUDE_SWITCHES: Tuple[str, ...] = ("opus5", "sonnet5", "haiku")
 def _legacy_claude_verdict(local: Dict[str, Any]) -> Optional[bool]:
     """What a pre-1.20 local file said about Claude, or None when it said nothing.
 
-    ``workflow`` decides when set (``codex`` = off, ``claude_delegation`` = on,
-    anything else = no verdict); a null or blank ``workflow`` counts as absent, so
-    ``claude_delegation.enabled`` then decides if it is a bool. Read from
+    ``workflow: codex`` means off and ``workflow: claude_delegation`` means on.
+    Any other value, null or blank included, counts as absent, so
+    ``claude_delegation.enabled`` then decides if it is a bool (as in 1.19, where
+    an unknown workflow ran Claude only through that flag). Read from
     router_config.local.yaml only: the shipped file no longer has either key.
     """
     name = str(local.get("workflow") or "").strip().casefold()
-    if name:
-        return {"codex": False, "claude_delegation": True}.get(name)
+    if name in ("codex", "claude_delegation"):
+        return name == "claude_delegation"
     block = local.get("claude_delegation")
     flag = block.get("enabled") if isinstance(block, dict) else None
     return flag if isinstance(flag, bool) else None
