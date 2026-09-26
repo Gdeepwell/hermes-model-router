@@ -81,6 +81,27 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
             resolved = router._goal_repository(f"[sonnet-review] Review {scratch} then {repo}")
         self.assertEqual(resolved, repo.resolve())
 
+    def test_goal_repository_resolves_a_backticked_repository_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review `{repo}`")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_resolves_a_parenthesised_repository_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review ({repo})")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_still_resolves_a_plain_repository_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self._git_repo(directory)
+            resolved = router._goal_repository(f"[sonnet-review] Review {repo}")
+        self.assertEqual(resolved, repo.resolve())
+
+    def test_goal_repository_does_not_take_a_url_as_a_path(self):
+        self.assertIsNone(router._goal_repository("[sonnet-review] Review https://example.com/a"))
+
     def test_workspace_path_in_child_request_resolves_a_review_without_goal_path(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = self._git_repo(directory)

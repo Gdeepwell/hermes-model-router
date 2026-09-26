@@ -4329,9 +4329,9 @@ def _recent_verified_opus5_route(cfg: Dict[str, Any]) -> bool:
     return False
 
 
-_GOAL_ABSOLUTE_PATH = re.compile(r"(?<!\S)(?:/|~/)\S+")
+_GOAL_ABSOLUTE_PATH = re.compile(r"(?:(?<!\S)|(?<=[`(\"']))(?:/|~/)\S+")
 _WORKSPACE_PATH_BLOCK = re.compile(r"(?im)^WORKSPACE PATH:\s*\r?\n\s*([^\r\n]+)")
-_PATH_TRAILING_PUNCTUATION = ".,;:!?)]}\"'"
+_PATH_TRAILING_PUNCTUATION = ".,;:!?)]}\"'`"
 
 
 def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path]:

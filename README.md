@@ -196,9 +196,10 @@ tools and project behaviour belong to the installed, authenticated CLI; this
 plugin only supplies the prompt, working directory and bounded tool flags. A
 `[sonnet-review]` or `[opus-review]` is therefore a read-only replacement for
 one call, not an agent. For those delegated labels, the bridge resolves the
-repository from an absolute path in the goal, then configured aliases, then the
-child request's `WORKSPACE PATH:` system-prompt block, then `default_repo`; a
-nonexistent configured path is skipped. The same bridge can take the explicit `[opus]` / `[opus5]`
+repository from an absolute path in the goal that lies inside a Git work tree
+(its top level is used), then configured aliases, then the child request's
+`WORKSPACE PATH:` system-prompt block, then `default_repo`; a nonexistent
+configured path is skipped. The same bridge can take the explicit `[opus]` / `[opus5]`
 coding override when `coding_agent.enabled` admits it; that is the bounded
 single-call coding path, configured by `coding_agent.default_repo`, aliases and
 its CLI limits, not a `delegate_claude` worker. Choose this path when the work
