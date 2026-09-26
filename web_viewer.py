@@ -320,6 +320,70 @@ def _save_default_model(requested: str, config: dict, *, hermes=None, persist=Tr
     return None
 
 
+def _claude_parent_options(config: dict) -> list:
+    """Claude models Hermes itself may start on: {key, provider, model} per switched-on tier.
+
+    A Claude tier is no router tier (no ``models`` entry), so it can never be the
+    router's ``default_model``; it can still be the model Hermes launches with, on
+    Hermes's own ``anthropic`` provider. A switched-off tier is not offered.
+    """
+    tiers = (config.get("claude_delegation") or {}).get("tiers") or {}
+    callable_tiers = config.get("callable") or {}
+    options = []
+    for tier, target in _CLAUDE_TARGET_FOR_TIER.items():
+        model = str(tiers.get(tier) or "")
+        if model and callable_tiers.get(target) is True:
+            options.append({"key": target, "provider": "anthropic", "model": model})
+    return options
+
+
+def _save_main_parent(key, config: dict, *, hermes=None, persist=True) -> str | None:
+    """Move the model Hermes starts on to ``key``: a router tier or a Claude target.
+
+    Posted only when the operator picks a parent, never on unrelated saves, so it
+    may move a parent that is on another account (``_save_default_model`` never
+    does). A router tier also becomes ``default_model``; a Claude parent leaves the
+    router's default route and conductor where they are. An error string, or None.
+    """
+    key = str(key or "")
+    stamp, hermes = _read_hermes_snapshot() if hermes is None else (None, hermes)
+    if not hermes:
+        return _hermes_unreadable_message()
+    if (config.get("callable") or {}).get(key) is False:
+        return f"'{key}' is switched off; switch it on before starting Hermes on it"
+    claude = next((o for o in _claude_parent_options(config) if o["key"] == key), None)
+    if claude is None:
+        if not str((config.get("models") or {}).get(key) or ""):
+            return f"'{key}' is not a model Hermes can start on"
+        if _hermes_parent(hermes) != {"provider": _tier_provider(key, config),
+                                      "model": str(config["models"][key])}:
+            error = _sync_hermes_default_model(key, config, hermes, stamp, persist=persist)
+            if error:
+                return error
+        config["default_model"] = key
+        return None
+    if _hermes_parent(hermes) == {"provider": claude["provider"], "model": claude["model"]}:
+        return None
+    model = hermes.get("model")
+    if not isinstance(model, dict):
+        model = {}
+        hermes["model"] = model
+    model["default"], model["provider"] = claude["model"], claude["provider"]
+    # What Hermes's own `hermes model` anthropic flow writes: the anthropic runtime
+    # fixes its endpoint itself, and a Codex api_mode or a stale base URL / key left
+    # behind would send the Claude parent down the wrong transport.
+    for stale in ("api_mode", "base_url", "api_key"):
+        model.pop(stale, None)
+    if persist:
+        try:
+            _write_hermes_config(hermes, stamp)
+        except HermesConfigChanged as exc:
+            return str(exc)
+        except Exception as exc:
+            return f"Could not move Hermes's parent to {claude['model']}: {exc}"
+    return None
+
+
 def _tier_provider(tier: str, config: dict) -> str:
     return str((config.get("tier_providers") or {}).get(tier) or "openai-codex")
 
@@ -1248,6 +1312,7 @@ const I18N = {
     'settings.main.sub': 'Hermes starts on the first model; when its provider is out, the rest take over in order. The first one also takes the default route and coordinates (conductor).',
     'settings.main.primary': 'starts here',
     'settings.main.external': 'Hermes currently starts on {model}, set outside the router: the first entry here only sets the default route and the conductor.',
+    'settings.main.claude': 'Hermes starts on Claude. The router\'s default route and conductor stay on {tier}.',
     'settings.workers.heading': 'Workers',
     'settings.workers.sub': 'Delegated agents: which model they get when the call names none, and where they go when it is out.',
     'settings.workers.codex': 'Codex workers',
@@ -1479,6 +1544,7 @@ const I18N = {
     'settings.main.sub': 'A Hermes az első modellen indul; ha annak a szolgáltatója kiesik, a többi sorban átveszi. Az első viszi az alapértelmezett routingot és a koordinálást (conductor) is.',
     'settings.main.primary': 'itt indul',
     'settings.main.external': 'A Hermes most a(z) {model} modellen indul, amit a routeren kívül állítottak be: az első elem itt csak az alapértelmezett routingot és a conductort állítja.',
+    'settings.main.claude': 'A Hermes Claude-dal indul. A router alapértelmezett routingja és conductora marad: {tier}.',
     'settings.workers.heading': 'Workerek',
     'settings.workers.sub': 'Delegált agentek: melyik modellt kapják, ha a hívás nem nevez meg egyet, és hová mennek, ha az kiesik.',
     'settings.workers.codex': 'Codex workerek',
@@ -1796,7 +1862,9 @@ for(const id of ['main-chain','worker-settings']){
       chains[el.dataset.fb]=(chains[el.dataset.fb]||[]).concat([{provider,model}]);
       renderSettings();await saveSettings();return;
     }
-    if(el.id==='default-model-select')currentConfig.default_model=el.value;
+    // A pick here moves Hermes's own parent, whichever account it is on; posted
+    // once, with this save only, so no unrelated save can move the parent.
+    if(el.id==='default-model-select'){if(!el.value)return;currentConfig.main_parent=el.value;if((currentConfig.routable||[]).includes(el.value))currentConfig.default_model=el.value}
     else if(el.matches('[data-worker-model]'))currentConfig.worker_model=Object.assign({},currentConfig.worker_model,{tier:el.value});
     else if(el.dataset.defaultTier)currentConfig.accounts[el.dataset.defaultTier].delegation.default_tier=el.value;
     else return;
@@ -1920,23 +1988,34 @@ function chainRow(name,desc,body){return `<div class="pref-kind">${name?`<div cl
 // The pair the main agent starts on: Hermes's own parent when this router serves
 // it, else the router tier picked as first entry.
 function mainPrimary(){const parent=currentConfig.hermes_parent||{};if(parent.model&&!parent.router_model)return parent;const o=(currentConfig.fallback_options||[]).find(x=>x.key===currentConfig.default_model);return o?{provider:o.provider,model:o.model}:parent}
-// Main agent: ONE chain. Entry 1 is default_model (the model Hermes starts on,
-// the default route and the conductor); the rest is Hermes's fallback_providers.
-// It used to be two settings, and the primary kept showing up as its own fallback.
+// Main agent: ONE chain. Entry 1 is the model Hermes starts on; the rest is
+// Hermes's fallback_providers. It used to be two settings, and the primary kept
+// showing up as its own fallback. Entry 1 offers the router's own tiers (which
+// also become default_model: the default route and the conductor) and the
+// switched-on Claude models (Hermes's anthropic provider; the router's default
+// route and conductor stay where they are).
 function renderMainChain(modelLabels,models){
   const box=$('main-chain');if(!box)return;
   const chains=currentConfig.hermes_fallback=currentConfig.hermes_fallback||{};
   const primary=mainPrimary(),parent=currentConfig.hermes_parent||{};
   chains.orchestrator=(chains.orchestrator||[]).filter(e=>!(e.provider===primary.provider&&e.model===primary.model)&&!fallbackRouteOff(e));
-  const chain=chains.orchestrator,defaultModel=currentConfig.default_model||'terra';
-  // Only a routable tier can start Hermes; a delegation-only target has no model
-  // entry in the router and raises on the first decision.
-  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m));
+  const chain=chains.orchestrator,defaultModel=currentConfig.default_model||'terra',callable=currentConfig.callable||{};
+  // Only a routable tier can start Hermes as a router tier; a delegation-only target has
+  // no model entry in the router and raises on the first decision. A switched-off tier
+  // is not offered, except the current default, which must stay visible.
+  const orchestrators=(currentConfig.routable||[]).filter(m=>models.includes(m)&&(callable[m]!==false||m===defaultModel));
+  const claude=currentConfig.parent_options||[];
+  const external=!!(parent.model&&!parent.router_model);
+  const claudeParent=external?claude.find(o=>o.provider===parent.provider&&o.model===parent.model):null;
+  const selected=external?(claudeParent?claudeParent.key:''):defaultModel;
   const first=`<span class="pref-chip primary"><span class="rank">1.</span><select id="default-model-select">`
-    +(orchestrators.length?orchestrators:models).map(m=>`<option value="${m}"${m===defaultModel?' selected':''}>${modelLabels[m]}</option>`).join('')
+    +(external&&!claudeParent?`<option value="" selected disabled>${escapeHtml(parent.model)}</option>`:'')
+    +(orchestrators.length?orchestrators:models).map(m=>`<option value="${m}"${m===selected?' selected':''}>${modelLabels[m]}</option>`).join('')
+    +claude.map(o=>`<option value="${o.key}"${o.key===selected?' selected':''}>${modelLabels[o.key]||o.key}</option>`).join('')
     +`</select><span class="chain-account">${t('settings.main.primary')}</span></span>`;
   box.innerHTML=chainRow('','',first+fallbackChips('orchestrator',chain,modelLabels,2)+fallbackPicker('orchestrator',chain,modelLabels,primary))
-    +(parent.model&&!parent.router_model?`<div class="pref-note">${t('settings.main.external').replace('{model}',parent.model)}</div>`:'')}
+    +(external&&!claudeParent?`<div class="pref-note">${t('settings.main.external').replace('{model}',escapeHtml(parent.model))}</div>`
+      :claudeParent?`<div class="pref-note">${t('settings.main.claude').replace('{tier}',modelLabels[defaultModel]||defaultModel)}</div>`:'')}
 function renderWorkers(modelLabels){
   const box=$('worker-settings');if(!box)return;
   const worker=currentConfig.worker_model||{},options=worker.options||[];
@@ -1984,7 +2063,8 @@ function mutatePreference(kind,index,act){
 
 function saveSettings(){
   if(!currentConfig)return Promise.resolve();
-  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,effort:currentConfig.effort||{},claude_reasoning_effort:(currentConfig.claude_reasoning_effort||{}).levels||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,main_parent:currentConfig.main_parent||undefined,effort:currentConfig.effort||{},claude_reasoning_effort:(currentConfig.claude_reasoning_effort||{}).levels||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  delete currentConfig.main_parent;
   settingsPending++;settingsLoadGeneration++;
   settingsSaveQueue=settingsSaveQueue.then(async()=>{
     const statusEl=$('settings-status');
@@ -2218,6 +2298,11 @@ def _save_config_payload(data):
             error = _save_default_model(str(data["default_model"]), config, hermes=hermes, persist=False)
             if error:
                 return 400, {"success": False, "error": error}
+        # Before the fallback chain: that save drops the (new) parent from its own chain.
+        if "main_parent" in data:
+            error = _save_main_parent(data["main_parent"], config, hermes=hermes, persist=False)
+            if error:
+                return 400, {"success": False, "error": error}
         if "hermes_fallback" in data:
             error = _save_hermes_fallback(data["hermes_fallback"], config, hermes=hermes, persist=False)
             if error:
@@ -2389,6 +2474,7 @@ class Handler(BaseHTTPRequestHandler):
                         "fallback_options": _fallback_chain_options(config),
                         "hermes_parent": dict(_hermes_parent(_read_hermes_config()),
                                               router_model=_parent_is_router_model(config)),
+                        "parent_options": _claude_parent_options(config),
                         "worker_model": _worker_model_status(config),
                         "accounts": _accounts_status(config),
                         "tier_accounts": _tier_accounts(config),

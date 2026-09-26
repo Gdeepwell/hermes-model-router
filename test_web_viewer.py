@@ -2906,7 +2906,11 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
 
     def _request(self, config_path, method, payload=None):
         data = None if payload is None else json.dumps(payload).encode("utf-8")
+        # A save that moves the parent writes the Hermes config: keep it beside the
+        # router config. Unpatched, a run wrote a Terra stub over the real
+        # ~/.hermes/config.yaml whenever HERMES_HOME pointed there.
         with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+             patch.object(web_viewer, "HERMES_CONFIG_PATH", config_path.with_name("hermes-config.yaml")), \
              patch.object(web_viewer, "_router_module", return_value=None):
             server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2978,7 +2982,11 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
             with patch.object(web_viewer, "_read_hermes_snapshot", return_value=(None, {
                 "model": {"default": "gpt-5.6-terra", "provider": "openai-codex"},
             })), patch.object(web_viewer, "_hermes_chain", return_value=[]):
+                real_hermes = web_viewer.HERMES_CONFIG_PATH
+                before = real_hermes.read_bytes() if real_hermes.exists() else None
                 status, body = self._request(config_path, "POST", payload)
+                after = real_hermes.read_bytes() if real_hermes.exists() else None
+            self.assertEqual(after, before, "the save wrote the real Hermes config")
             local = config_path.with_name("router_config.local.yaml")
             written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else {}
         self.assertEqual(status, 200, body)
@@ -3274,7 +3282,11 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
 
     def _request(self, config_path, method, payload=None):
         data = None if payload is None else json.dumps(payload).encode("utf-8")
+        # A save that moves the parent writes the Hermes config: keep it beside the
+        # router config. Unpatched, a run wrote a Terra stub over the real
+        # ~/.hermes/config.yaml whenever HERMES_HOME pointed there.
         with patch.object(web_viewer, "CONFIG_PATH", config_path), \
+             patch.object(web_viewer, "HERMES_CONFIG_PATH", config_path.with_name("hermes-config.yaml")), \
              patch.object(web_viewer, "_router_module", return_value=None):
             server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -3515,3 +3527,136 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         # The renderer disables both selects whenever available is false --
         # already covered by test_renderClaudeReasoningEffort_disables_selects_and_shows_reason_when_unavailable,
         # which asserts on the JS source directly rather than re-deriving a DOM here.
+
+
+
+class MainParentTests(DashboardProbeMixin, unittest.TestCase):
+    """The main agent's first entry can start Hermes on a switched-on Claude model.
+
+    The picker used to offer only the router's own tiers, so a Claude parent could
+    only be set by hand in ~/.hermes/config.yaml.
+    """
+
+    CONFIG = {
+        "models": {"terra": "gpt-5.6-terra", "sol": "gpt-6-sol", "qwen": "qwen3.7-plus"},
+        "tier_providers": {"terra": "openai-codex", "sol": "openai-codex", "qwen": "qwen-token",
+                           "opus5": "anthropic", "sonnet5": "anthropic", "haiku": "anthropic"},
+        "callable": {"terra": True, "sol": True, "qwen": False,
+                     "opus5": True, "sonnet5": True, "haiku": False},
+        "claude_delegation": {"tiers": {"haiku": "claude-haiku-4-5-20251001",
+                                        "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
+        "default_model": "terra",
+    }
+    HERMES = ("model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n  api_mode: codex_responses\n"
+              "agent:\n  max_turns: 150\nfallback_providers:\n- provider: anthropic\n  model: claude-opus-5-5\n")
+
+    def _config(self):
+        return json.loads(json.dumps(self.CONFIG))
+
+    def _hermes_file(self, directory, content=None):
+        target = Path(directory) / "config.yaml"
+        target.write_text(self.HERMES if content is None else content, encoding="utf-8")
+        return target
+
+    def test_only_switched_on_claude_models_are_offered(self):
+        options = web_viewer._claude_parent_options(self._config())
+        self.assertEqual(options, [
+            {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"},
+            {"key": "opus5", "provider": "anthropic", "model": "claude-opus-5-5"},
+        ])
+
+    def test_picking_opus_moves_hermes_onto_anthropic_and_keeps_the_rest(self):
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_main_parent("opus5", config))
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+            backups = list(Path(directory).glob("config.yaml.bak-router-*"))
+        self.assertEqual(written["model"], {"default": "claude-opus-5-5", "provider": "anthropic"})
+        self.assertEqual(written["agent"], {"max_turns": 150})
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(config["default_model"], "terra", "a Claude parent leaves the router's route alone")
+
+    def test_picking_a_router_tier_from_a_claude_parent_moves_it_back(self):
+        """_save_default_model never moves a parent on another account; an explicit pick must."""
+        config = self._config()
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory, "model:\n  default: claude-opus-5-5\n  provider: anthropic\n")
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                self.assertIsNone(web_viewer._save_main_parent("sol", config))
+            written = web_viewer.yaml.safe_load(target.read_text(encoding="utf-8"))
+        self.assertEqual((written["model"]["default"], written["model"]["provider"], written["model"]["api_mode"]),
+                         ("gpt-6-sol", "openai-codex", "codex_responses"))
+        self.assertEqual(config["default_model"], "sol")
+
+    def test_a_switched_off_or_unknown_model_is_refused_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = self._hermes_file(directory)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
+                for key in ("haiku", "qwen", "nonsense", ""):
+                    self.assertIsNotNone(web_viewer._save_main_parent(key, self._config()), key)
+            self.assertEqual(target.read_text(encoding="utf-8"), self.HERMES)
+            self.assertEqual(list(Path(directory).glob("config.yaml.bak-router-*")), [])
+
+    def test_the_payload_saves_the_parent_and_drops_it_from_its_own_fallbacks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shipped = root / "router_config.yaml"
+            shipped.write_text(web_viewer.yaml.safe_dump(self.CONFIG), encoding="utf-8")
+            hermes = self._hermes_file(directory)
+            with patch.object(web_viewer, "CONFIG_PATH", shipped), \
+                 patch.object(web_viewer, "HERMES_CONFIG_PATH", hermes):
+                status, body = web_viewer._save_config_payload({
+                    "default_model": "terra", "main_parent": "opus5",
+                    "hermes_fallback": {"orchestrator": [
+                        {"provider": "anthropic", "model": "claude-opus-5-5"},
+                        {"provider": "openai-codex", "model": "gpt-6-sol"}]},
+                })
+            written = web_viewer.yaml.safe_load(hermes.read_text(encoding="utf-8"))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(written["model"]["default"], "claude-opus-5-5")
+        self.assertEqual(written["fallback_providers"], [{"provider": "openai-codex", "model": "gpt-6-sol"}])
+
+    def _render(self, config):
+        source = "\n".join(self.javascript_function(name) for name in
+                           ("escapeHtml", "fallbackOptionLabel", "fallbackRouteOff", "fallbackChips",
+                            "fallbackPicker", "chainRow", "mainPrimary", "renderMainChain"))
+        labels = {m: m.upper() for m in ("terra", "sol", "qwen", "opus5", "sonnet5", "haiku")}
+        probe = (self.i18n_runtime()
+                 + "const box={innerHTML:''};function $(id){return id==='main-chain'?box:null}"
+                 + "let currentConfig=" + json.dumps(config) + ";" + source
+                 + "\nrenderMainChain(" + json.dumps(labels) + ",['terra','sol','qwen','opus5','sonnet5','haiku']);"
+                 + "console.log(box.innerHTML);")
+        return subprocess.run(["node", "-e", probe], check=True, text=True, capture_output=True).stdout
+
+    def _page_config(self, parent):
+        return {"default_model": "terra", "routable": ["qwen", "sol", "terra"],
+                "callable": self.CONFIG["callable"],
+                "parent_options": web_viewer._claude_parent_options(self._config()),
+                "hermes_parent": parent, "fallback_options": [], "hermes_fallback": {}}
+
+    def test_the_picker_offers_claude_and_selects_a_claude_parent(self):
+        html = self._render(self._page_config(
+            {"provider": "anthropic", "model": "claude-opus-5-5", "router_model": False}))
+        select = html[html.index('<select id="default-model-select">'):html.index("</select>")]
+        self.assertIn('<option value="opus5" selected>OPUS5</option>', select)
+        self.assertIn('value="sonnet5"', select)
+        self.assertNotIn('value="haiku"', select, "switched off")
+        self.assertNotIn('value="qwen"', select, "switched off")
+        self.assertIn('value="terra"', select)
+        english, _ = self.i18n("settings.main.claude")
+        self.assertIn(english.split("{tier}")[0].replace("\\'", "'"), html.replace("&#39;", "'"))
+
+    def test_a_router_parent_selects_its_tier(self):
+        html = self._render(self._page_config(
+            {"provider": "openai-codex", "model": "gpt-5.6-terra", "router_model": True}))
+        self.assertIn('<option value="terra" selected>', html)
+        self.assertIn('value="opus5"', html)
+
+    def test_a_pick_is_posted_once_as_main_parent(self):
+        handler = HTML[HTML.index("if(el.id==='default-model-select')"):]
+        self.assertIn("currentConfig.main_parent=el.value", handler[:300])
+        save = self.javascript_function("saveSettings")
+        self.assertIn("main_parent:currentConfig.main_parent||undefined", save)
+        self.assertLess(save.index("main_parent:"), save.index("delete currentConfig.main_parent"))

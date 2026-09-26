@@ -416,8 +416,12 @@ leaf simply dies mid-task. An empty list there means "no fallback", which is a
 different instruction from the key being absent.
 
 On the page the orchestrator chain is not a separate setting: **Main agent** shows
-one chain whose first entry is `default_model` (the model Hermes starts on) and
-whose remaining entries are `fallback_providers`. Setting the default and its
+one chain whose first entry is the model Hermes starts on and whose remaining
+entries are `fallback_providers`. The first entry offers the router's own tiers
+(picking one also sets `default_model`) and every Claude model whose switch is
+on. Picking a Claude model writes `model.default`/`model.provider: anthropic`
+(no `api_mode` or base URL, as `hermes model` writes it) and leaves
+`default_model`, the default route and the conductor, where it was. Setting the default and its
 fallbacks in two places let the primary sit in its own fallback list — a step
 that can never help, since when its provider is out so is that entry — so a save
 drops the parent from `fallback_providers`. A route whose tier is switched off is
@@ -1392,6 +1396,14 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.21.0** — The main agent's first entry also offers the switched-on Claude
+models, so Hermes can be started on Opus (or Sonnet) from the dashboard. Picking
+one writes `model: {default: <claude model>, provider: anthropic}` into
+`~/.hermes/config.yaml` and leaves `default_model` alone. Picking a router tier
+moves a Claude parent back. The pick is sent only with the save it triggers, so
+no other save can move the parent. The effort-save tests no longer write
+their Terra stub over the Hermes config in `HERMES_HOME`.
 
 **1.20.0** — The *Codex only* / *Codex + Claude* workflow switch is retired.
 Claude is an account like Qwen or Grok: available exactly while at least one of
