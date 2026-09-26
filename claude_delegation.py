@@ -17,6 +17,7 @@ import inspect
 import json
 import logging
 import os
+import sys
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -116,6 +117,7 @@ _REASONING_BRIDGE_LOCK = threading.Lock()
 _REASONING_BRIDGE_INSTALLED = False
 _REASONING_BRIDGE_REASON = "not yet installed"
 _REASONING_BRIDGE_ORIGINAL: Optional[Callable[..., Any]] = None
+_REASONING_BRIDGE_WRAPPER: Optional[Callable[..., Any]] = None
 
 
 @contextmanager
@@ -200,8 +202,10 @@ def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optiona
     current = getattr(delegate_tool, "_resolve_child_runtime", None)
     if current is None:
         return False, "tools.delegate_tool has no _resolve_child_runtime to wrap", delegate_tool, None
+    if not callable(current):
+        return False, "tools.delegate_tool._resolve_child_runtime is not callable", delegate_tool, None
 
-    already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _wrapped_marker_target()
+    already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _REASONING_BRIDGE_WRAPPER
     if already_wrapped:
         return True, "", delegate_tool, current
 
@@ -261,15 +265,20 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
     by someone" and re-wraps the SAME underlying original with its own
     wrapper (reading its own ``_REASONING_SCOPE``) instead of refusing.
     """
-    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL
+    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL, _REASONING_BRIDGE_WRAPPER
     with _REASONING_BRIDGE_LOCK:
+        delegate_tool = sys.modules.get("tools.delegate_tool")
+        if (_REASONING_BRIDGE_INSTALLED and _REASONING_BRIDGE_WRAPPER is not None
+                and delegate_tool is not None
+                and getattr(delegate_tool, "_resolve_child_runtime", None) is _REASONING_BRIDGE_WRAPPER):
+            return True, ""
         ok, reason, delegate_tool, current = _validate_reasoning_bridge_seam()
         if not ok:
             _REASONING_BRIDGE_INSTALLED = False
             _REASONING_BRIDGE_REASON = reason
             return False, _REASONING_BRIDGE_REASON
 
-        already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _wrapped_marker_target()
+        already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _REASONING_BRIDGE_WRAPPER
         if already_wrapped:
             _REASONING_BRIDGE_INSTALLED = True
             _REASONING_BRIDGE_REASON = ""
@@ -285,14 +294,10 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
             return False, _REASONING_BRIDGE_REASON
 
         _REASONING_BRIDGE_ORIGINAL = original
-        globals()["_reasoning_bridge_wrapper_marker"] = wrapper
+        _REASONING_BRIDGE_WRAPPER = wrapper
         _REASONING_BRIDGE_INSTALLED = True
         _REASONING_BRIDGE_REASON = ""
         return True, ""
-
-
-def _wrapped_marker_target() -> Any:
-    return globals().get("_reasoning_bridge_wrapper_marker")
 
 
 def reasoning_bridge_status() -> Tuple[bool, str]:
@@ -316,20 +321,20 @@ def _reset_reasoning_bridge_for_tests() -> None:
     Never leaves a wrapped host function installed for later, unrelated test
     modules or a live process.
     """
-    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL
+    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL, _REASONING_BRIDGE_WRAPPER
     with _REASONING_BRIDGE_LOCK:
         original = _REASONING_BRIDGE_ORIGINAL
         if original is not None:
             try:
                 import tools.delegate_tool as delegate_tool
-                if getattr(delegate_tool, "_resolve_child_runtime", None) is _wrapped_marker_target():
+                if getattr(delegate_tool, "_resolve_child_runtime", None) is _REASONING_BRIDGE_WRAPPER:
                     delegate_tool._resolve_child_runtime = original
             except Exception:
                 pass
         _REASONING_BRIDGE_ORIGINAL = None
+        _REASONING_BRIDGE_WRAPPER = None
         _REASONING_BRIDGE_INSTALLED = False
         _REASONING_BRIDGE_REASON = "not yet installed"
-        globals().pop("_reasoning_bridge_wrapper_marker", None)
 
 
 # Hermes's Tool Search defers plugin tools: a live parent request carries only the
@@ -742,8 +747,8 @@ def _dispatch(args: Dict[str, Any]) -> str:
             return _error(message)
         from hermes_constants import parse_reasoning_effort
 
-        level = reasoning_effort_config(cfg)[tier]
-        reasoning_config = parse_reasoning_effort(level)
+        level = reasoning_effort_config(cfg).get(tier)
+        reasoning_config = parse_reasoning_effort(level) if level is not None else None
         if reasoning_config is None:
             message = f"Claude reasoning effort for {tier} is invalid"
             _audit(cfg, parent, requested, tier, outcome, "refused", message)

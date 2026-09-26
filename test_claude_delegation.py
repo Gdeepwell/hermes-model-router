@@ -6,9 +6,12 @@ route pinned to the anthropic provider. These tests cover the wing without any
 network or model call.
 """
 
+import ast
+import inspect
 import json
 import sys
 import tempfile
+import textwrap
 import time
 import types
 import unittest
@@ -351,6 +354,20 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("Claude reasoning effort is unavailable", entry["message"])
         self.assertIn("host seam moved", entry["message"])
 
+    def test_a_tier_without_a_reasoning_level_is_refused_and_audited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(True, "")), \
+                 patch.object(claude_delegation, "reasoning_effort_config", return_value={}):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(payload["error"], "Claude reasoning effort for sonnet is invalid")
+        self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertEqual(entry["message"], "Claude reasoning effort for sonnet is invalid")
+
 
 class ClaudeReasoningConfigTests(unittest.TestCase):
     def test_defaults_expose_only_editable_sonnet_and_opus_levels(self):
@@ -375,10 +392,21 @@ class ReasoningBridgeTests(unittest.TestCase):
 
     def test_a_missing_runtime_resolver_is_reported_as_unavailable(self):
         fake = types.ModuleType("tools.delegate_tool")
-        with patch.dict(sys.modules, {"tools.delegate_tool": fake}):
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
             ok, reason = claude_delegation.install_reasoning_bridge()
         self.assertFalse(ok)
         self.assertIn("_resolve_child_runtime", reason)
+
+    def test_a_non_callable_runtime_resolver_is_reported_as_unavailable(self):
+        fake = types.ModuleType("tools.delegate_tool")
+        fake._resolve_child_runtime = object()
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        fake_config._resolve_child_runtime = fake._resolve_child_runtime
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertFalse(ok)
+        self.assertIn("not callable", reason)
 
     def test_the_bridge_install_is_idempotent_and_records_availability(self):
         ok, reason = claude_delegation.install_reasoning_bridge()
@@ -388,6 +416,40 @@ class ReasoningBridgeTests(unittest.TestCase):
         ok2, reason2 = claude_delegation.install_reasoning_bridge()
         self.assertTrue(ok2, reason2)
         self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+    def test_an_unchanged_installed_seam_skips_full_validation(self):
+        def resolver(*, parent_agent, model, override_provider):
+            return {"model": model}
+
+        fake = types.ModuleType("tools.delegate_tool")
+        fake._resolve_child_runtime = resolver
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        fake_config._resolve_child_runtime = resolver
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            wrapper = fake._resolve_child_runtime
+            with patch.object(claude_delegation, "_validate_reasoning_bridge_seam",
+                              side_effect=AssertionError("full validation should not run")):
+                self.assertEqual(claude_delegation.install_reasoning_bridge(), (True, ""))
+        self.assertIs(fake._resolve_child_runtime, wrapper)
+
+    def test_a_replaced_installed_seam_is_revalidated(self):
+        def resolver(*, parent_agent, model, override_provider):
+            return {"model": model}
+
+        fake = types.ModuleType("tools.delegate_tool")
+        fake._resolve_child_runtime = resolver
+        fake_config = types.ModuleType("tools.delegate_tool_config")
+        fake_config._resolve_child_runtime = resolver
+        with patch.dict(sys.modules, {"tools.delegate_tool": fake, "tools.delegate_tool_config": fake_config}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
+            fake._resolve_child_runtime = resolver
+            with patch.object(claude_delegation, "_validate_reasoning_bridge_seam",
+                              return_value=(False, "host seam moved", fake, resolver)) as validate:
+                self.assertEqual(claude_delegation.install_reasoning_bridge(), (False, "host seam moved"))
+            validate.assert_called_once_with()
 
     def test_install_survives_a_second_module_copy_wrapping_the_seam_first(self):
         """A second import of this module (plugin reload, or importing it both as
@@ -638,12 +700,39 @@ class RealHostTests(unittest.TestCase):
 
     def test_the_depth_limit_holds_for_delegate_claude(self):
         """Nothing spawns from an agent at max_spawn_depth, whichever tool asked."""
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
         parent = SimpleNamespace(_delegate_depth=99)
         with patch("model_router._load_config", return_value=_cfg()), \
              patch.object(claude_delegation, "_host", lambda: (claude_delegation._host_delegate_task(), lambda: parent)), \
              patch.object(usage_guard, "read", return_value=_reading(10)):
             payload = json.loads(handle_delegate_claude({"tasks": [{"goal": "g"}]}))
         self.assertIn("depth limit", payload["error"].lower())
+
+    def test_the_child_builder_forwards_the_resolved_runtime_to_aiagent(self):
+        import tools.delegate_tool as delegate_tool
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(delegate_tool._build_child_agent)))
+        resolved_names = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "_resolve_child_runtime"
+            for target in ((node.targets if isinstance(node, ast.Assign) else [node.target]))
+            if isinstance(target, ast.Name)
+        }
+        self.assertTrue(resolved_names, "_build_child_agent must assign _resolve_child_runtime(...) to a name")
+        forwards_resolved_runtime = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AIAgent"
+            and any(keyword.arg is None and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id in resolved_names for keyword in node.keywords)
+            for node in ast.walk(tree)
+        )
+        self.assertTrue(forwards_resolved_runtime,
+                        "_build_child_agent must pass its resolved runtime to AIAgent as **<resolved name>")
 
     def test_a_scoped_child_construction_receives_the_scoped_reasoning_config(self):
         """Proves the bridge on the real host seam, called the way real construction calls it.
