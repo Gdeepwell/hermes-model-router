@@ -1760,6 +1760,21 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         self.assertNotIn('<select', qwen)
         self.assertNotIn('account.effort', qwen)
 
+    def test_claude_effort_dropdown_selects_default_when_the_tier_is_not_pinned(self):
+        card = self._card("anthropic", self.CLAUDE_INFO, {
+            "claude_reasoning_effort": {
+                "available": True,
+                "levels": {"sonnet": "medium", "opus": "high"},
+                "defaults": {"sonnet": "medium", "opus": "medium"},
+                "pinned": {"sonnet": False, "opus": True},
+            },
+        })
+        sonnet = card[card.index('data-claude-effort="sonnet"'):card.index('</select>', card.index('data-claude-effort="sonnet"'))]
+        opus = card[card.index('data-claude-effort="opus"'):card.index('</select>', card.index('data-claude-effort="opus"'))]
+        self.assertIn('<option value="" selected>settings.claude_effort.default', sonnet)
+        self.assertIn('<option value="">settings.claude_effort.default', opus)
+        self.assertNotIn('<option value="" selected>settings.claude_effort.default', opus)
+
     def test_each_effort_control_shares_its_model_row(self):
         import re
 
@@ -3312,11 +3327,15 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         with tempfile.TemporaryDirectory() as directory:
             status, payload = self._request(self._write_config(directory), "GET")
         self.assertEqual(status, 200)
-        self.assertEqual(payload["claude_reasoning_effort"]["levels"], {"sonnet": "medium", "opus": "medium"})
-        self.assertFalse(payload["claude_reasoning_effort"]["haiku_supported"])
-        self.assertNotIn("haiku", payload["claude_reasoning_effort"]["levels"])
+        effort = payload["claude_reasoning_effort"]
+        self.assertEqual(effort["levels"], {"sonnet": "medium", "opus": "medium"})
+        self.assertEqual(effort["defaults"], {"sonnet": "medium", "opus": "medium"})
+        self.assertEqual(effort["pinned"], {"sonnet": False, "opus": False})
+        self.assertFalse(effort["haiku_supported"])
+        self.assertNotIn("haiku", effort["levels"])
 
     def test_claude_reasoning_status_fallback_derives_haiku_support_from_the_delegation_module(self):
+        # These direct status probes never save, so CONFIG_PATH/HERMES_CONFIG_PATH need no patch.
         class BrokenDelegation:
             EDITABLE_REASONING_TIERS = ("sonnet", "opus", "haiku")
 
@@ -3331,18 +3350,20 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         self.assertFalse(status["available"])
         self.assertTrue(status["haiku_supported"])
 
-    def test_claude_reasoning_status_fallback_prints_the_exception_traceback_to_stderr(self):
+    def test_claude_reasoning_status_fallback_prints_each_broken_module_traceback_once(self):
         class BrokenDelegation:
             @staticmethod
             def reasoning_effort_config(config):
                 raise RuntimeError("reasoning configuration unavailable")
 
         stderr = io.StringIO()
-        with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+        with patch.object(web_viewer, "_CLAUDE_REASONING_TRACEBACKS", set(), create=True), \
+             patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
              contextlib.redirect_stderr(stderr):
             web_viewer._claude_reasoning_status(self.CONFIG)
+            web_viewer._claude_reasoning_status(self.CONFIG)
 
-        self.assertIn("RuntimeError: reasoning configuration unavailable", stderr.getvalue())
+        self.assertEqual(stderr.getvalue().count("RuntimeError: reasoning configuration unavailable"), 1)
 
     def test_a_valid_claude_effort_save_writes_only_the_local_delta(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3413,29 +3434,28 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         self.assertEqual(written.get("callable"), {"luna": False})
         self.assertNotIn("claude_delegation", written)
 
-    def test_setting_opus_back_to_the_default_leaves_the_explicit_override_in_the_delta(self):
-        """An explicit local override set back to the default round-trips correctly:
-        opus's key is present in the merged config (from the earlier "high" write),
-        so per the controller's ruling it is assigned as always -- and _overlay keeps
-        it in the local file because the shipped file has no reasoning_effort block
-        at all to fall back to (there is nothing for the written value to equal)."""
+    def test_resetting_a_pinned_opus_effort_to_default_removes_only_that_local_key(self):
+        """The full frontend payload uses an empty tier value to unpin its override."""
         with tempfile.TemporaryDirectory() as directory:
             config_path = self._write_config(directory)
-            status1, _ = self._request(config_path, "POST", {"claude_reasoning_effort": {"opus": "high"}})
-            self.assertEqual(status1, 200)
             local = config_path.with_name("router_config.local.yaml")
-            written1 = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
-            self.assertEqual(written1, {"claude_delegation": {"reasoning_effort": {"opus": "high"}}})
-
-            status2, _ = self._request(
-                config_path, "POST",
-                {"claude_reasoning_effort": {"sonnet": "medium", "opus": "medium"}},
+            local.write_text(
+                "claude_delegation:\n  default_tier: opus\n  reasoning_effort:\n    sonnet: low\n    opus: high\n",
+                encoding="utf-8",
             )
-            self.assertEqual(status2, 200)
-            written2 = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else {}
-        self.assertEqual(
-            written2.get("claude_delegation", {}).get("reasoning_effort", {}).get("opus"), "medium",
-        )
+            status, payload = self._request(config_path, "GET")
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["claude_reasoning_effort"]["pinned"], {"sonnet": True, "opus": True})
+            self.assertEqual(payload["claude_reasoning_effort"]["defaults"], {"sonnet": "medium", "opus": "medium"})
+
+            status, body = self._request(
+                config_path, "POST",
+                {"claude_reasoning_effort": {"sonnet": None, "opus": ""}},
+            )
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+        self.assertEqual(status, 200)
+        self.assertTrue(body["success"])
+        self.assertEqual(written, {"claude_delegation": {"default_tier": "opus"}})
 
     def test_an_unavailable_bridge_save_of_unchanged_levels_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3503,6 +3523,8 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
     def test_the_claude_reasoning_effort_control_has_all_of_its_i18n_keys_in_both_languages(self):
         self.assertEqual(self.i18n("settings.claude_effort.haiku_no_reasoning"),
                          ("no reasoning allowed", "nincs gondolkodás"))
+        self.assertEqual(self.i18n("settings.claude_effort.default"),
+                         ("Default ({level})", "Alapértelmezett ({level})"))
 
     def test_get_reports_available_when_uninstalled_but_the_host_seam_is_compatible(self):
         """A standalone dashboard process never calls install_reasoning_bridge() itself.

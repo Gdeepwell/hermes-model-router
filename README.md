@@ -259,8 +259,9 @@ If the host's private seam has moved in a way this bridge does not recognise,
 `delegate_claude` is refused outright with "Claude reasoning effort is
 unavailable: `<reason>`" rather than silently running at the wrong effort;
 Haiku calls, which never touch the bridge, are unaffected. In the Claude
-account card, Sonnet and Opus effort dropdowns sit beside their model switches.
-Haiku has a disabled “no reasoning allowed” dropdown. If the host seam is
+account card, Sonnet and Opus effort dropdowns sit beside their model switches. Their
+first choice is **Default (`medium`)**, which removes a tier-specific dashboard
+override so a future router default can apply. Haiku has a disabled “no reasoning allowed” dropdown. If the host seam is
 incompatible, Sonnet and Opus selects are disabled and the escaped reason is
 available in their tooltips, using the same side-effect-free probe as the bridge.
 

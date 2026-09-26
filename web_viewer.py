@@ -1085,6 +1085,20 @@ def _claude_delegation_module():
 
 CLAUDE_REASONING_TIERS = ("sonnet", "opus")
 _CLAUDE_REASONING_DEFAULT_LEVELS = {"sonnet": "medium", "opus": "medium"}
+_CLAUDE_REASONING_TRACEBACKS: set[tuple[type[BaseException], str]] = set()
+
+
+def _claude_reasoning_defaults(delegation) -> dict:
+    defaults = getattr(delegation, "DEFAULT_REASONING_EFFORT", None) if delegation is not None else None
+    if not isinstance(defaults, dict):
+        defaults = _CLAUDE_REASONING_DEFAULT_LEVELS
+    return {tier: str(defaults.get(tier, _CLAUDE_REASONING_DEFAULT_LEVELS[tier])) for tier in CLAUDE_REASONING_TIERS}
+
+
+def _claude_reasoning_pinned(config: dict) -> dict:
+    block = config.get("claude_delegation")
+    effort = block.get("reasoning_effort") if isinstance(block, dict) else None
+    return {tier: isinstance(effort, dict) and tier in effort for tier in CLAUDE_REASONING_TIERS}
 
 
 def _haiku_reasoning_supported(delegation) -> bool:
@@ -1108,28 +1122,39 @@ def _claude_reasoning_status(config: dict) -> dict:
     cannot be imported -- the dashboard must keep serving even without it.
     """
     delegation = _claude_delegation_module()
+    defaults = _claude_reasoning_defaults(delegation)
+    pinned = _claude_reasoning_pinned(config)
     if delegation is None:
         return {
             "available": False,
             "reason": "Router package not importable in this dashboard process",
-            "levels": dict(_CLAUDE_REASONING_DEFAULT_LEVELS),
+            "levels": dict(defaults),
+            "defaults": defaults,
+            "pinned": pinned,
             "haiku_supported": False,
         }
     try:
         levels = delegation.reasoning_effort_config(config)
         available, reason = delegation.reasoning_bridge_status()
     except Exception as exc:
-        traceback.print_exc()
+        signature = (type(exc), str(exc))
+        if signature not in _CLAUDE_REASONING_TRACEBACKS:
+            _CLAUDE_REASONING_TRACEBACKS.add(signature)
+            traceback.print_exc()
         return {
             "available": False,
             "reason": f"claude_delegation reasoning-effort API not usable ({type(exc).__name__}: {exc})",
-            "levels": dict(_CLAUDE_REASONING_DEFAULT_LEVELS),
+            "levels": dict(defaults),
+            "defaults": defaults,
+            "pinned": pinned,
             "haiku_supported": _haiku_reasoning_supported(delegation),
         }
     return {
         "available": bool(available),
         "reason": str(reason or ""),
         "levels": {tier: levels[tier] for tier in CLAUDE_REASONING_TIERS},
+        "defaults": defaults,
+        "pinned": pinned,
         "haiku_supported": _haiku_reasoning_supported(delegation),
     }
 
@@ -1148,6 +1173,9 @@ def _save_claude_reasoning_effort(raw, config: dict):
     for tier, value in raw.items():
         if tier not in CLAUDE_REASONING_TIERS:
             return f"The dashboard cannot edit Claude reasoning-effort key '{tier}'"
+        if value is None or value == "":
+            cleaned[tier] = None
+            continue
         if not isinstance(value, str):
             return f"claude_reasoning_effort.{tier} must be one of: low, medium, high, xhigh"
         normalized = value.strip().casefold()
@@ -1161,19 +1189,21 @@ def _save_claude_reasoning_effort(raw, config: dict):
     existing_effort = existing_block.get("reasoning_effort") if isinstance(existing_block, dict) else None
     existing_effort = existing_effort if isinstance(existing_effort, dict) else {}
     delegation = _claude_delegation_module()
-    try:
-        effective_defaults = delegation.reasoning_effort_config(config) if delegation is not None else dict(_CLAUDE_REASONING_DEFAULT_LEVELS)
-    except Exception:
-        effective_defaults = dict(_CLAUDE_REASONING_DEFAULT_LEVELS)
+    defaults = _claude_reasoning_defaults(delegation)
     to_write = {}
+    to_remove = set()
     for tier, value in cleaned.items():
-        if tier not in existing_effort and value == effective_defaults.get(tier):
+        if value is None:
+            if tier in existing_effort:
+                to_remove.add(tier)
+        elif tier not in existing_effort and value == defaults[tier]:
             # No live override exists and the posted value already matches the
             # effective default: writing it would pin today's default forever
             # (a future default change would never reach this dashboard).
             continue
-        to_write[tier] = value
-    if not to_write:
+        else:
+            to_write[tier] = value
+    if not to_write and not to_remove:
         return None
     block = config.get("claude_delegation")
     if not isinstance(block, dict):
@@ -1181,8 +1211,12 @@ def _save_claude_reasoning_effort(raw, config: dict):
     reasoning_effort = block.get("reasoning_effort")
     if not isinstance(reasoning_effort, dict):
         reasoning_effort = block["reasoning_effort"] = {}
+    for tier in to_remove:
+        reasoning_effort.pop(tier, None)
     for tier, value in to_write.items():
         reasoning_effort[tier] = value
+    if not reasoning_effort:
+        block.pop("reasoning_effort", None)
     return None
 
 
@@ -1370,6 +1404,7 @@ const I18N = {
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
     'settings.claude_effort.haiku_no_reasoning': 'no reasoning allowed',
+    'settings.claude_effort.default': 'Default ({level})',
     'settings.prefs.heading': 'Routing: preferred models per kind of work',
     'settings.prefs.sub': 'In order, best first. The router takes the first callable entry. This re-routes a turn; it does not change the model Hermes starts on.',
     'settings.prefs.add': 'add model...',
@@ -1602,6 +1637,7 @@ const I18N = {
     'settings.effort.high': 'high',
     'settings.effort.xhigh': 'xhigh',
     'settings.claude_effort.haiku_no_reasoning': 'nincs gondolkodás',
+    'settings.claude_effort.default': 'Alapértelmezett ({level})',
     'settings.prefs.heading': 'Útválasztás: preferált modellek munkatípusonként',
     'settings.prefs.sub': 'Sorrendben, a legjobb elöl. A router az első hívható elemet választja. Ez egy fordulót irányít át; a Hermes indulási modelljét nem változtatja meg.',
     'settings.prefs.add': 'modell hozzáadása...',
@@ -1780,10 +1816,11 @@ function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,char=>({'
 const ROUTER_EFFORT_TIERS=['luna','spark','terra','sol','grok'];
 function renderEffort(tiers,off=false){const effort=currentConfig.effort||{},levels=['low','medium','high','xhigh'];
   return tiers.filter(tier=>ROUTER_EFFORT_TIERS.includes(tier)).map(tier=>`<select data-effort="${tier}"${off?' disabled':''}>${levels.map(level=>`<option value="${level}"${effort[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`).join('')}
-function renderClaudeReasoningEffort(tiers,off=false){const state=currentConfig.claude_reasoning_effort||{available:false,levels:{}},levels=state.levels||{},options=['low','medium','high','xhigh'],disabled=state.available&&!off?'':' disabled',title=state.available?'':` title="${escapeHtml(state.reason||'')}"`;
+function renderClaudeReasoningEffort(tiers,off=false){const state=currentConfig.claude_reasoning_effort||{available:false,levels:{}},levels=state.levels||{},defaults=state.defaults||{},pinned=state.pinned||{},options=['low','medium','high','xhigh'],disabled=state.available&&!off?'':' disabled',title=state.available?'':` title="${escapeHtml(state.reason||'')}"`;
   return tiers.map(model=>{const tier={sonnet5:'sonnet',opus5:'opus'}[model];
     if(!tier)return model==='haiku'?`<select class="effort-none" disabled><option>${t('settings.claude_effort.haiku_no_reasoning')}</option></select>`:'';
-    return `<select data-claude-effort="${tier}"${disabled}${title}>${options.map(level=>`<option value="${level}"${levels[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`;
+    const isPinned=!!pinned[tier],defaultLabel=t('settings.claude_effort.default').replace('{level}',t('settings.effort.'+(defaults[tier]||levels[tier]||'medium')));
+    return `<select data-claude-effort="${tier}"${disabled}${title}><option value=""${isPinned?'':' selected'}>${defaultLabel}</option>${options.map(level=>`<option value="${level}"${isPinned&&levels[tier]===level?' selected':''}>${t('settings.effort.'+level)}</option>`).join('')}</select>`;
   }).join('')}
 function usageError(account){const message=((currentConfig||{}).usage_errors||{})[account];return message?`<span class="usage-error">${escapeHtml(message)}</span>`:''}
 function accountCard(account,info){const callable=currentConfig.callable||{},cooldowns=currentConfig.cooldowns||{},load=(currentConfig.load||{})[account]||0,d=info.delegation||{};
