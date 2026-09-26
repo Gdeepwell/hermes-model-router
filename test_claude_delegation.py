@@ -553,6 +553,69 @@ def _hermes_importable():
         return False
 
 
+class _StaleInstallMapFinder:
+    """Fails the named Hermes imports the way an outdated editable-install map does.
+
+    A Hermes update can add a top-level module (``hermes_yaml``) that the venv's
+    install map does not list yet; the standalone dashboard, which has no
+    PYTHONPATH, then cannot import ``tools.*`` / ``agent.*`` until the Hermes
+    checkout is put on ``sys.path``. The test harness always puts it there, so
+    this finder stands in for the stale map: it refuses the names until
+    ``checkout`` is on ``sys.path``, then steps aside for the normal finders.
+    """
+
+    def __init__(self, names, checkout):
+        self.names = set(names)
+        self.checkout = checkout
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in self.names and self.checkout not in sys.path:
+            raise ModuleNotFoundError("No module named 'hermes_yaml'", name="hermes_yaml")
+        return None
+
+
+@unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
+class StaleInstallMapTests(unittest.TestCase):
+    """The dashboard must see the Claude seam without a usage Refresh having run first."""
+
+    NAMES = ("tools.delegate_tool", "tools.delegate_tool_config", "agent.subagent_lifecycle")
+
+    def setUp(self):
+        import importlib
+        import agent
+        import tools
+
+        importlib.import_module("tools.delegate_tool")
+        importlib.import_module("agent.subagent_lifecycle")
+        checkout = tempfile.mkdtemp()
+        # Put the real modules and their package attributes back afterwards: the
+        # retried import re-executes them under fresh module objects.
+        saved_attrs = [(tools, "delegate_tool", tools.delegate_tool),
+                       (tools, "delegate_tool_config", tools.delegate_tool_config),
+                       (agent, "subagent_lifecycle", agent.subagent_lifecycle)]
+        modules = patch.dict(sys.modules)
+        modules.start()
+        self.addCleanup(modules.stop)
+        for owner, attr, value in saved_attrs:
+            self.addCleanup(setattr, owner, attr, value)
+        for name in self.NAMES:
+            sys.modules.pop(name, None)
+        finder = _StaleInstallMapFinder(self.NAMES, checkout)
+        sys.meta_path.insert(0, finder)
+        self.addCleanup(sys.meta_path.remove, finder)
+        self.addCleanup(lambda: sys.path.remove(checkout) if checkout in sys.path else None)
+        hermes_path = patch.object(usage_guard, "hermes_path", return_value=Path(checkout))
+        hermes_path.start()
+        self.addCleanup(hermes_path.stop)
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_the_effort_seam_is_found_through_the_hermes_checkout(self):
+        self.assertEqual(claude_delegation.reasoning_bridge_compatibility(), (True, ""))
+
+    def test_the_host_check_finds_the_delegation_api_through_the_hermes_checkout(self):
+        self.assertEqual(claude_delegation.host_check(), (True, ""))
+
+
 @unittest.skipUnless(_hermes_importable(), "Hermes is not importable in this interpreter")
 class RealHostTests(unittest.TestCase):
     """Against the installed Hermes: the guarantees the wing leans on."""

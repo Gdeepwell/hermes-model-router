@@ -1397,6 +1397,12 @@ skipped here.
 
 ## Version
 
+**1.21.1** — The dashboard shows the Claude effort dropdowns as available right
+after it starts. Before, a Hermes install whose venv did not yet list a newly
+added Hermes module (`hermes_yaml`) had them disabled until the first usage
+Refresh. The Claude checks now find Hermes's delegation code in the Hermes
+checkout the same way the usage refresh does.
+
 **1.21.0** — The main agent's first entry also offers the switched-on Claude
 models, so Hermes can be started on Opus (or Sonnet) from the dashboard. Picking
 one writes `model: {default: <claude model>, provider: anthropic}` into

@@ -188,8 +188,10 @@ def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optiona
         # submodule has been imported, a plain dotted import can bind through the
         # parent package's cached attribute instead of a swapped-in sys.modules
         # entry (as tests do via unittest.mock.patch.dict(sys.modules, ...)).
-        import tools.delegate_tool  # noqa: F401  (ensures it's importable / triggers ImportError)
-        import tools.delegate_tool_config  # noqa: F401
+        # _import_hermes also finds them when the venv's install map is stale
+        # (the standalone dashboard has no PYTHONPATH to fall back on).
+        usage_guard._import_hermes("tools.delegate_tool")
+        usage_guard._import_hermes("tools.delegate_tool_config")
         delegate_tool = _sys.modules["tools.delegate_tool"]
         delegate_tool_config = _sys.modules["tools.delegate_tool_config"]
     except Exception as exc:
@@ -404,6 +406,8 @@ def host_check() -> Tuple[bool, str]:
     delegate_claude must not register rather than fail at call time.
     """
     try:
+        usage_guard._import_hermes("tools.delegate_tool")
+        usage_guard._import_hermes("agent.subagent_lifecycle")
         from tools.delegate_tool import delegate_task
         from agent.subagent_lifecycle import get_active_subagent_parent  # noqa: F401
     except Exception as exc:
