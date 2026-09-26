@@ -1397,50 +1397,45 @@ skipped here.
 
 ## Version
 
-**1.21.1** — The dashboard shows the Claude effort dropdowns as available right
-after it starts. Before, a Hermes install whose venv did not yet list a newly
-added Hermes module (`hermes_yaml`) had them disabled until the first usage
-Refresh. The Claude checks now find Hermes's delegation code in the Hermes
-checkout the same way the usage refresh does.
+**1.19.0** — Reasoning effort for delegated Claude and Grok, Claude as a
+switchable account, and a Claude main agent from the dashboard.
 
-**1.21.0** — The main agent's first entry also offers the switched-on Claude
-models, so Hermes can be started on Opus (or Sonnet) from the dashboard. Picking
-one writes `model: {default: <claude model>, provider: anthropic}` into
-`~/.hermes/config.yaml` and leaves `default_model` alone. Picking a router tier
-moves a Claude parent back. The pick is sent only with the save it triggers, so
-no other save can move the parent. The effort-save tests no longer write
-their Terra stub over the Hermes config in `HERMES_HOME`.
-
-**1.20.0** — The *Codex only* / *Codex + Claude* workflow switch is retired.
-Claude is an account like Qwen or Grok: available exactly while at least one of
-`opus5`, `sonnet5` and `haiku` is switched on, and all three ship switched off,
-so an install without a Claude subscription works out of the box. A legacy
-`workflow:` or `claude_delegation.enabled` in `router_config.local.yaml` is
-translated into those switches at load time, and the dashboard's next save
-writes them into the file and drops both keys (see
-[Switching Claude on](#switching-claude-on)). Preference chains skip
-switched-off models and fall back to the built-in route when nothing in them is
-on. The dashboard's Workflow section is gone; load balancing has its own
-section, shown while two accounts have a model switched on.
-
-**1.19.2** — The Grok account card now has the same beside-switch reasoning-effort
-picker as the Codex tiers. It edits `effort.grok` (`low`, `medium`, `high`, or
-`xhigh`), which the router forwards to Grok 4.7; an older config's effective
-`medium` is not pinned into `router_config.local.yaml` by an unrelated save.
-
-**1.19.1** — Reasoning-effort dropdowns live beside model switches in the
-Settings account cards' Models blocks. The Codex card edits Luna, Spark,
-Terra and Sol; the Claude card edits Sonnet and Opus, displays a disabled
-“no reasoning allowed” select for Haiku, and puts the escaped compatibility
-reason in unavailable controls' tooltips.
-
-**1.19.0** — `delegate_claude` children get their own per-tier reasoning effort.
-`claude_delegation.reasoning_effort.sonnet` / `.opus` (default `medium`) reach the
-delegated Sonnet or Opus child through a guarded bridge over Hermes's private
-child-runtime resolver; Haiku is unaffected since Hermes's adapter sends it no
-thinking config, and a host whose seam has moved refuses `delegate_claude`
-rather than silently dropping the setting. The Settings tab gained a matching
-**Claude reasoning effort** control next to Codex's **Reasoning effort**.
+- `delegate_claude` children get their own per-tier reasoning effort:
+  `claude_delegation.reasoning_effort.sonnet` / `.opus` (default `medium`) reach
+  the delegated Sonnet or Opus child through a guarded bridge over Hermes's private
+  child-runtime resolver. Haiku is unaffected, since Hermes's adapter sends it no
+  thinking config, and a host whose seam has moved refuses `delegate_claude`
+  rather than silently dropping the setting.
+- Reasoning-effort dropdowns sit beside the model switches in the Settings
+  account cards. The Codex card edits Luna, Spark, Terra and Sol; the Claude card
+  edits Sonnet and Opus and shows a disabled "no reasoning allowed" select for
+  Haiku; the Grok card edits `effort.grok` (`low`, `medium`, `high`, `xhigh`),
+  which the router forwards to Grok 4.7. A switched-off model's dropdown is
+  disabled, an unavailable one gives its reason in the tooltip, and an unrelated
+  save no longer pins an effective default into `router_config.local.yaml`.
+- The *Codex only* / *Codex + Claude* workflow switch is retired. Claude is an
+  account like Qwen or Grok: available exactly while at least one of `opus5`,
+  `sonnet5` and `haiku` is switched on, and all three ship switched off, so an
+  install without a Claude subscription works out of the box. A legacy
+  `workflow:` or `claude_delegation.enabled` in `router_config.local.yaml` is
+  translated into those switches at load time, and the dashboard's next save
+  writes them into the file and drops both keys (see
+  [Switching Claude on](#switching-claude-on)). Preference chains skip
+  switched-off models and fall back to the built-in route when nothing in them is
+  on. The dashboard's Workflow section is gone; load balancing has its own
+  section, shown while two accounts have a model switched on.
+- The main agent's first entry also offers the switched-on Claude models, so
+  Hermes can be started on Opus (or Sonnet) from the dashboard. Picking one
+  writes `model: {default: <claude model>, provider: anthropic}` into
+  `~/.hermes/config.yaml` and leaves `default_model` alone. Picking a router tier
+  moves a Claude parent back. The pick is sent only with the save it triggers, so
+  no other save can move the parent.
+- Hermes modules are found through the Hermes checkout when the venv's install
+  map predates a newly added module (`hermes_yaml`). Before, usage Refresh failed
+  and the Claude effort dropdowns stayed disabled until a Refresh happened to
+  fix the import path. A refused save names the YAML error in
+  `~/.hermes/config.yaml`, and the effort-save tests no longer write their stub
+  over the Hermes config in `HERMES_HOME`.
 
 **1.18.1** — A tier switched off in Settings leaves the Model Router overview (and
 its account box once no tier is left), and it is dropped from Hermes's fallback
