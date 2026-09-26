@@ -4339,26 +4339,30 @@ _MAX_REPO_DIRECTORY_CACHE_ENTRIES = 512
 _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS = 60 * 60
 _MAX_DISPATCH_REVIEW_REPOSITORIES = 256
 _REPO_DIRECTORY_CACHE: OrderedDict[Tuple[str, bool], Tuple[float, Optional[Path]]] = OrderedDict()
-_DISPATCH_REVIEW_REPOSITORIES: OrderedDict[str, Tuple[float, Path]] = OrderedDict()
+_DISPATCH_REVIEW_REPOSITORIES: OrderedDict[str, Tuple[float, object]] = OrderedDict()
+_AMBIGUOUS_DISPATCH_REVIEW_REPOSITORY = object()
+_REPOSITORY_CACHE_LOCK = threading.RLock()
 
 
 def _bounded_cache_get(cache: OrderedDict, key: Any, ttl_seconds: float) -> Tuple[bool, Any]:
-    entry = cache.get(key)
-    if entry is None:
-        return False, None
-    recorded_at, value = entry
-    if time.monotonic() - recorded_at >= ttl_seconds:
-        cache.pop(key, None)
-        return False, None
-    cache.move_to_end(key)
-    return True, value
+    with _REPOSITORY_CACHE_LOCK:
+        entry = cache.get(key)
+        if entry is None:
+            return False, None
+        recorded_at, value = entry
+        if time.monotonic() - recorded_at >= ttl_seconds:
+            cache.pop(key, None)
+            return False, None
+        cache.move_to_end(key)
+        return True, value
 
 
 def _bounded_cache_put(cache: OrderedDict, key: Any, value: Any, *, max_entries: int) -> None:
-    cache[key] = (time.monotonic(), value)
-    cache.move_to_end(key)
-    while len(cache) > max_entries:
-        cache.popitem(last=False)
+    with _REPOSITORY_CACHE_LOCK:
+        cache[key] = (time.monotonic(), value)
+        cache.move_to_end(key)
+        while len(cache) > max_entries:
+            cache.popitem(last=False)
 
 
 def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path]:
@@ -4419,18 +4423,43 @@ def _workspace_repository(request: Optional[Dict[str, Any]]) -> Optional[Path]:
 
 
 def _remember_dispatch_review_repository(text: str, repository: Path) -> None:
-    _bounded_cache_put(
-        _DISPATCH_REVIEW_REPOSITORIES, _normalise(text), repository.resolve(),
-        max_entries=_MAX_DISPATCH_REVIEW_REPOSITORIES,
-    )
+    key = _normalise(text)
+    resolved = repository.resolve()
+    with _REPOSITORY_CACHE_LOCK:
+        found, remembered = _bounded_cache_get(
+            _DISPATCH_REVIEW_REPOSITORIES, key, _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS,
+        )
+        if found and remembered is not _AMBIGUOUS_DISPATCH_REVIEW_REPOSITORY and remembered != resolved:
+            resolved = _AMBIGUOUS_DISPATCH_REVIEW_REPOSITORY
+        elif found:
+            resolved = remembered
+        _bounded_cache_put(
+            _DISPATCH_REVIEW_REPOSITORIES, key, resolved,
+            max_entries=_MAX_DISPATCH_REVIEW_REPOSITORIES,
+        )
 
 
 def _remembered_dispatch_review_repository(text: str) -> Optional[Path]:
-    found, repository = _bounded_cache_get(
-        _DISPATCH_REVIEW_REPOSITORIES, _normalise(text),
-        _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS,
-    )
-    return repository if found else None
+    normalised = _normalise(text)
+    with _REPOSITORY_CACHE_LOCK:
+        found, repository = _bounded_cache_get(
+            _DISPATCH_REVIEW_REPOSITORIES, normalised,
+            _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS,
+        )
+        if found:
+            return repository if isinstance(repository, Path) else None
+        matching_entry: Optional[Tuple[str, object]] = None
+        for goal, (recorded_at, candidate) in list(_DISPATCH_REVIEW_REPOSITORIES.items()):
+            if time.monotonic() - recorded_at >= _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS:
+                _DISPATCH_REVIEW_REPOSITORIES.pop(goal, None)
+            elif len(goal) >= 20 and normalised.startswith(goal):
+                if matching_entry is None or len(goal) > len(matching_entry[0]):
+                    matching_entry = (goal, candidate)
+        if matching_entry is None:
+            return None
+        goal, repository = matching_entry
+        _DISPATCH_REVIEW_REPOSITORIES.move_to_end(goal)
+        return repository if isinstance(repository, Path) else None
 
 
 def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
