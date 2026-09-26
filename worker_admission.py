@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from . import usage_guard
@@ -52,8 +53,9 @@ def delegate_task_route():
 
 
 def guard_tool_execution(**kwargs):
-    from . import _load_config, _delegation_targets_detail
+    from . import _delegated_claude_review_status, _load_config, _delegation_targets_detail
     from .claude_delegation import TIER_FOR_TARGET
+    from .claude_opus_bridge import CLAUDE_REVIEW_MODELS, review_model_alias
 
     args, next_call = kwargs.get("args") or {}, kwargs["next_call"]
     name = str(kwargs.get("tool_name") or "").removeprefix("mcp__")
@@ -67,14 +69,22 @@ def guard_tool_execution(**kwargs):
     tasks = args.get("tasks") or [args]
     switches = cfg.get("callable") or {}
     for task in tasks if isinstance(tasks, list) else [args]:
-        name = str(task.get("model") or args.get("model") or "").strip().casefold() if isinstance(task, dict) else ""
-        target = targets.get(name, {})
-        # A Claude target named by its switch obeys that switch, even when its
-        # model string (a dated snapshot, say) is not one the delegation tiers list.
-        if name in TIER_FOR_TARGET and switches.get(name) is not True:
-            message = CLAUDE_OFF
+        task = task if isinstance(task, dict) else {}
+        goal = str(task.get("goal") or args.get("goal") or "")
+        review, _reason = ((None, "") if review_model_alias(goal) is None
+                           else _delegated_claude_review_status(goal, cfg, dispatch_cwd=Path.cwd()))
+        if review is not None:
+            _repo, alias = review
+            message = refusal("anthropic", CLAUDE_REVIEW_MODELS[alias], cfg, blocking=True)
         else:
-            message = refusal(target.get("provider") or account, target.get("model") or model, cfg, blocking=True)
+            name = str(task.get("model") or args.get("model") or "").strip().casefold()
+            target = targets.get(name, {})
+            # A Claude target named by its switch obeys that switch, even when its
+            # model string (a dated snapshot, say) is not one the delegation tiers list.
+            if name in TIER_FOR_TARGET and switches.get(name) is not True:
+                message = CLAUDE_OFF
+            else:
+                message = refusal(target.get("provider") or account, target.get("model") or model, cfg, blocking=True)
         if message:
             return json.dumps({"error": message + " Re-dispatch on an available account; do not retry this account."})
     return next_call(args)
