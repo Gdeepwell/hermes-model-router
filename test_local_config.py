@@ -79,21 +79,24 @@ class RouterLayeringTests(unittest.TestCase):
 
     def test_the_local_file_overrides_the_shipped_one_key_by_key(self):
         cfg = self._load()
-        self.assertEqual(cfg["workflow"], "claude_delegation")
         self.assertEqual(cfg["default_model"], "terra")
-        self.assertTrue(cfg["claude_delegation"]["enabled"])
+        # The legacy workflow in the local file turns Claude on and is then dropped.
+        self.assertIs(cfg["callable"]["opus5"], True)
+        self.assertNotIn("workflow", cfg)
+        self.assertNotIn("enabled", cfg["claude_delegation"])
         self.assertEqual(cfg["claude_delegation"]["default_tier"], "sonnet", "shipped keys under it survive")
         self.assertEqual(cfg["usage_guard"]["accounts"]["anthropic"], {"soft_percent": 80, "hard_percent": 90})
 
     def test_without_a_local_file_the_shipped_behaviour_applies(self):
         cfg = self._load(local=None)
-        self.assertEqual(cfg["workflow"], "codex")
         self.assertEqual(cfg["default_model"], "qwen")
-        self.assertFalse(cfg["claude_delegation"]["enabled"])
+        self.assertNotIn("workflow", cfg, "a legacy key in the shipped file is ignored and dropped")
+        self.assertIs(cfg["callable"]["opus5"], False)
 
     def test_a_broken_local_file_falls_back_to_the_shipped_one_not_to_nothing(self):
         cfg = self._load(local="workflow: [unclosed\n")
-        self.assertEqual((cfg["workflow"], cfg["default_model"]), ("codex", "qwen"))
+        self.assertEqual(cfg["default_model"], "qwen")
+        self.assertNotIn("workflow", cfg)
 
     def test_the_local_file_sits_beside_whichever_config_is_loaded(self):
         with patch.object(model_router, "_CONFIG_PATH", Path("/somewhere/router_config.yaml")):
@@ -164,11 +167,13 @@ class ShippedDefaultsTests(unittest.TestCase):
         self.cfg = yaml.safe_load((ROOT / "router_config.yaml").read_text(encoding="utf-8"))
 
     def test_the_shipped_config_is_masters_behaviour(self):
-        self.assertEqual(self.cfg["workflow"], "codex")
+        self.assertNotIn("workflow", self.cfg)
         self.assertEqual(self.cfg["preferences"], {})
         self.assertEqual(self.cfg["default_model"], "qwen")
         self.assertTrue(self.cfg["callable"]["qwen"])
-        self.assertFalse(self.cfg["claude_delegation"]["enabled"])
+        # Claude needs a subscription, so it ships switched off like Grok.
+        self.assertEqual([self.cfg["callable"][m] for m in ("opus5", "sonnet5", "haiku")], [False] * 3)
+        self.assertNotIn("enabled", self.cfg["claude_delegation"])
 
     def test_the_local_file_is_ignored_by_git(self):
         self.assertIn("router_config.local.yaml", (ROOT / ".gitignore").read_text(encoding="utf-8").split())

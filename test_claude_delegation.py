@@ -55,10 +55,11 @@ def _cfg(**overrides):
 
 
 class DelegationConfigTests(unittest.TestCase):
-    def test_a_config_without_the_block_leaves_the_wing_off(self):
-        """Configuring nothing must change nothing."""
-        self.assertFalse(delegation_config({})["enabled"])
-        self.assertFalse(delegation_config(None)["enabled"])
+    def test_the_block_no_longer_carries_an_on_off_flag(self):
+        """The Claude switches in `callable` decide availability; `enabled` is retired."""
+        self.assertNotIn("enabled", delegation_config({}))
+        self.assertNotIn("enabled", delegation_config(None))
+        self.assertNotIn("enabled", delegation_config({"claude_delegation": {"enabled": True}}))
 
     def test_a_partial_block_keeps_the_other_defaults(self):
         settings = delegation_config({"claude_delegation": {"enabled": True, "default_tier": "haiku"}})
@@ -87,10 +88,10 @@ class DelegationConfigTests(unittest.TestCase):
 
 
 class AvailabilityBlockTests(unittest.TestCase):
-    def test_a_disabled_wing_is_not_offered(self):
+    def test_a_stale_enabled_flag_changes_nothing(self):
         cfg = _cfg()
         cfg["claude_delegation"]["enabled"] = False
-        self.assertIn("enabled", availability_block(cfg))
+        self.assertEqual(availability_block(cfg), "")
 
     def test_every_claude_target_switched_off_is_not_offered(self):
         cfg = _cfg()
@@ -259,11 +260,13 @@ class HandlerTests(unittest.TestCase):
             entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertEqual((entry["session_id"], entry["turn_id"]), ("sess-1", "turn-9"))
 
-    def test_switching_it_off_refuses_on_the_next_call(self):
+    def test_switching_every_claude_model_off_refuses_on_the_next_call(self):
         cfg = _cfg()
-        cfg["claude_delegation"]["enabled"] = False
+        for target in ("haiku", "sonnet5", "opus5"):
+            cfg["callable"][target] = False
         payload, calls = self._call({"tasks": [{"goal": "g"}]}, cfg=cfg)
-        self.assertEqual(payload["error"], "Claude delegation is switched off in router_config.yaml.")
+        self.assertEqual(payload["error"], "Claude delegation is off: every Claude model is switched off in "
+                                           "Settings. Use delegate_task, which runs on the Codex route.")
         self.assertEqual(calls, [])
 
     def _call_with_resolver_capture(self, args, *, cfg=None, parent=None, usage=40.0, result=None):
@@ -512,13 +515,13 @@ class RegisterTests(unittest.TestCase):
             with patch.object(claude_delegation, "host_check", return_value=(True, "")), \
                  patch.object(claude_delegation, "_independent_completions", return_value=False), \
                  patch.object(claude_delegation, "_exempt_from_sequential_deadline", return_value=True):
-                cfg["claude_delegation"]["enabled"] = False
+                cfg["callable"].update(haiku=False, sonnet5=False, opus5=False)
                 claude_delegation.register(MagicMock(), cfg)
             lines = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
         self.assertEqual([(l["event"], l["registered"]) for l in lines],
                          [("registration", False), ("registration", True)])
         self.assertIn("credentials_cfg", lines[0]["reason"])
-        self.assertFalse(lines[1]["available"], "registered, but switched off until the config allows it")
+        self.assertFalse(lines[1]["available"], "registered, but unavailable until a Claude model is switched on")
 
 
 class SequentialDeadlineExemptionTests(unittest.TestCase):
@@ -821,12 +824,11 @@ class ShippedConfigTests(unittest.TestCase):
         path = Path(model_router.__file__).resolve().parent / "router_config.yaml"
         self.cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    def test_the_wing_ships_in_step_with_the_workflow_and_with_its_files(self):
-        # router_config.yaml is also the live config, and the dashboard's Workflow
-        # switch keeps `enabled` in step with it -- so either workflow is valid here.
+    def test_the_wing_ships_with_its_files_and_without_an_on_off_switch(self):
+        # Availability is the Claude switches in `callable`, which ship off.
         settings = self.cfg["claude_delegation"]
-        self.assertIn(self.cfg.get("workflow", "claude_delegation"), ("claude_delegation", "codex"))
-        self.assertEqual(settings["enabled"], self.cfg.get("workflow", "claude_delegation") == "claude_delegation")
+        self.assertNotIn("workflow", self.cfg)
+        self.assertNotIn("enabled", settings)
         self.assertEqual(settings["tiers"], CLAUDE_DELEGATION["tiers"])
         self.assertEqual(settings["default_tier"], "sonnet")
         self.assertNotIn("usage_guard", settings)
@@ -845,7 +847,8 @@ class ShippedConfigTests(unittest.TestCase):
             self.assertTrue(0 < soft < hard <= 100, (account, soft, hard))
 
     def test_haiku_is_a_known_claude_target(self):
-        self.assertIs(self.cfg["callable"]["haiku"], True)
+        # Shipped off like every Claude model: it needs a Claude login first.
+        self.assertIs(self.cfg["callable"]["haiku"], False)
         self.assertEqual(self.cfg["tier_providers"]["haiku"], "anthropic")
         self.assertIn("haiku", self.cfg["peer_groups"]["light"])
 

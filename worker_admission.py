@@ -7,11 +7,30 @@ from types import SimpleNamespace
 from . import usage_guard
 
 
+CLAUDE_OFF = "Claude workers are switched off in Settings. The parent model is unchanged."
+
+
+def claude_switched_off(account, model, cfg):
+    """Whether a Claude worker may not run: the Claude target its model maps to is off.
+
+    A Claude model the delegation tiers do not name needs any Claude switch on.
+    The switch alone decides, not the cooldown: a cooling tier is a wait, not a
+    reason to stop a child mid-task.
+    """
+    model = str(model or "")
+    if account != "anthropic" and not model.startswith("claude-"):
+        return False
+    from . import claude_delegation
+
+    target = claude_delegation.target_for_model(model, cfg)
+    targets = (target,) if target else tuple(claude_delegation.TARGET_FOR_TIER.values())
+    switches = cfg.get("callable") or {}
+    return not any(switches.get(name) is True for name in targets)
+
+
 def refusal(account, tier, cfg, *, blocking=False):
-    if str(cfg.get("workflow") or "").strip().lower() == "codex" and (
-        account == "anthropic" or str(tier).startswith("claude-")
-    ):
-        return "Claude workers are disabled by workflow: codex. The parent model is unchanged."
+    if claude_switched_off(account, tier, cfg):
+        return CLAUDE_OFF
     if not usage_guard.guarded(account, cfg):
         return ""
     reading = (usage_guard.read if blocking else usage_guard.peek)(account, cfg)

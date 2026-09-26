@@ -57,7 +57,12 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "spark": True,
         "terra": True,
         "sol": True,
-        "opus5": True,
+        # Claude needs a Claude subscription and login, so its models ship off;
+        # switch them on from the dashboard once logged in. Claude delegation is
+        # available exactly while at least one of them is on.
+        "opus5": False,
+        "sonnet5": False,
+        "haiku": False,
         "qwen": True,
         # Needs a SuperGrok subscription (`hermes auth add xai-oauth`), so it
         # ships off; switch it on from the dashboard once logged in.
@@ -305,19 +310,19 @@ def _resolve_callable_fallback(
         return decision
 
     # A configured preference list IS the fallback chain for its kind: the user
-    # wrote the order, so walk it before anything built-in and never leave it.
+    # wrote the order, so walk it before anything built-in. A list with no
+    # routable+callable entry (say, only Claude targets while Claude is switched
+    # off) has nothing to offer, so the built-in chain below takes over.
     prefs = _preference_list(decision.kind, cfg)
-    if prefs:
-        for tier in prefs:
-            if tier != chosen_tier and _is_routable_tier(tier, cfg) and _is_callable_tier(tier, cfg):
-                try:
-                    return _decision(
-                        tier, f"preferred {decision.kind} fallback from {chosen_tier}",
-                        cfg, kind=decision.kind,
-                    )
-                except (KeyError, ValueError):
-                    continue
-        return decision
+    for tier in prefs:
+        if tier != chosen_tier and _is_routable_tier(tier, cfg) and _is_callable_tier(tier, cfg):
+            try:
+                return _decision(
+                    tier, f"preferred {decision.kind} fallback from {chosen_tier}",
+                    cfg, kind=decision.kind,
+                )
+            except (KeyError, ValueError):
+                continue
 
     # A policy route is not a preference. Design work reaches Sol because only
     # Sol may do it, so answering "Sol is unavailable" with Terra performs the
@@ -585,28 +590,49 @@ def _usage_step_down(decision: RouteDecision, cfg: Dict[str, Any]) -> RouteDecis
         return decision
 
 
-WORKFLOWS: Tuple[str, ...] = ("claude_delegation", "codex")
+# The Claude models' callable switches. Claude is available exactly while one is on.
+_CLAUDE_SWITCHES: Tuple[str, ...] = ("opus5", "sonnet5", "haiku")
 
 
-def workflow_name(cfg: Optional[Dict[str, Any]]) -> str:
-    """The configured workflow; anything absent or unrecognised is ``claude_delegation``,
-    which leaves the rest of the file exactly as written."""
-    raw = str((cfg or {}).get("workflow") or "").strip().casefold()
-    return raw if raw in WORKFLOWS else "claude_delegation"
+def _legacy_claude_verdict(local: Dict[str, Any]) -> Optional[bool]:
+    """What a pre-1.20 local file said about Claude, or None when it said nothing.
 
-
-def _apply_workflow(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """``workflow: codex`` is master's behaviour: no Claude delegation, built-in routes.
-
-    Applied at load time so every reader agrees. The file keeps the Claude-tuned
-    preferences and the claude_delegation block, so switching back restores them.
+    ``workflow`` decides when present (``codex`` = off, ``claude_delegation`` = on,
+    anything else = no verdict); otherwise ``claude_delegation.enabled`` if it is a
+    bool. Read from router_config.local.yaml only: the shipped file no longer has
+    either key.
     """
-    if workflow_name(cfg) != "codex":
-        return cfg
-    cfg["workflow"] = "codex"
-    cfg["preferences"] = {}
+    if "workflow" in local:
+        name = str(local.get("workflow") or "").strip().casefold()
+        return {"codex": False, "claude_delegation": True}.get(name)
+    block = local.get("claude_delegation")
+    flag = block.get("enabled") if isinstance(block, dict) else None
+    return flag if isinstance(flag, bool) else None
+
+
+def _apply_legacy_claude_switches(cfg: Dict[str, Any], local: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate the retired ``workflow`` / ``claude_delegation.enabled`` keys, in memory.
+
+    Off turns every Claude model off whatever the local file says for them. On
+    turns on each Claude model the local file does not set itself, so an operator
+    who ran Claude delegation keeps it after the shipped default became off. The
+    legacy keys are then dropped so no reader acts on them; the file is never
+    written here (the dashboard's next save materialises the result).
+    """
+    verdict = _legacy_claude_verdict(local)
+    if verdict is not None:
+        switches = dict(cfg.get("callable") or {})
+        local_switches = local.get("callable") if isinstance(local.get("callable"), dict) else {}
+        for name in _CLAUDE_SWITCHES:
+            if verdict is False:
+                switches[name] = False
+            elif name not in local_switches:
+                switches[name] = True
+        cfg["callable"] = switches
+    cfg.pop("workflow", None)
     block = cfg.get("claude_delegation")
-    cfg["claude_delegation"] = {**(block if isinstance(block, dict) else {}), "enabled": False}
+    if isinstance(block, dict) and "enabled" in block:
+        cfg["claude_delegation"] = {k: v for k, v in block.items() if k != "enabled"}
     return cfg
 
 
@@ -640,7 +666,8 @@ def _load_config() -> Dict[str, Any]:
         loaded = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
             return _deep_merge({}, _DEFAULT_CONFIG)
-        return _apply_workflow(_deep_merge(_deep_merge(_DEFAULT_CONFIG, loaded), _local_overrides()))
+        local = _local_overrides()
+        return _apply_legacy_claude_switches(_deep_merge(_deep_merge(_DEFAULT_CONFIG, loaded), local), local)
     except Exception:
         return _deep_merge({}, _DEFAULT_CONFIG)
 
@@ -2398,10 +2425,6 @@ def _target_is_offered(name: str, cfg: Dict[str, Any]) -> bool:
     tier: the dashboard toggle otherwise reads as if it governed Claude while
     changing nothing.
     """
-    if workflow_name(cfg) == "codex" and (name in claude_delegation.TIER_FOR_TARGET
-            or _account_of(name, cfg) == "anthropic"
-            or _delegation_targets_detail().get(name, {}).get("provider") == "anthropic"):
-        return False
     switches = cfg.get("callable") or {}
     # Deliberately not _is_callable_tier: that folds in the cooldown, and a
     # cooling target must stay visible. Hiding it invites the planner to route
@@ -3699,10 +3722,10 @@ def _routing_note(request: Dict[str, Any], kwargs: Dict[str, Any], cfg: Dict[str
 def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     """Hermes llm_request middleware entrypoint.
 
-    Claude delegation is scoped to this request: offered only when the live
-    workflow allows it and the request itself carries delegate_claude. A session
-    whose tool list predates a workflow switch is then never told to call a tool
-    it lacks, nor steered to one the workflow has switched off.
+    Claude delegation is scoped to this request: offered only while a Claude
+    model is switched on in ``callable`` and the request itself carries
+    delegate_claude. A session whose tool list predates a Claude switch flip is
+    then never told to call a tool it lacks, nor steered to a Claude that is off.
     """
     available = claude_delegation.availability_block(_load_config()) == ""
     claude_delegation.note_availability(available)
@@ -3714,11 +3737,11 @@ def route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
 
 
 def on_pre_gateway_dispatch(**kwargs: Any) -> None:
-    """Notice a workflow switch before the gateway builds a new session's agent."""
+    """Notice a Claude switch flip before the gateway builds a new session's agent."""
     try:
         claude_delegation.note_availability(claude_delegation.availability_block(_load_config()) == "")
     except Exception as exc:
-        _logger.debug("pre_gateway_dispatch: workflow check skipped: %s", exc)
+        _logger.debug("pre_gateway_dispatch: Claude availability check skipped: %s", exc)
     return None
 
 
@@ -4438,8 +4461,6 @@ def _opus5_response(result: Dict[str, Any]) -> Any:
 def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any) -> Optional[Any]:
     """Execute the first safe, non-design coding call through Claude Code OAuth."""
     coding_cfg = cfg.get("coding_agent") or {}
-    if workflow_name(cfg) == "codex":
-        return None
     if not coding_cfg.get("enabled") and not (coding_cfg.get("delegated_review") or {}).get("enabled"):
         return None
     if int(kwargs.get("api_call_count") or 1) != 1:

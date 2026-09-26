@@ -24,7 +24,7 @@ PROVIDERS = {"luna": "openai-codex", "spark": "openai-codex", "terra": "openai-c
              "opus5": "anthropic", "sonnet5": "anthropic", "haiku": "anthropic"}
 
 
-def _cfg(temp_dir, *, balance=None, workflow="claude_delegation"):
+def _cfg(temp_dir, *, balance=None):
     return {
         "enabled": True, "provider": "openai-codex", "models": MODELS,
         "callable": {**CALLABLE, "opus5": True, "sonnet5": True, "haiku": True},
@@ -34,8 +34,6 @@ def _cfg(temp_dir, *, balance=None, workflow="claude_delegation"):
         "shadow": {"enabled": False},
         "preferences": {"review": ["sonnet5", "opus5", "terra"], "code": ["terra", "sonnet5"],
                         "chat": ["luna", "spark"]},
-        "claude_delegation": {"enabled": workflow == "claude_delegation"},
-        "workflow": workflow,
         "usage_guard": {
             "cache_seconds": 300,
             "balance": {"enabled": True, "busy_percent": 60, "margin_percent": 40, **(balance or {})},

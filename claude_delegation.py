@@ -42,7 +42,6 @@ REASONING_LEVELS: Tuple[str, ...] = ("low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT: Dict[str, str] = {"sonnet": "medium", "opus": "medium"}
 
 DEFAULTS: Dict[str, Any] = {
-    "enabled": False,
     "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
     "log_path": "",
@@ -52,7 +51,7 @@ DEFAULTS: Dict[str, Any] = {
 _ACTIVE = False
 # Set by the router for the request it is routing: whether *this* request can use
 # delegate_claude. A session's tool list is fixed when its agent is built, so the
-# live workflow and the tools the request actually carries can disagree; the
+# live Claude switches and the tools the request actually carries can disagree; the
 # request is what the conductor sees, so it decides.
 _REQUEST_ACTIVE: ContextVar[Optional[bool]] = ContextVar("claude_delegation_request_active", default=None)
 # The last availability the router saw, so a flip can drop Hermes's tool-list memo.
@@ -62,8 +61,8 @@ _LAST_AVAILABLE: Optional[bool] = None
 def is_active() -> bool:
     """Whether Claude delegation may be offered right now.
 
-    Inside a routed request: the request's own answer (workflow allows it AND the
-    request offers the tool). Outside one: whether the tool is registered.
+    Inside a routed request: the request's own answer (a Claude model is switched
+    on AND the request offers the tool). Outside one: whether the tool is registered.
     """
     scoped = _REQUEST_ACTIVE.get()
     return _ACTIVE if scoped is None else scoped
@@ -344,11 +343,16 @@ def offered(tool_names: Iterable[str]) -> bool:
 
 
 def delegation_config(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """The ``claude_delegation`` block with defaults filled in; off unless configured on."""
+    """The ``claude_delegation`` block with defaults filled in.
+
+    The retired ``enabled`` flag is dropped: availability comes from ``callable``.
+    """
     raw = (cfg or {}).get("claude_delegation")
     raw = raw if isinstance(raw, dict) else {}
     merged = deepcopy(DEFAULTS)
     for key, value in raw.items():
+        if key == "enabled":
+            continue
         if key in ("tiers",):
             if isinstance(value, dict):
                 merged[key] = {**DEFAULTS[key], **value}
@@ -414,12 +418,11 @@ def host_check() -> Tuple[bool, str]:
 def availability_block(cfg: Dict[str, Any]) -> str:
     """Why ``delegate_claude`` must not be offered now, or "" when it may be.
 
-    Config only, so it is cheap enough to run on every tool-list build. The
-    router's ``_load_config`` has already applied ``workflow: codex``, which turns
-    ``claude_delegation.enabled`` off.
+    Config only, so it is cheap enough to run on every tool-list build. Claude is
+    available exactly while one of its models is switched on in ``callable``; the
+    router's ``_load_config`` has already turned a legacy ``workflow`` into those
+    switches.
     """
-    if not delegation_config(cfg).get("enabled"):
-        return "claude_delegation.enabled is false"
     switches = cfg.get("callable") or {}
     if not any(switches.get(target) is True for target in TARGET_FOR_TIER.values()):
         return "every Claude target is switched off in `callable`"
@@ -436,8 +439,9 @@ def tool_available() -> bool:
 def note_availability(available: bool) -> None:
     """Drop Hermes's memoized tool list when availability flips.
 
-    ``model_tools`` memoizes whole tool lists without re-running check_fns, so a
-    flipped workflow would otherwise reach new sessions only after a restart.
+    ``model_tools`` memoizes whole tool lists without re-running check_fns, so
+    flipping the Claude switches would otherwise reach new sessions only after a
+    restart.
     ``_clear_tool_defs_cache`` is private upstream; without it, new sessions
     still follow the switch once the memo is rebuilt for another reason.
     """
@@ -683,11 +687,9 @@ def _dispatch(args: Dict[str, Any]) -> str:
 
     cfg = _load_config()
     settings = delegation_config(cfg)
-    if not settings.get("enabled"):
-        if str(cfg.get("workflow") or "").strip().casefold() == "codex":
-            return _error("Claude delegation is off: router_config.yaml is on workflow: codex. "
-                          "Use delegate_task, which runs on the Codex route.")
-        return _error("Claude delegation is switched off in router_config.yaml.")
+    if availability_block(cfg):
+        return _error("Claude delegation is off: every Claude model is switched off in Settings. "
+                      "Use delegate_task, which runs on the Codex route.")
     requested = str(args.get("tier") or settings.get("default_tier") or "sonnet").strip().casefold()
     if requested not in TIERS:
         return _error(f"Unknown tier {requested!r}; use one of: {', '.join(TIERS)}.")
@@ -802,8 +804,8 @@ def _exempt_from_sequential_deadline() -> bool:
 def register(ctx: Any, cfg: Optional[Dict[str, Any]] = None) -> bool:
     """Register delegate_claude whenever the host can carry it.
 
-    Registered even while the workflow keeps it off: its check_fn decides, per
-    tool-list build, whether Hermes offers it, so the switch needs no restart.
+    Registered even while every Claude model is switched off: its check_fn decides,
+    per tool-list build, whether Hermes offers it, so the switches need no restart.
     """
     global _ACTIVE
     if cfg is None:
