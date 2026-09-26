@@ -8,6 +8,7 @@ import hashlib
 import io
 import tempfile
 import threading
+import traceback
 import json
 import os
 import time
@@ -1118,11 +1119,12 @@ def _claude_reasoning_status(config: dict) -> dict:
         levels = delegation.reasoning_effort_config(config)
         available, reason = delegation.reasoning_bridge_status()
     except Exception as exc:
+        traceback.print_exc()
         return {
             "available": False,
             "reason": f"claude_delegation reasoning-effort API not usable ({type(exc).__name__}: {exc})",
             "levels": dict(_CLAUDE_REASONING_DEFAULT_LEVELS),
-            "haiku_supported": False,
+            "haiku_supported": _haiku_reasoning_supported(delegation),
         }
     return {
         "available": bool(available),

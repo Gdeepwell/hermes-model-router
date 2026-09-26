@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -3314,6 +3316,34 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         self.assertFalse(payload["claude_reasoning_effort"]["haiku_supported"])
         self.assertNotIn("haiku", payload["claude_reasoning_effort"]["levels"])
 
+    def test_claude_reasoning_status_fallback_derives_haiku_support_from_the_delegation_module(self):
+        class BrokenDelegation:
+            EDITABLE_REASONING_TIERS = ("sonnet", "opus", "haiku")
+
+            @staticmethod
+            def reasoning_effort_config(config):
+                raise RuntimeError("reasoning configuration unavailable")
+
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+             contextlib.redirect_stderr(io.StringIO()):
+            status = web_viewer._claude_reasoning_status(self.CONFIG)
+
+        self.assertFalse(status["available"])
+        self.assertTrue(status["haiku_supported"])
+
+    def test_claude_reasoning_status_fallback_prints_the_exception_traceback_to_stderr(self):
+        class BrokenDelegation:
+            @staticmethod
+            def reasoning_effort_config(config):
+                raise RuntimeError("reasoning configuration unavailable")
+
+        stderr = io.StringIO()
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+             contextlib.redirect_stderr(stderr):
+            web_viewer._claude_reasoning_status(self.CONFIG)
+
+        self.assertIn("RuntimeError: reasoning configuration unavailable", stderr.getvalue())
+
     def test_a_valid_claude_effort_save_writes_only_the_local_delta(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = self._write_config(directory)
@@ -3347,6 +3377,24 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
                 self.assertIn("error", body)
                 self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
                 self.assertEqual(config_path.read_bytes(), shipped_before)
+
+    def test_a_later_invalid_claude_effort_entry_leaves_earlier_entries_unchanged(self):
+        payload = {"claude_reasoning_effort": {"sonnet": "high", "opus": "bogus"}}
+        config = json.loads(json.dumps(self.CONFIG))
+        before = json.loads(json.dumps(config))
+        error = web_viewer._save_claude_reasoning_effort(payload["claude_reasoning_effort"], config)
+        self.assertIsNotNone(error)
+        self.assertIn("opus", error)
+        self.assertEqual(config, before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            shipped_before = config_path.read_bytes()
+            status, body = self._request(config_path, "POST", payload)
+            self.assertEqual(status, 400)
+            self.assertIn("opus", str(body.get("error", "")))
+            self.assertFalse(config_path.with_name("router_config.local.yaml").exists())
+            self.assertEqual(config_path.read_bytes(), shipped_before)
 
     def test_a_full_defaults_save_with_an_unrelated_change_writes_no_claude_block(self):
         """The exact bug from the final review: saveSettings() always posts the
