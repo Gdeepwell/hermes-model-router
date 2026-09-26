@@ -19,13 +19,14 @@ import logging
 import os
 import sys
 import threading
+import types
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple, cast
 
 from . import usage_guard
 from .hermes_paths import hermes_path
@@ -109,15 +110,39 @@ class _ReasoningScope:
     reasoning_config: Dict[str, Any]
 
 
-_REASONING_SCOPE: ContextVar[Optional[_ReasoningScope]] = ContextVar(
-    "claude_delegation_reasoning_scope", default=None
+_REASONING_BRIDGE_STATE_KEY = "_hermes_model_router_claude_reasoning_state"
+_REASONING_BRIDGE_STATE: Any = sys.modules.setdefault(
+    _REASONING_BRIDGE_STATE_KEY,
+    cast(
+        types.ModuleType,
+        types.SimpleNamespace(
+            scope=ContextVar("claude_delegation_reasoning_scope", default=None),
+            lock=threading.Lock(),
+            installed=False,
+            reason="not yet installed",
+            original=None,
+            wrapper=None,
+        ),
+    ),
 )
+# These aliases retain the test-visible names while every mutable bridge datum
+# lives in the per-process holder above, shared by reloads and alternate imports.
+_REASONING_SCOPE: ContextVar[Optional[_ReasoningScope]] = _REASONING_BRIDGE_STATE.scope
+_REASONING_BRIDGE_LOCK = _REASONING_BRIDGE_STATE.lock
 
-_REASONING_BRIDGE_LOCK = threading.Lock()
-_REASONING_BRIDGE_INSTALLED = False
-_REASONING_BRIDGE_REASON = "not yet installed"
-_REASONING_BRIDGE_ORIGINAL: Optional[Callable[..., Any]] = None
-_REASONING_BRIDGE_WRAPPER: Optional[Callable[..., Any]] = None
+
+def __getattr__(name: str) -> Any:
+    """Keep private bridge-state reads compatible while the holder owns mutation."""
+    state_fields = {
+        "_REASONING_BRIDGE_INSTALLED": "installed",
+        "_REASONING_BRIDGE_REASON": "reason",
+        "_REASONING_BRIDGE_ORIGINAL": "original",
+        "_REASONING_BRIDGE_WRAPPER": "wrapper",
+    }
+    try:
+        return getattr(_REASONING_BRIDGE_STATE, state_fields[name])
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
 
 
 @contextmanager
@@ -205,7 +230,10 @@ def _validate_reasoning_bridge_seam() -> Tuple[bool, str, Optional[Any], Optiona
     if not callable(current):
         return False, "tools.delegate_tool._resolve_child_runtime is not callable", delegate_tool, None
 
-    already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _REASONING_BRIDGE_WRAPPER
+    already_wrapped = (
+        _REASONING_BRIDGE_STATE.original is not None
+        and current is _REASONING_BRIDGE_STATE.wrapper
+    )
     if already_wrapped:
         return True, "", delegate_tool, current
 
@@ -258,30 +286,27 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
     install is a no-op, and a prior failure is retried since the host may have
     changed (mainly relevant to tests that swap ``sys.modules`` entries).
 
-    Also safe across a second import of this module (plugin reload, or this
-    module imported under two different names): the wrapper installed on the
-    seam carries the real original on ``__model_router_original__``, so a
-    fresh copy of this module recognizes it as "the host seam, already wrapped
-    by someone" and re-wraps the SAME underlying original with its own
-    wrapper (reading its own ``_REASONING_SCOPE``) instead of refusing.
+    The bridge state is process-wide so a plugin reload observes and uses the
+    same wrapper, lock, and active scope rather than creating a disconnected
+    bridge that can silently lose a child's configured reasoning effort.
     """
-    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL, _REASONING_BRIDGE_WRAPPER
+    state = _REASONING_BRIDGE_STATE
     with _REASONING_BRIDGE_LOCK:
         delegate_tool = sys.modules.get("tools.delegate_tool")
-        if (_REASONING_BRIDGE_INSTALLED and _REASONING_BRIDGE_WRAPPER is not None
+        if (state.installed and state.wrapper is not None
                 and delegate_tool is not None
-                and getattr(delegate_tool, "_resolve_child_runtime", None) is _REASONING_BRIDGE_WRAPPER):
+                and getattr(delegate_tool, "_resolve_child_runtime", None) is state.wrapper):
             return True, ""
         ok, reason, delegate_tool, current = _validate_reasoning_bridge_seam()
         if not ok:
-            _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = reason
-            return False, _REASONING_BRIDGE_REASON
+            state.installed = False
+            state.reason = reason
+            return False, state.reason
 
-        already_wrapped = _REASONING_BRIDGE_ORIGINAL is not None and current is _REASONING_BRIDGE_WRAPPER
+        already_wrapped = state.original is not None and current is state.wrapper
         if already_wrapped:
-            _REASONING_BRIDGE_INSTALLED = True
-            _REASONING_BRIDGE_REASON = ""
+            state.installed = True
+            state.reason = ""
             return True, ""
 
         original = getattr(current, "__model_router_original__", current)
@@ -289,14 +314,14 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
             wrapper = _wrap_resolve_child_runtime(original)
             setattr(delegate_tool, "_resolve_child_runtime", wrapper)
         except Exception as exc:
-            _REASONING_BRIDGE_INSTALLED = False
-            _REASONING_BRIDGE_REASON = f"installing the reasoning bridge failed: {type(exc).__name__}: {exc}"
-            return False, _REASONING_BRIDGE_REASON
+            state.installed = False
+            state.reason = f"installing the reasoning bridge failed: {type(exc).__name__}: {exc}"
+            return False, state.reason
 
-        _REASONING_BRIDGE_ORIGINAL = original
-        _REASONING_BRIDGE_WRAPPER = wrapper
-        _REASONING_BRIDGE_INSTALLED = True
-        _REASONING_BRIDGE_REASON = ""
+        state.original = original
+        state.wrapper = wrapper
+        state.installed = True
+        state.reason = ""
         return True, ""
 
 
@@ -310,7 +335,7 @@ def reasoning_bridge_status() -> Tuple[bool, str]:
     needs is actually compatible -- "available" means "the host seam is
     compatible", not "this process installed the wrapper".
     """
-    if _REASONING_BRIDGE_INSTALLED:
+    if _REASONING_BRIDGE_STATE.installed:
         return True, ""
     return reasoning_bridge_compatibility()
 
@@ -321,20 +346,20 @@ def _reset_reasoning_bridge_for_tests() -> None:
     Never leaves a wrapped host function installed for later, unrelated test
     modules or a live process.
     """
-    global _REASONING_BRIDGE_INSTALLED, _REASONING_BRIDGE_REASON, _REASONING_BRIDGE_ORIGINAL, _REASONING_BRIDGE_WRAPPER
+    state = _REASONING_BRIDGE_STATE
     with _REASONING_BRIDGE_LOCK:
-        original = _REASONING_BRIDGE_ORIGINAL
+        original = state.original
         if original is not None:
             try:
                 import tools.delegate_tool as delegate_tool
-                if getattr(delegate_tool, "_resolve_child_runtime", None) is _REASONING_BRIDGE_WRAPPER:
+                if getattr(delegate_tool, "_resolve_child_runtime", None) is state.wrapper:
                     delegate_tool._resolve_child_runtime = original
             except Exception:
                 pass
-        _REASONING_BRIDGE_ORIGINAL = None
-        _REASONING_BRIDGE_WRAPPER = None
-        _REASONING_BRIDGE_INSTALLED = False
-        _REASONING_BRIDGE_REASON = "not yet installed"
+        state.original = None
+        state.wrapper = None
+        state.installed = False
+        state.reason = "not yet installed"
 
 
 # Hermes's Tool Search defers plugin tools: a live parent request carries only the
@@ -748,7 +773,11 @@ def _dispatch(args: Dict[str, Any]) -> str:
         from hermes_constants import parse_reasoning_effort
 
         level = reasoning_effort_config(cfg).get(tier)
-        reasoning_config = parse_reasoning_effort(level) if level is not None else None
+        if level is None:
+            message = f"Claude reasoning effort for {tier} is not configured"
+            _audit(cfg, parent, requested, tier, outcome, "refused", message)
+            return _error(message)
+        reasoning_config = parse_reasoning_effort(level)
         if reasoning_config is None:
             message = f"Claude reasoning effort for {tier} is invalid"
             _audit(cfg, parent, requested, tier, outcome, "refused", message)

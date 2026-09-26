@@ -363,6 +363,20 @@ class HandlerTests(unittest.TestCase):
                  patch.object(claude_delegation, "reasoning_effort_config", return_value={}):
                 payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
             entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(payload["error"], "Claude reasoning effort for sonnet is not configured")
+        self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertEqual(entry["message"], "Claude reasoning effort for sonnet is not configured")
+
+    def test_an_unparseable_reasoning_level_is_refused_as_invalid_and_audited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(True, "")), \
+                 patch.object(claude_delegation, "reasoning_effort_config", return_value={"sonnet": "bogus"}):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertEqual(payload["error"], "Claude reasoning effort for sonnet is invalid")
         self.assertEqual(calls, [])
         self.assertEqual(entry["outcome"], "refused")
@@ -481,6 +495,49 @@ class ReasoningBridgeTests(unittest.TestCase):
             delegate_tool._resolve_child_runtime = real_original
         self.assertIs(delegate_tool._resolve_child_runtime, real_original)
 
+    def test_two_module_copies_share_scope_and_lock_for_the_installed_wrapper(self):
+        """A scope opened by one reload copy must configure the wrapper from another."""
+        import importlib.util
+
+        source = Path(claude_delegation.__file__)
+        copy_names = ("model_router._claude_reasoning_copy_a", "model_router._claude_reasoning_copy_b")
+        for name in copy_names:
+            sys.modules.pop(name, None)
+            self.addCleanup(sys.modules.pop, name, None)
+
+        def resolver(*, parent_agent, model, override_provider, **_kwargs):
+            return {"provider": override_provider, "model": model}
+
+        delegate_tool = types.ModuleType("tools.delegate_tool")
+        delegate_tool._resolve_child_runtime = resolver
+        delegate_tool_config = types.ModuleType("tools.delegate_tool_config")
+        delegate_tool_config._resolve_child_runtime = resolver
+        with patch.dict(sys.modules, {
+            "tools.delegate_tool": delegate_tool,
+            "tools.delegate_tool_config": delegate_tool_config,
+        }):
+            copies = []
+            for name in copy_names:
+                spec = importlib.util.spec_from_file_location(name, source)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                spec.loader.exec_module(module)
+                copies.append(module)
+            copy_a, copy_b = copies
+            self.addCleanup(copy_a._reset_reasoning_bridge_for_tests)
+            self.addCleanup(copy_b._reset_reasoning_bridge_for_tests)
+
+            self.assertIs(copy_a._REASONING_BRIDGE_LOCK, copy_b._REASONING_BRIDGE_LOCK)
+            self.assertIs(copy_a._REASONING_SCOPE, copy_b._REASONING_SCOPE)
+            self.assertEqual(copy_b.install_reasoning_bridge(), (True, ""))
+
+            parent = SimpleNamespace()
+            with copy_a.reasoning_scope(parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"}):
+                result = delegate_tool._resolve_child_runtime(
+                    parent_agent=parent, model="claude-sonnet-5", override_provider="anthropic",
+                )
+        self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
+
 
 class ReasoningBridgeCompatibilityTests(unittest.TestCase):
     """The side-effect-free probe a separate dashboard process can call safely."""
@@ -497,7 +554,7 @@ class ReasoningBridgeCompatibilityTests(unittest.TestCase):
         # Never installs: the real host's resolver is untouched and the module's
         # own bridge-installed state stays False, unlike install_reasoning_bridge().
         self.assertIs(delegate_tool._resolve_child_runtime, before)
-        self.assertFalse(claude_delegation._REASONING_BRIDGE_INSTALLED)
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_STATE.installed)
 
     def test_the_probe_reports_incompatible_for_a_fake_module_missing_the_resolver(self):
         fake = types.ModuleType("tools.delegate_tool")
@@ -515,7 +572,7 @@ class ReasoningBridgeCompatibilityTests(unittest.TestCase):
         # installed the real bridge without resetting it afterward, and this
         # test's whole point is to observe the state BEFORE any install.
         claude_delegation._reset_reasoning_bridge_for_tests()
-        self.assertFalse(claude_delegation._REASONING_BRIDGE_INSTALLED)
+        self.assertFalse(claude_delegation._REASONING_BRIDGE_STATE.installed)
         self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
 
 
@@ -712,17 +769,23 @@ class RealHostTests(unittest.TestCase):
         import tools.delegate_tool as delegate_tool
 
         tree = ast.parse(textwrap.dedent(inspect.getsource(delegate_tool._build_child_agent)))
-        resolved_names = {
-            target.id
+        resolver_assignments = [
+            node
             for node in ast.walk(tree)
             if isinstance(node, (ast.Assign, ast.AnnAssign))
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Name)
             and node.value.func.id == "_resolve_child_runtime"
+        ]
+        self.assertTrue(resolver_assignments, "_build_child_agent must call _resolve_child_runtime(...)")
+        resolved_names = {
+            target.id
+            for node in resolver_assignments
             for target in ((node.targets if isinstance(node, ast.Assign) else [node.target]))
             if isinstance(target, ast.Name)
         }
-        self.assertTrue(resolved_names, "_build_child_agent must assign _resolve_child_runtime(...) to a name")
+        self.assertTrue(resolved_names,
+                        "_build_child_agent must assign the resolved runtime to a plain name")
         forwards_resolved_runtime = any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -835,7 +898,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
 
         ``install_reasoning_bridge()``'s wrapper closes over its ``original`` argument
         directly (see ``_wrap_resolve_child_runtime``); it does not re-read
-        ``_REASONING_BRIDGE_ORIGINAL`` on every call. So proving identity passthrough
+        ``_REASONING_BRIDGE_STATE.original`` on every call. So proving identity passthrough
         requires the stub to be the thing the wrapper actually calls, not just a
         bookkeeping global -- otherwise this test would pass against a real resolver's
         freshly built dict and never catch a wrapper bug that returns a copy.
@@ -843,7 +906,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
         import sys
         delegate_tool = sys.modules["tools.delegate_tool"]
         delegate_tool_config = sys.modules["tools.delegate_tool_config"]
-        real_original = claude_delegation._REASONING_BRIDGE_ORIGINAL
+        real_original = claude_delegation._REASONING_BRIDGE_STATE.original
         self.assertIsNotNone(real_original, "bridge must already be installed")
 
         def stub(*, parent_agent=None, delegation_cfg=None, parent_api_key=None, model=None,
