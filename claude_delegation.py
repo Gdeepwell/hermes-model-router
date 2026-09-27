@@ -23,7 +23,7 @@ import types
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Tuple
@@ -108,6 +108,10 @@ class _ReasoningScope:
     tier: str
     model: str
     reasoning_config: Dict[str, Any]
+    # The resolver runs synchronously while the scope is live.  A list keeps the
+    # counter mutable despite this scope being frozen and prevents a host seam
+    # that never reaches the wrapper from being logged as a successful effort run.
+    applied: list[int] = field(default_factory=lambda: [0])
 
 
 _REASONING_BRIDGE_STATE_KEY = "_hermes_model_router_claude_reasoning_state"
@@ -164,7 +168,7 @@ def __getattr__(name: str) -> Any:
 
 
 @contextmanager
-def reasoning_scope(parent: Any, tier: str, model: str, reasoning_config: Dict[str, Any]) -> Iterator[None]:
+def reasoning_scope(parent: Any, tier: str, model: str, reasoning_config: Dict[str, Any]) -> Iterator[_ReasoningScope]:
     """Claim the next matching Anthropic child's reasoning_config for this call.
 
     Held for the duration of the ``delegate_task`` call inside ``_dispatch``:
@@ -172,9 +176,10 @@ def reasoning_scope(parent: Any, tier: str, model: str, reasoning_config: Dict[s
     when it sees a call whose ``parent_agent``/``model``/provider match this
     scope, so the claim cannot leak onto some other concurrent delegation.
     """
-    token = _REASONING_SCOPE.set(_ReasoningScope(parent, tier, model, dict(reasoning_config)))
+    scope = _ReasoningScope(parent, tier, model, dict(reasoning_config))
+    token = _REASONING_SCOPE.set(scope)
     try:
-        yield
+        yield scope
     finally:
         _REASONING_SCOPE.reset(token)
 
@@ -204,6 +209,7 @@ def _wrap_resolve_child_runtime(original: Callable[..., Any]) -> Callable[..., A
         if model != scope.model:
             return result
         if isinstance(result, dict):
+            scope.applied[0] += 1
             return dict(result, reasoning_config=dict(scope.reasoning_config))
         return result
 
@@ -719,7 +725,8 @@ def _raw_error(raw: Any) -> Optional[str]:
     return str(error) if error else None
 
 
-def _annotate(raw: Any, tier: str, outcome: "usage_guard.GuardOutcome") -> Any:
+def _annotate(raw: Any, tier: str, outcome: "usage_guard.GuardOutcome",
+              reasoning_effort: Optional[str] = None) -> Any:
     try:
         payload = json.loads(raw)
     except Exception:
@@ -731,6 +738,8 @@ def _annotate(raw: Any, tier: str, outcome: "usage_guard.GuardOutcome") -> Any:
         payload["tier_adjusted"] = outcome.adjusted
     if outcome.usage == "unknown":
         payload["usage"] = "unknown"
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -771,6 +780,7 @@ def _dispatch(args: Dict[str, Any]) -> str:
     # Haiku has no extended-thinking support (see agent.anthropic_adapter.build_anthropic_kwargs),
     # so the reasoning-effort bridge is simply irrelevant to it: a Haiku call never sets a scope
     # and must delegate normally even when the bridge is unavailable on this host.
+    reasoning_applied: Optional[bool] = None
     if tier == "haiku":
         raw = delegate_task(
             goal=args.get("goal"),
@@ -800,7 +810,7 @@ def _dispatch(args: Dict[str, Any]) -> str:
             message = f"Claude reasoning effort for {tier} is invalid"
             _audit(cfg, parent, requested, tier, outcome, "refused", message)
             return _error(message)
-        with reasoning_scope(parent, tier, model, reasoning_config):
+        with reasoning_scope(parent, tier, model, reasoning_config) as scope:
             raw = delegate_task(
                 goal=args.get("goal"),
                 context=args.get("context"),
@@ -811,9 +821,14 @@ def _dispatch(args: Dict[str, Any]) -> str:
                 background=not getattr(parent, "_delegate_depth", 0) > 0,
                 credentials_cfg={"provider": "anthropic", "model": model, "fallback_providers": []},
             )
+        reasoning_applied = scope.applied[0] > 0
     error_message = _raw_error(raw)
     if error_message is not None:
         _audit(cfg, parent, requested, tier, outcome, "error", error_message[:300])
+    elif reasoning_applied is False:
+        message = "reasoning effort not applied: host seam did not see the child"
+        _audit(cfg, parent, requested, tier, outcome, "error", message)
+        return _annotate(raw, tier, outcome, reasoning_effort="not applied")
     else:
         _audit(cfg, parent, requested, tier, outcome, "lowered" if outcome.adjusted else "ran")
     return _annotate(raw, tier, outcome)

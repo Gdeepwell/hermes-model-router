@@ -231,11 +231,24 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("Cannot resolve delegation provider", payload["error"])
 
     def test_a_configured_audit_log_gets_one_line_per_call(self):
-        with tempfile.TemporaryDirectory() as directory:
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+        def fake_resolver(*, parent_agent, model, override_provider, **_kwargs):
+            return {"provider": override_provider, "model": model}
+
+        fake_module = types.ModuleType("tools.delegate_tool")
+        fake_module._resolve_child_runtime = fake_resolver
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(sys.modules, {"tools.delegate_tool": fake_module,
+                                      "tools.delegate_tool_config": fake_module}):
+            ok, reason = claude_delegation.install_reasoning_bridge()
+            self.assertTrue(ok, reason)
             cfg = _cfg()
             log = Path(directory) / "claude-delegation.jsonl"
             cfg["claude_delegation"]["log_path"] = str(log)
-            self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg, usage=75.0)
+            self._call_with_resolver_capture(
+                {"tasks": [{"goal": "g"}], "tier": "opus"}, cfg=cfg, usage=75.0,
+            )
             entry = json.loads(log.read_text(encoding="utf-8").strip())
         self.assertEqual(entry["event"], "delegate_claude")
         self.assertEqual((entry["tier_requested"], entry["tier_used"], entry["outcome"]),
@@ -338,6 +351,30 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(payload["claude_tier"], "haiku")
         self.assertEqual(len(calls), 1)
 
+    def test_a_sonnet_call_audits_when_the_host_never_applies_its_reasoning_effort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            with patch.object(claude_delegation, "install_reasoning_bridge", return_value=(True, "")):
+                payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(payload["reasoning_effort"], "not applied")
+        self.assertEqual(entry["outcome"], "error")
+        self.assertEqual(entry["message"], "reasoning effort not applied: host seam did not see the child")
+
+    def test_a_haiku_call_is_not_audited_for_missing_reasoning_effort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = _cfg()
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "haiku"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("reasoning_effort", payload)
+        self.assertEqual(entry["outcome"], "ran")
+
     def test_a_non_haiku_call_is_refused_when_the_bridge_is_unavailable(self):
         self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
         with tempfile.TemporaryDirectory() as directory:
@@ -430,6 +467,24 @@ class ReasoningBridgeTests(unittest.TestCase):
         ok2, reason2 = claude_delegation.install_reasoning_bridge()
         self.assertTrue(ok2, reason2)
         self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+    def test_the_wrapper_counts_a_matching_reasoning_substitution(self):
+        def resolver(*, parent_agent, model, override_provider):
+            return {"provider": override_provider, "model": model}
+
+        parent = SimpleNamespace()
+        scope = claude_delegation._ReasoningScope(
+            parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"},
+        )
+        token = claude_delegation._REASONING_SCOPE.set(scope)
+        try:
+            result = claude_delegation._wrap_resolve_child_runtime(resolver)(
+                parent_agent=parent, model="claude-sonnet-5", override_provider="anthropic",
+            )
+        finally:
+            claude_delegation._REASONING_SCOPE.reset(token)
+        self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
+        self.assertEqual(scope.applied[0], 1)
 
     def test_an_unchanged_installed_seam_skips_full_validation(self):
         def resolver(*, parent_agent, model, override_provider):
