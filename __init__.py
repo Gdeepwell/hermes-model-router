@@ -716,7 +716,7 @@ _SPARK_MUTATING_VERBS = (
     r"commitold|stabilizald|tavolitsd\s+el|nevezd\s+at|alakitsd\s+at|"
     r"refaktorald|csereld|irasd\s+at"
 )
-_SPARK_MUTATING_WORK = re.compile(rf"\b({_SPARK_MUTATING_VERBS})(?:s|es)?\b")
+_SPARK_MUTATING_WORK = re.compile(rf"\b({_SPARK_MUTATING_VERBS})\b")
 _SPARK_READ_ONLY_WORK = re.compile(
     r"\b(inspect|read|review|audit|report|analy[sz]e|compare|search|find|"
     r"identify|list|check|investigate|research|explore|trace|map|survey|"
@@ -977,6 +977,13 @@ _NEGATED_VERB = re.compile(
 _NOTHING_OBJECT_VERB = re.compile(
     rf"\b(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing\b"
     rf"(?!\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b)", re.I)
+# A refusal with an immediate exception still authorises a change. This must be
+# checked before refusal phrases are stripped, while the strippers retain their
+# narrow lookaheads so only the refusal itself is removed in ordinary prose.
+_REFUSAL_WITH_EXCEPTION = re.compile(
+    rf"\b(?:no\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?"
+    rf"|(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing)"
+    rf"\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b", re.I)
 
 
 def _without_negated_verbs(text: str) -> str:
@@ -1023,6 +1030,7 @@ def _is_spark_read_only_work(text: str) -> bool:
     affirmative = _normalise(_without_negated_safety_constraints(text))
     return bool(
         affirmative
+        and not _REFUSAL_WITH_EXCEPTION.search(affirmative)
         and not _SPARK_MUTATING_WORK.search(_without_non_instructing_verbs(affirmative))
     )
 

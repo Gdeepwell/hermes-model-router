@@ -216,6 +216,26 @@ class VerbAsNounTests(unittest.TestCase):
                 self.assertFalse(_is_spark_read_only_work(text))
 
 
+class PluralNounReadOnlyRegressionTests(unittest.TestCase):
+    """Plural nouns after read verbs must not be mistaken for write commands."""
+
+    def test_plural_nouns_remain_read_only_and_keep_the_luna_label(self):
+        for text in (
+            "[luna] Report the recent changes in /home/x/repo.",
+            "[luna] List the files with uncommitted changes in /home/x/repo.",
+            "[luna] Summarise the updates in the CHANGELOG of /home/x/repo.",
+            "[luna] Check which fixes landed since v1.2 in /home/x/repo.",
+            "[luna] Find the commits that touch __init__.py in /home/x/repo.",
+            "[luna] Read the deletes and adds in the migration log of /home/x/repo.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+                decision = classify_request(
+                    chat_request(text), 1, CFG, allow_plan_label_over_design=True
+                )
+                self.assertEqual(decision.tier, "luna")
+
+
 class NegatedVerbTests(unittest.TestCase):
     """An explicit refusal to write, in a shape the prohibition filter misses.
 
