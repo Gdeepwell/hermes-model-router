@@ -254,6 +254,11 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
                                           "timestamp": time.time(), "duration_seconds": time.time() - started_at,
                                           "malformed": True, "returncode": completed.returncode})
         raise RuntimeError("Claude Code did not return JSON output") from exc
+    if not isinstance(payload, dict):
+        _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "error",
+                                          "timestamp": time.time(), "duration_seconds": time.time() - started_at,
+                                          "malformed": True, "returncode": completed.returncode})
+        raise RuntimeError("Claude Code did not return a JSON result object")
     effective_model = _effective_model(payload, expected_model)
     state = _terminal_state(payload, returncode=completed.returncode, expected_model=expected_model)
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}

@@ -4755,6 +4755,21 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         adjustment = outcome.adjusted
         return {"opus5": "opus", "sonnet5": "sonnet"}.get(outcome.tier)
 
+    def bridge_response(*, review: bool, **bridge_kwargs: Any) -> Any:
+        """Return a bridge response and audit only a review that reached the bridge."""
+        try:
+            return _opus5_response(_run_opus5_bridge(review=review, **bridge_kwargs))
+        except Exception as error:
+            if review:
+                message = str(error).strip()[:300] or type(error).__name__
+                claude_delegation._log(cfg, {
+                    "event": "bridge_claude", "outcome": "error", "message": message,
+                    "tier_requested": requested_alias, "tier_used": requested_alias,
+                    "session_id": str(kwargs.get("session_id") or ""),
+                    "turn_id": str(kwargs.get("turn_id") or ""),
+                })
+            raise
+
     # A delegated review leaf runs on Claude and returns its verdict as the
     # leaf's answer. Restricted to delegated workers: the documented hazard of
     # this bridge is that it captures the first call of a turn, which matters
@@ -4772,11 +4787,11 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             allowed = (coding_cfg.get("delegated_review") or {}).get("models")
             if isinstance(allowed, list) and alias not in allowed:
                 return None
-            result = _run_opus5_bridge(
+            return bridge_response(
+                review=True,
                 repo=str(repo),
                 task=text,
                 write=False,
-                review=True,
                 model=alias,
                 requested_alias=requested_alias,
                 adjustment=adjustment,
@@ -4786,7 +4801,6 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
                 parent_turn_id=kwargs.get("parent_turn_id"),
                 provider=str(kwargs.get("provider") or ""),
             )
-            return _opus5_response(result)
 
     if not coding_cfg.get("enabled"):
         return None
@@ -4795,11 +4809,11 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         alias = admitted_alias()
         if alias is None:
             return None
-        result = _run_opus5_bridge(
+        return bridge_response(
+            review=True,
             repo=str(review_repo),
             task=text,
             write=False,
-            review=True,
             model=alias,
             requested_alias=requested_alias,
             adjustment=adjustment,
@@ -4809,7 +4823,6 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             parent_turn_id=kwargs.get("parent_turn_id"),
             provider=str(kwargs.get("provider") or ""),
         )
-        return _opus5_response(result)
     explicit_ui_repo = _verified_explicit_opus5_ui_repo(routing_text, cfg)
     if explicit_ui_repo is not None:
         alias = admitted_alias()
@@ -4922,38 +4935,10 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     opus_context = {key: value for key, value in kwargs.items() if key not in {"request", "next_call", "retry_call"}}
     try:
         opus_response = _maybe_run_opus5(request, cfg, **opus_context)
-    except Exception as error:
-        # OAuth, entitlement and bridge failures fall back to the normal route.
-        # A failed attempt must never fabricate an Opus viewer/log entry.
-        source_request = kwargs.get("original_request")
-        if not isinstance(source_request, dict):
-            source_request = request
-        review_text = _without_host_injected_context(
-            _without_router_contract(_last_user_text_and_index(_request_items(source_request))[0])
-        )
-        from .claude_opus_bridge import review_model_alias
-        if review_model_alias(review_text) is not None:
-            message = str(error).strip()[:300] or type(error).__name__
-            active_model = str(request.get("model", ""))
-            active_tier = next(
-                (tier for tier, model in (cfg.get("models") or {}).items() if model == active_model),
-                str(cfg.get("default_model") or "terra"),
-            )
-            _logger.warning("Claude review bridge failed; falling back to %s", active_tier, exc_info=True)
-            claude_delegation._log(cfg, {
-                "event": "bridge_claude", "outcome": "error", "message": message,
-                "tier_requested": review_model_alias(review_text),
-                "tier_used": review_model_alias(review_text),
-                "session_id": str(kwargs.get("session_id") or ""),
-                "turn_id": str(kwargs.get("turn_id") or ""),
-            })
-            _log_decision(
-                RouteDecision(
-                    active_tier, active_model,
-                    f"Claude review failed ({message}); ran as an ordinary {active_tier} worker",
-                ),
-                {**kwargs, "request": request}, cfg,
-            )
+    except Exception:
+        # Failures before an attempt are not attributed to the CLI; attempted
+        # reviews write a separate audit with the concrete reason.
+        _logger.warning("Claude bridge did not complete; falling back to the normal route", exc_info=True)
         opus_response = None
     if opus_response is not None:
         return opus_response

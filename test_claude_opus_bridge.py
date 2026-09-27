@@ -113,6 +113,39 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         self.assertEqual(terminal["state"], "timeout")
         self.assertEqual(len(events), 2)
 
+    @patch("claude_opus_bridge._log_decision")
+    @patch("claude_opus_bridge.subprocess.run")
+    def test_parseable_non_object_output_records_terminal_error_before_raising(self, run, log):
+        for stdout in ("[]", "null", '"not a result object"'):
+            with self.subTest(stdout=stdout), tempfile.TemporaryDirectory() as directory:
+                run.return_value.returncode = 1
+                run.return_value.stderr = "CLI error"
+                run.return_value.stdout = stdout
+                lifecycle = Path(directory) / "bridge.jsonl"
+                with self.assertRaisesRegex(RuntimeError, "result object"):
+                    dispatch("[opus-review] Review parser", Path(directory), review=True, lifecycle_path=lifecycle)
+                events = [json.loads(line) for line in lifecycle.read_text().splitlines()]
+            self.assertEqual([event["event"] for event in events], ["started", "terminal"])
+            self.assertEqual(events[-1]["state"], "error")
+            self.assertTrue(events[-1]["malformed"])
+            self.assertEqual(events[-1]["returncode"], 1)
+        log.assert_not_called()
+
+    @patch("claude_opus_bridge._log_decision")
+    @patch("claude_opus_bridge.subprocess.run")
+    def test_valid_object_with_nonzero_exit_records_terminal_error(self, run, log):
+        run.return_value.returncode = 1
+        run.return_value.stderr = "CLI error"
+        run.return_value.stdout = json.dumps({"modelUsage": {CANONICAL_OPUS_MODEL: {}}, "result": "nope"})
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = Path(directory) / "bridge.jsonl"
+            with self.assertRaisesRegex(RuntimeError, "failed with exit 1"):
+                dispatch("[opus-review] Review parser", Path(directory), review=True, lifecycle_path=lifecycle)
+            events = [json.loads(line) for line in lifecycle.read_text().splitlines()]
+        self.assertEqual([event["state"] for event in events], ["running", "error"])
+        self.assertFalse(events[-1].get("malformed", False))
+        log.assert_not_called()
+
     def test_classifier_is_conservative_and_manual_override_is_available(self):
         self.assertEqual(classify_coding_dispatch("[opus5] Implement the parser")[0], True)
         self.assertEqual(classify_coding_dispatch("[opus5] Implement this bounded CSS label fix")[0], True)

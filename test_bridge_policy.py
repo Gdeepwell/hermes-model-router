@@ -394,7 +394,7 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
 
 
 class AccountOfExecutionTests(unittest.TestCase):
-    def _route(self, *, codex, claude, bridge_error=None, label='sonnet', worker=True, eligible=True):
+    def _route(self, *, codex, claude, bridge_error=None, pre_bridge_error=None, label='sonnet', worker=True, eligible=True):
         from unittest.mock import Mock
         from model_router import run_llm_with_transient_failover
         cfg = {
@@ -416,7 +416,8 @@ class AccountOfExecutionTests(unittest.TestCase):
                    f'[{label}-review] Review parser'}]}
         with patch('model_router._load_config', return_value=cfg), \
              patch('model_router._verified_delegated_claude_review',
-                   return_value=(Path('/tmp'), label) if eligible else None), \
+                   return_value=(Path('/tmp'), label) if eligible else None,
+                   side_effect=pre_bridge_error), \
              patch('model_router.usage_guard.read', return_value=reading(claude)) as claude_read, \
              patch('model_router.usage_guard.peek', return_value=reading(codex)), \
              patch('model_router._run_opus5_bridge', bridge):
@@ -445,7 +446,7 @@ class AccountOfExecutionTests(unittest.TestCase):
             codex.assert_not_called()
             self.assertEqual(bridge.call_count, 0 if claude == 95 else 1)
 
-    def test_failed_review_bridge_records_the_fallback_reason_and_audit(self):
+    def test_failed_review_bridge_keeps_one_route_call_and_records_visible_failure_audit(self):
         with patch('model_router._log_decision') as route_log, \
              patch('model_router.claude_delegation._log') as audit:
             result, codex, bridge, _ = self._route(
@@ -453,13 +454,31 @@ class AccountOfExecutionTests(unittest.TestCase):
         self.assertEqual(result, 'Codex ran')
         codex.assert_called_once()
         bridge.assert_called_once()
-        self.assertTrue(any(
-            'Claude review failed (Claude Code reached max turns); ran as an ordinary terra worker' in call.args[0].reason
-            for call in route_log.call_args_list
-        ))
+        # The request middleware already logged the sole provider call. A bridge
+        # failure is a correlated Claude audit, never a second routed-call entry.
+        route_log.assert_not_called()
         audit.assert_called_once()
-        self.assertEqual(audit.call_args.args[1]['outcome'], 'error')
-        self.assertIn('Claude Code reached max turns', audit.call_args.args[1]['message'])
+        event = audit.call_args.args[1]
+        self.assertEqual(event['outcome'], 'error')
+        self.assertEqual(event['tier_requested'], 'sonnet')
+        self.assertIn('Claude Code reached max turns', event['message'])
+
+    def test_pre_bridge_review_exception_is_not_audited_as_a_claude_failure(self):
+        with patch('model_router.claude_delegation._log') as audit:
+            result, codex, bridge, _ = self._route(
+                codex=10, claude=10, pre_bridge_error=RuntimeError('bad review config'))
+        self.assertEqual(result, 'Codex ran')
+        codex.assert_called_once()
+        bridge.assert_not_called()
+        audit.assert_not_called()
+
+    def test_root_review_label_without_a_bridge_attempt_is_not_audited(self):
+        with patch('model_router.claude_delegation._log') as audit:
+            result, codex, bridge, _ = self._route(codex=10, claude=10, worker=False)
+        self.assertEqual(result, 'Codex ran')
+        codex.assert_called_once()
+        bridge.assert_not_called()
+        audit.assert_not_called()
 
     def test_no_eligible_bridge_does_not_probe_claude(self):
         result, codex, bridge, read = self._route(codex=10, claude=10, eligible=False)
@@ -467,6 +486,45 @@ class AccountOfExecutionTests(unittest.TestCase):
         codex.assert_called_once()
         bridge.assert_not_called()
         read.assert_not_called()
+
+    def test_failed_review_persists_one_routed_call_and_one_correlated_audit(self):
+        import json
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            routes = Path(directory) / 'routes.jsonl'
+            audits = Path(directory) / 'claude.jsonl'
+            cfg = {
+                'enabled': True, 'provider': 'openai-codex',
+                'models': {'terra': 'gpt-terra'},
+                'callable': {'terra': True, 'sonnet5': True},
+                'coding_agent': {'enabled': False, 'delegated_review': {'enabled': True}},
+                'logging': {'enabled': True, 'path': str(routes)},
+                'claude_delegation': {'log_path': str(audits)},
+            }
+            request = {'model': 'gpt-terra', 'messages': [
+                {'role': 'user', 'content': '[sonnet-review] Review parser'}]}
+            context = {'turn_id': 's:sa-1', 'api_call_count': 1, 'request': request}
+            # Request middleware already wrote the one actual routed-call entry.
+            router._log_decision(router.RouteDecision('terra', 'gpt-terra', 'review route'), context, cfg)
+            downstream = Mock(return_value='Codex ran')
+            with patch('model_router._load_config', return_value=cfg), \
+                 patch('model_router._verified_delegated_claude_review', return_value=(Path(directory), 'sonnet')), \
+                 patch('model_router._run_opus5_bridge', side_effect=RuntimeError('Claude Code reached max turns')):
+                result = router.run_llm_with_transient_failover(
+                    request=request, original_request=request, next_call=downstream,
+                    provider='openai-codex', api_mode='codex_responses',
+                    platform='subagent', turn_id='s:sa-1', api_call_count=1)
+            route_entries = [json.loads(line) for line in routes.read_text().splitlines()]
+            audit_entries = [json.loads(line) for line in audits.read_text().splitlines()]
+        self.assertEqual(result, 'Codex ran')
+        downstream.assert_called_once()
+        self.assertEqual(len(route_entries), 1)
+        self.assertEqual((route_entries[0]['turn_id'], route_entries[0]['api_call_count']), ('s:sa-1', 1))
+        self.assertEqual(len(audit_entries), 1)
+        self.assertEqual(audit_entries[0]['turn_id'], 's:sa-1')
+        self.assertEqual(audit_entries[0]['outcome'], 'error')
+        self.assertIn('Claude Code reached max turns', audit_entries[0]['message'])
 
     def test_root_is_not_stopped_by_worker_account_limit(self):
         result, codex, _, _ = self._route(codex=95, claude=95, worker=False)
