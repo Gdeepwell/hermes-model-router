@@ -2909,11 +2909,16 @@ def _account_load_sentence(cfg: Dict[str, Any]) -> str:
     )
 
 
-def _conductor_tier(cfg: Optional[Dict[str, Any]], request: Optional[Dict[str, Any]] = None) -> str:
+def _conductor_tier(
+    cfg: Optional[Dict[str, Any]],
+    request: Optional[Dict[str, Any]] = None,
+    parent: str = "",
+) -> str:
     """The tier the forced conductor child should run on.
 
-    ``orchestration.conductor`` when the operator has pinned one, else
-    ``default_model``, else the first callable tier its ``fallbacks`` chain
+    ``orchestration.conductor`` when the operator has pinned one, else the
+    parent's own tier (``parent``, while ``orchestration.conductor_follows_parent``
+    is on), else ``default_model``, else the first callable tier its ``fallbacks`` chain
     reaches. Every step is skipped when its tier cannot be called: pinning the
     conductor to a configured default is what made an exhausted account fail the
     whole preflight -- the parent had already moved to a working account, and its
@@ -2927,6 +2932,11 @@ def _conductor_tier(cfg: Optional[Dict[str, Any]], request: Optional[Dict[str, A
     where coordination then paid external-account prices for planning. One key
     answering two unrelated questions cannot be set correctly for both, so the
     conductor now has its own.
+
+    The parent step exists because the default made Codex the only planner: a
+    session switched to Grok (2026-09-25) handed every plan back to Terra, or --
+    before any tier could orchestrate -- worked alone. Following the parent
+    keeps planning on the account the operator chose for the session.
     """
     cfg = cfg or {}
     model_param = _host_delegate_has_model(request)
@@ -2950,6 +2960,11 @@ def _conductor_tier(cfg: Optional[Dict[str, Any]], request: Optional[Dict[str, A
     pinned = str((cfg.get("orchestration") or {}).get("conductor") or "").strip().casefold()
     if pinned and reachable(pinned):
         return pinned
+    parent = str(parent or "").strip().casefold()
+    follows_parent = bool((cfg.get("orchestration") or {}).get("conductor_follows_parent", True))
+    # Spark is a leaf-only tier: a root Spark label is already deferred to the default.
+    if follows_parent and parent and parent != "spark" and reachable(parent):
+        return parent
     default = str(cfg.get("default_model", "terra"))
     if reachable(default):
         return default
@@ -2977,8 +2992,9 @@ def _prepare_orchestration_delegation(
     *,
     force_tools: bool = True,
     claude_choice: Tuple[str, str, str] = ("", "", ""),
+    parent_tier: str = "",
 ) -> Dict[str, Any]:
-    """Force one real Terra-supervised Spark dispatch before parent execution.
+    """Force one real conductor-supervised dispatch before parent execution.
 
     This is an operational delegation checkpoint, never a benchmark: the
     parent must use returned evidence, explicitly accept/reject it, and retain
@@ -2989,7 +3005,7 @@ def _prepare_orchestration_delegation(
     requires one of them -- forcing delegate_task alone made that preference
     unreachable (a review turn ran on Terra instead of Sonnet, 2026-09-19).
     """
-    orchestrator_tier = _conductor_tier(cfg, request)
+    orchestrator_tier = _conductor_tier(cfg, request, parent_tier)
 
     routed = deepcopy(request)
     claude_kind, claude_target, balanced = claude_choice
@@ -3255,12 +3271,14 @@ def _orchestration_skip_reason(
     policy = cfg.get("orchestration") or {}
     request = kwargs.get("request")
     sol_preflight = decision.tier == "sol" and _sol_opus5_preflight_enabled(cfg)
-    # Orchestration is enabled for Sol (design preflight) and the configured
-    # default_model (which acts as the general-purpose orchestrator).
-    # An external parent (a fallback account) orchestrates exactly like a local one:
-    # only the model rewrite is provider-bound, the delegation contract is not.
+    # Every tier the router knows can orchestrate. This used to be Sol plus
+    # default_model only, so a session switched to Grok (2026-09-25) never saw a
+    # preflight and worked alone. An external parent (a fallback account)
+    # orchestrates exactly like a local one: only the model rewrite is
+    # provider-bound, the delegation contract is not.
     orchestration_tiers = (
-        {"sol"} | {str(cfg.get("default_model", "terra"))} | set(_delegation_target_names())
+        {"sol"} | {str(cfg.get("default_model", "terra"))}
+        | set(cfg.get("models") or {}) | set(_delegation_target_names())
     )
     if not policy.get("enabled"):
         return "orchestration_disabled"
@@ -3268,8 +3286,6 @@ def _orchestration_skip_reason(
         return f"tier_not_orchestrator:{decision.tier}"
     if not isinstance(request, dict):
         return "request_not_a_dict"
-    if decision.tier == "sol" and not sol_preflight:
-        return "sol_preflight_disabled"
     api_call_count = int(kwargs.get("api_call_count", 1) or 1)
     # Normal path: dispatch on the first Terra call. Recovery path: if that
     # process missed its initial checkpoint, rescue a genuinely long tool loop
@@ -3301,7 +3317,9 @@ def _orchestration_skip_reason(
     # is a first-call latency argument, so it must not gate the rescue: a turn
     # already deep in a tool loop has spent far more than a planner round trip,
     # and a short prompt ("csinald meg") routinely opens the longest loops.
-    if decision.tier == str(cfg.get("default_model", "terra")) and not sol_preflight and not is_rescue:
+    # Router-owned tiers only: an external parent (a Claude account the session
+    # fell back to) has always been preflighted regardless of length.
+    if decision.tier in (cfg.get("models") or {}) and not sol_preflight and not is_rescue:
         min_chars = max(0, int(policy.get("min_chars", 180) or 0))
         if len(user_text) < min_chars:
             return f"prompt_shorter_than_min_chars:{len(user_text)}<{min_chars}"
@@ -3346,7 +3364,7 @@ def _orchestration_skip_reason(
         return "empty_normalised_text"
     if not sol_preflight and not _host_delegation_limits()["conductor_available"]:
         return "host_has_no_conductor_depth; parent_delegates_direct_workers"
-    if not _conductor_tier(cfg, request):
+    if not _conductor_tier(cfg, request, decision.tier):
         return "no_reachable_conductor_route; parent_delegates_direct_workers"
     return None
 
@@ -3389,8 +3407,11 @@ def _force_terra_supervisor_preflight(
                     },
                 )
         return None
+    # Sol's own design preflight only when its bridge is configured; without it a
+    # Sol parent orchestrates through the same conductor contract as any tier.
+    sol_preflight = decision.tier == "sol" and _sol_opus5_preflight_enabled(cfg)
     claude_choice = (
-        _claude_first_choice(kwargs["request"], cfg, decision) if decision.tier != "sol" else ("", "", "")
+        _claude_first_choice(kwargs["request"], cfg, decision) if not sol_preflight else ("", "", "")
     )
     with _SHADOW_LOCK:
         if _orchestration_forced_event(cfg, turn_id):
@@ -3405,14 +3426,16 @@ def _force_terra_supervisor_preflight(
                 "plan_id": plan_id,
                 "turn_id": turn_id,
                 "parent_model": decision.tier,
-                "preflight_owner": "sol" if decision.tier == "sol" else "terra",
-                "preflight_bridge_model": "claude-opus-5-5" if decision.tier == "sol" else None,
+                "preflight_owner": (
+                    "sol" if sol_preflight else _conductor_tier(cfg, kwargs["request"], decision.tier)
+                ),
+                "preflight_bridge_model": "claude-opus-5-5" if sol_preflight else None,
                 "max_tasks": min(3, max(1, int((cfg.get("orchestration") or {}).get("max_tasks", 3)))),
                 "parent_prompt_preview": _prompt_preview(kwargs.get("request") or {}),
                 **({"balanced": claude_choice[2]} if claude_choice[2] else {}),
             },
         )
-    if decision.tier == "sol":
+    if sol_preflight:
         return _prepare_sol_opus5_preflight(kwargs["request"], plan_id)
     return _prepare_orchestration_delegation(
         kwargs["request"],
@@ -3421,6 +3444,7 @@ def _force_terra_supervisor_preflight(
         cfg=cfg,
         force_tools=_supports_forced_tool_choice(kwargs, decision),
         claude_choice=claude_choice,
+        parent_tier=decision.tier,
     )
 
 
@@ -3925,11 +3949,8 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     # Rules above may intentionally rewrite the tier (root labels, subagents,
     # quota). Re-validate the final destination immediately before dispatch.
     decision = _require_callable(decision, cfg)
-    forced_preflight_request = (
-        _force_terra_supervisor_preflight(kwargs, cfg, decision)
-        if decision.tier in {str(cfg.get("default_model", "terra")), "sol"}
-        else None
-    )
+    # Any parent tier may orchestrate; _orchestration_skip_reason owns the gates.
+    forced_preflight_request = _force_terra_supervisor_preflight(kwargs, cfg, decision)
     forced_shadow_request = (
         _force_shadow_delegation_if_eligible(kwargs, cfg)
         if decision.tier == str(cfg.get("default_model", "terra")) and forced_preflight_request is None

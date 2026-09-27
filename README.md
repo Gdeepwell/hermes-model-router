@@ -251,7 +251,15 @@ its own provider, so a parent on a fallback account silently lost its contract
 and worked alone. A second gate compounded it by recognising only Sol and
 `default_model` as orchestrators.
 
-The forced conductor uses `orchestration.conductor`, then the callable
+**Every parent tier orchestrates (1.19.0).** Grok, Qwen, Luna and Sol parents get
+the same forced preflight as Terra; before, only Sol and `default_model` did, so a
+session switched to Grok never delegated at all. Sol's own Opus-bridge preflight
+still takes precedence when it is configured. `orchestration.min_chars` applies to
+every router-owned parent; an external (Claude) parent is preflighted regardless
+of length, as before.
+
+The forced conductor uses `orchestration.conductor`, then the parent's own tier
+(while `orchestration.conductor_follows_parent`, default on, is set), then the callable
 `default_model` and its fallback chain, skipping targets the current workflow
 or `delegate_task` schema cannot reach. On hosts without a `model` parameter,
 an off-provider goal prefix cannot create an off-provider conductor; if no
@@ -1330,6 +1338,12 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.19.0** — Every parent tier orchestrates, not only Terra and Sol: a Grok,
+Qwen, Luna or bridge-less Sol parent gets the forced conductor preflight, and the
+conductor follows the parent's own tier by default
+(`orchestration.conductor_follows_parent`), so planning stays on the account the
+session runs on instead of always returning to Codex.
 
 **1.18.1** — A tier switched off in Settings leaves the Model Router overview (and
 its account box once no tier is left), and it is dropped from Hermes's fallback

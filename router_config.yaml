@@ -148,6 +148,10 @@ delegation:
   preserve_spark_subagents: true
 orchestration:
   enabled: true
+  # The forced conductor runs on the parent's own tier (Grok plans on Grok,
+  # Terra on Terra). Off: it uses default_model and its fallback chain, as
+  # before 1.19.0. `conductor: <tier>` pins it outright and wins over both.
+  conductor_follows_parent: true
   min_chars: 1000
   max_tasks: 2
   rescue_min_calls: 6
