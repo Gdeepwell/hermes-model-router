@@ -1703,13 +1703,23 @@ def _without_router_contract(text: str) -> str:
     return text[:cut].rstrip() if cut > 0 else text
 
 
-# Hermes appends host/plugin context after the operator's turn. These are the
-# exact tagged blocks known to carry instructions that must not alter routing.
-_HOST_INJECTED_CONTEXT_TAGS = ("memory-context", "EXTREMELY_IMPORTANT")
+# Hermes appends host/plugin context after the operator's turn. A matching tag is
+# not provenance: an operator can paste the same markup. Strip only blocks whose
+# first content line is the host's exact signature. Keep this table so a future
+# injected context type needs one tag/signature entry and no generic tag matcher.
+_HOST_INJECTED_CONTEXT_TAGS = {
+    "memory-context": "[System note: The following is recalled memory context, NOT new user input.",
+    "EXTREMELY_IMPORTANT": "superpowers:using-superpowers bootstrap for hermes",
+}
 _HOST_INJECTED_CONTEXT_BLOCK = re.compile(
-    r"(?P<prefix>^|\n[ \t]*\n)[ \t]*<(?P<tag>"
-    + "|".join(map(re.escape, _HOST_INJECTED_CONTEXT_TAGS))
-    + r")>(?:.*?</(?P=tag)>|.*\Z)",
+    r"(?P<prefix>^|\r?\n[ \t]*\r?\n)[ \t]*(?:"
+    + "|".join(
+        rf"<{re.escape(tag)}>\r?\n{re.escape(signature)}"
+        + (r"[^\r\n]*" if tag == "memory-context" else "")
+        + rf"(?:\r?\n|$)(?:.*?</{re.escape(tag)}>|.*\Z)"
+        for tag, signature in _HOST_INJECTED_CONTEXT_TAGS.items()
+    )
+    + r")",
     re.DOTALL,
 )
 
