@@ -1103,6 +1103,18 @@ def _claude_reasoning_pinned(config: dict) -> dict:
     return {tier: isinstance(effort, dict) and tier in effort for tier in CLAUDE_REASONING_TIERS}
 
 
+def _claude_reasoning_fallback_levels(config: dict, defaults: dict) -> dict:
+    block = config.get("claude_delegation")
+    effort = block.get("reasoning_effort") if isinstance(block, dict) else None
+    effort = effort if isinstance(effort, dict) else {}
+    levels = {}
+    for tier in CLAUDE_REASONING_TIERS:
+        value = effort.get(tier)
+        normalized = value.strip().casefold() if isinstance(value, str) else ""
+        levels[tier] = normalized if normalized in EFFORT_LEVELS else defaults[tier]
+    return levels
+
+
 def _haiku_reasoning_supported(delegation) -> bool:
     """Whether Haiku is one of this router's editable reasoning-effort tiers.
 
@@ -1130,7 +1142,7 @@ def _claude_reasoning_status(config: dict) -> dict:
         return {
             "available": False,
             "reason": "Router package not importable in this dashboard process",
-            "levels": dict(defaults),
+            "levels": _claude_reasoning_fallback_levels(config, defaults),
             "defaults": defaults,
             "pinned": pinned,
             "haiku_supported": False,
@@ -1150,7 +1162,7 @@ def _claude_reasoning_status(config: dict) -> dict:
         return {
             "available": False,
             "reason": f"claude_delegation reasoning-effort API not usable ({type(exc).__name__}: {exc})",
-            "levels": dict(defaults),
+            "levels": _claude_reasoning_fallback_levels(config, defaults),
             "defaults": defaults,
             "pinned": pinned,
             "haiku_supported": _haiku_reasoning_supported(delegation),
@@ -2108,7 +2120,8 @@ function mutatePreference(kind,index,act){
 
 function saveSettings(){
   if(!currentConfig)return Promise.resolve();
-  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,main_parent:currentConfig.main_parent||undefined,effort:currentConfig.effort||{},claude_reasoning_effort:(currentConfig.claude_reasoning_effort||{}).levels||{},worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
+  const claudeReasoning=currentConfig.claude_reasoning_effort||{};
+  const payload=JSON.parse(JSON.stringify({callable:currentConfig.callable,balance:currentConfig.balance?{enabled:!!currentConfig.balance.enabled,busy_percent:currentConfig.balance.busy_percent,margin_percent:currentConfig.balance.margin_percent}:undefined,default_model:currentConfig.default_model,main_parent:currentConfig.main_parent||undefined,effort:currentConfig.effort||{},claude_reasoning_effort:claudeReasoning.available?claudeReasoning.levels||{}:undefined,worker_model:(currentConfig.worker_model||{}).tier||undefined,preferences:currentConfig.preferences||{},hermes_fallback:currentConfig.hermes_fallback||{},usage_limits:Object.fromEntries(Object.entries(currentConfig.accounts||{}).filter(([,i])=>i.guard).map(([a,i])=>[a,{soft_percent:i.soft_percent,hard_percent:i.hard_percent}])),claude_delegation:(currentConfig.accounts||{}).anthropic?{default_tier:currentConfig.accounts.anthropic.delegation.default_tier}:undefined}));
   delete currentConfig.main_parent;
   settingsPending++;settingsLoadGeneration++;
   settingsSaveQueue=settingsSaveQueue.then(async()=>{

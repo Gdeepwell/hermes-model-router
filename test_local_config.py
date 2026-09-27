@@ -64,7 +64,7 @@ usage_guard:
 """
 
 
-def _files(directory, local=LOCAL):
+def _files(directory, local: str | None = LOCAL):
     shipped = Path(directory) / "router_config.yaml"
     shipped.write_text(SHIPPED, encoding="utf-8")
     if local is not None:
@@ -105,14 +105,17 @@ class RouterLayeringTests(unittest.TestCase):
 
 
 class DashboardLayeringTests(unittest.TestCase):
-    def _serve(self, directory, calls, local=LOCAL):
+    def _serve(self, directory, calls, local: str | None = LOCAL):
         shipped = _files(directory, local)
+        hermes = Path(directory) / "hermes-config.yaml"
+        hermes.write_text("model:\n  default: qwen3.7-plus\n  provider: qwen-token\n", encoding="utf-8")
         server = ThreadingHTTPServer(("127.0.0.1", 0), web_viewer.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         results = []
         try:
-            with patch.object(web_viewer, "CONFIG_PATH", shipped):
+            with patch.object(web_viewer, "CONFIG_PATH", shipped), \
+                 patch.object(web_viewer, "HERMES_CONFIG_PATH", hermes):
                 for method, body in calls:
                     request = urllib.request.Request(
                         f"http://127.0.0.1:{server.server_port}/api/config",
@@ -140,6 +143,16 @@ class DashboardLayeringTests(unittest.TestCase):
         self.assertEqual(shipped, SHIPPED)
         self.assertNotIn("workflow:", local, "a save drops the retired key")
         self.assertIn("default_model: terra", local)
+
+    def test_serving_a_default_model_save_leaves_the_callers_hermes_config_untouched(self):
+        """DashboardLayeringTests must isolate a Handler save from HERMES_HOME."""
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as hermes_home:
+            hermes = Path(hermes_home) / "config.yaml"
+            before = b"model:\n  default: qwen3.7-plus\n  provider: qwen-token\n"
+            hermes.write_bytes(before)
+            with patch.object(web_viewer, "HERMES_CONFIG_PATH", hermes):
+                self._serve(directory, [("POST", {"default_model": "terra"})], local=None)
+            self.assertEqual(hermes.read_bytes(), before)
 
     def test_the_local_file_holds_only_what_differs_and_keeps_its_comments(self):
         with tempfile.TemporaryDirectory() as directory:

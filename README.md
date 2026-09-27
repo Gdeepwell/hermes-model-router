@@ -882,7 +882,7 @@ without rerunning check_fns, so the router clears that memo (a private
 `model_tools` helper) when Claude's availability flips, on a routed request or
 before a gateway message is dispatched.
 
-**Older configs.** Up to 1.19 a `workflow: codex | claude_delegation` key (and
+**Older configs.** Before 1.19.0 a `workflow: codex | claude_delegation` key (and
 `claude_delegation.enabled`) switched Claude on and off. Both are retired. A
 `router_config.local.yaml` that still has them keeps working: at load time the
 router reads `workflow: codex` (or `enabled: false`) as all three Claude models
@@ -1405,6 +1405,9 @@ skipped here.
 **1.19.0** — Reasoning effort for delegated Claude and Grok, Claude as a
 switchable account, and a Claude main agent from the dashboard.
 
+- Delegated Claude reviews use the repository they were asked to review, have their
+  own turn limit, and show a clear reason when the Claude review bridge fails
+  before the work continues as an ordinary worker.
 - `delegate_claude` children get their own per-tier reasoning effort:
   `claude_delegation.reasoning_effort.sonnet` / `.opus` (default `medium`) reach
   the delegated Sonnet or Opus child through a guarded bridge over Hermes's private

@@ -3356,6 +3356,89 @@ class ClaudeReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase)
         self.assertEqual(status["defaults"], {"sonnet": "medium", "opus": "medium"})
         self.assertEqual(status["pinned"], {"sonnet": True, "opus": False})
 
+    def test_fallback_status_keeps_pinned_effort_levels(self):
+        config = {"claude_delegation": {"reasoning_effort": {"opus": "high"}}}
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=None):
+            missing = web_viewer._claude_reasoning_status(config)
+
+        class BrokenDelegation:
+            @staticmethod
+            def reasoning_effort_config(_config):
+                raise RuntimeError("reasoning configuration unavailable")
+
+        with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+             contextlib.redirect_stderr(io.StringIO()):
+            broken = web_viewer._claude_reasoning_status(config)
+
+        for status in (missing, broken):
+            self.assertEqual(status["levels"], {"sonnet": "medium", "opus": "high"})
+            self.assertEqual(status["pinned"], {"sonnet": False, "opus": True})
+
+    def test_a_fallen_back_status_full_page_save_preserves_a_pinned_effort(self):
+        """An unavailable effort control must not turn its pinned value into the default on an unrelated save."""
+        class BrokenDelegation:
+            @staticmethod
+            def reasoning_effort_config(_config):
+                raise RuntimeError("reasoning configuration unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = self._write_config(directory)
+            config = web_viewer.yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            config["models"]["terra"] = "gpt-5.6-terra"
+            config["callable"]["terra"] = True
+            config["default_model"] = "terra"
+            config["effort"] = {tier: "medium" for tier in ("luna", "spark", "terra", "sol", "grok")}
+            with config_path.open("w", encoding="utf-8") as handle:
+                web_viewer.yaml.dump(config, handle)
+            config_path.with_name("hermes-config.yaml").write_text(
+                "model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n",
+                encoding="utf-8",
+            )
+            local = config_path.with_name("router_config.local.yaml")
+            local.write_text("claude_delegation:\n  reasoning_effort:\n    opus: high\n", encoding="utf-8")
+            with patch.object(web_viewer, "_claude_delegation_module", return_value=BrokenDelegation), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                status, page = self._request(config_path, "GET")
+                self.assertEqual(status, 200, page)
+                payload = {
+                    "callable": page["callable"],
+                    "default_model": page["default_model"],
+                    "effort": page["effort"],
+                    "claude_reasoning_effort": page["claude_reasoning_effort"]["levels"],
+                    "preferences": page["preferences"],
+                    "hermes_fallback": {},
+                    "usage_limits": {
+                        account: {"soft_percent": info["soft_percent"], "hard_percent": info["hard_percent"]}
+                        for account, info in page["accounts"].items() if info["guard"]
+                    },
+                    "revision": page["revision"],
+                }
+                if page.get("balance"):
+                    payload["balance"] = {key: page["balance"][key] for key in ("enabled", "busy_percent", "margin_percent")}
+                if page["accounts"].get("anthropic"):
+                    payload["claude_delegation"] = {
+                        "default_tier": page["accounts"]["anthropic"]["delegation"]["default_tier"]
+                    }
+                payload["callable"] = {**payload["callable"], "luna": False}
+                status, body = self._request(config_path, "POST", payload)
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8"))
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["success"])
+        self.assertEqual(written["claude_delegation"]["reasoning_effort"]["opus"], "high")
+
+    def test_saveSettings_omits_unavailable_claude_effort_controls(self):
+        script = r"""
+const assert=require('node:assert/strict');
+let currentConfig={revision:'r0',callable:{luna:true},accounts:{},default_model:'luna',effort:{luna:'medium'},claude_reasoning_effort:{available:false,levels:{sonnet:'medium',opus:'high'}},preferences:{},hermes_fallback:{}};
+let settingsSaveQueue=Promise.resolve(),settingsPending=0,settingsSaveFailed=false,settingsLoadGeneration=0;
+const status={textContent:'',style:{}};const $=()=>status,t=k=>k,requests=[];
+const fetch=(_url,options)=>{requests.push(JSON.parse(options.body));return Promise.resolve({ok:true,json:async()=>({success:true,revision:'r1'})})};
+""" + self.javascript_function("saveSettings") + r"""
+(async()=>{await saveSettings();assert.equal(Object.hasOwn(requests[0],'claude_reasoning_effort'),false)})().catch(e=>{console.error(e);process.exit(1)});
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_claude_reasoning_status_fallback_derives_haiku_support_from_the_delegation_module(self):
         # These direct status probes never save, so CONFIG_PATH/HERMES_CONFIG_PATH need no patch.
         class BrokenDelegation:
