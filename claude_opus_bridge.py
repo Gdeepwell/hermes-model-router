@@ -28,8 +28,15 @@ _PLUGIN_PARENT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_PARENT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_PARENT))
 
-from model_router import RouteDecision, _load_config, _log_decision, _normalise
-from model_router.hermes_paths import hermes_path
+if __package__:
+    # Loaded as part of the plugin package. Hermes names it
+    # ``hermes_plugins.model_router``, so a top-level ``model_router`` import
+    # would fail there (or load a second copy of the router elsewhere).
+    from . import RouteDecision, _load_config, _log_decision, _normalise
+    from .hermes_paths import hermes_path
+else:
+    from model_router import RouteDecision, _load_config, _log_decision, _normalise
+    from model_router.hermes_paths import hermes_path
 
 CANONICAL_OPUS_MODEL = "claude-opus-5-5"
 # The review label picks the Claude tier. Two are offered so a conductor can

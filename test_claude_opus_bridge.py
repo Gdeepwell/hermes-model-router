@@ -253,3 +253,35 @@ class AdjustmentEvidenceTests(unittest.TestCase):
             self.assertIn("weekly usage 75%", event["adjusted"])
         self.assertEqual(events[-1]["canonical_model"], "claude-sonnet-5")
         self.assertIn("usage soft limit: opus5→sonnet5", logged.call_args.args[0].reason)
+
+
+class HostPackageImportTests(unittest.TestCase):
+    """Hermes loads the plugin as ``hermes_plugins.model_router`` from a directory
+    named ``model-router``, so no top-level ``model_router`` package exists there.
+    The bridge must import inside that package, or every caller of it (the
+    delegate_task admission guard among them) raises ModuleNotFoundError."""
+
+    def test_bridge_imports_when_the_plugin_is_loaded_under_the_host_package_name(self):
+        import os
+        import subprocess
+        import sys
+
+        plugin_dir = str(Path(__file__).resolve().parent)
+        probe = (
+            "import importlib, importlib.util, sys, types\n"
+            "sys.modules['hermes_plugins'] = types.ModuleType('hermes_plugins')\n"
+            "sys.modules['hermes_plugins'].__path__ = []\n"
+            f"spec = importlib.util.spec_from_file_location('hermes_plugins.model_router', {plugin_dir + '/__init__.py'!r}, submodule_search_locations=[{plugin_dir!r}])\n"
+            "plugin = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = plugin\n"
+            "spec.loader.exec_module(plugin)\n"
+            "bridge = importlib.import_module('hermes_plugins.model_router.claude_opus_bridge')\n"
+            "assert 'model_router' not in sys.modules, 'a second, top-level copy of the router was imported'\n"
+            "assert bridge.RouteDecision is plugin.RouteDecision\n"
+            "print('OK')\n"
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            env = {"HOME": cwd, "HERMES_HOME": cwd + "/.hermes", "PATH": os.environ.get("PATH", "")}
+            result = subprocess.run([sys.executable, "-c", probe], cwd=cwd, env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertEqual(result.stdout.strip(), "OK")

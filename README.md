@@ -1441,6 +1441,10 @@ switchable account, and a Claude main agent from the dashboard.
   fix the import path. A refused save names the YAML error in
   `~/.hermes/config.yaml`, and the effort-save tests no longer write their stub
   over the Hermes config in `HERMES_HOME`.
+- The Claude Code bridge imports inside the plugin package. Under Hermes it is
+  loaded as `hermes_plugins.model_router`, where its top-level `model_router`
+  import failed, so the `delegate_task` admission guard raised on every call and
+  dispatches went out without the usage-limit or Claude-switch check.
 
 **1.18.1** — A tier switched off in Settings leaves the Model Router overview (and
 its account box once no tier is left), and it is dropped from Hermes's fallback
