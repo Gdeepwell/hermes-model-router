@@ -758,15 +758,32 @@ def _annotate(raw: Any, tier: str, outcome: "usage_guard.GuardOutcome",
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _active_parent() -> Any:
+    """The active Hermes parent, without going through ``_host()``.
+
+    Used only to attribute the availability-block refusal's audit line to a
+    session/turn before the tier is even known to be a legitimate request --
+    unlike the rest of ``_dispatch``, which reuses the single ``_host()`` call.
+    """
+    try:
+        from agent.subagent_lifecycle import get_active_subagent_parent
+        return get_active_subagent_parent()
+    except Exception:
+        return None
+
+
 def _dispatch(args: Dict[str, Any]) -> str:
     from . import _load_config
 
     cfg = _load_config()
     settings = delegation_config(cfg)
-    if availability_block(cfg):
-        return _error("Claude delegation is off: every Claude model is switched off in Settings. "
-                      "Use delegate_task, which runs on the Codex route.")
     requested = str(args.get("tier") or settings.get("default_tier") or "sonnet").strip().casefold()
+    if availability_block(cfg):
+        message = ("Claude delegation is off: every Claude model is switched off in Settings. "
+                   "Use delegate_task, which runs on the Codex route.")
+        _audit(cfg, _active_parent(), requested, requested,
+              usage_guard.GuardOutcome(TARGET_FOR_TIER.get(requested, "")), "refused", message)
+        return _error(message)
     if requested not in TIERS:
         return _error(f"Unknown tier {requested!r}; use one of: {', '.join(TIERS)}.")
     delegate_task, active_parent = _host()
@@ -790,7 +807,9 @@ def _dispatch(args: Dict[str, Any]) -> str:
         return _error(message)
     model = tier_model(tier, cfg)
     if not model:
-        return _error(f"Claude tier \"{tier}\" has no model under claude_delegation.tiers.")
+        message = f"Claude tier \"{tier}\" has no model under claude_delegation.tiers."
+        _audit(cfg, parent, requested, tier, outcome, "refused", message)
+        return _error(message)
 
     # Haiku has no extended-thinking support (see agent.anthropic_adapter.build_anthropic_kwargs),
     # so the reasoning-effort bridge is simply irrelevant to it: a Haiku call never sets a scope

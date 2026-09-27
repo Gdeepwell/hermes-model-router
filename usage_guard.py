@@ -257,8 +257,13 @@ def _fetch_anthropic() -> Optional[Reading]:
             break
         except Exception as exc:
             # Only a rejected token is worth another identity; anything else
-            # (network, 5xx, a changed endpoint) fails the read as before.
+            # (network, 5xx, a changed endpoint) fails the read at once, but the
+            # HTTP status it carried (when any) stays in the reason instead of
+            # being replaced by a generic "no usable reading".
             if _status_code(exc) not in (401, 403):
+                status = _status_code(exc)
+                with _LOCK:
+                    _LAST_FAILURE["anthropic"] = f"usage endpoint: {type(exc).__name__}: {status or exc}"
                 return None
             _logger.debug("usage_guard: the Anthropic usage endpoint rejected a token; trying the next one")
     if not isinstance(payload, dict):
@@ -416,6 +421,7 @@ def read(account: str, cfg: Dict[str, Any], *, now: Optional[float] = None,
         else:
             fresh = replace(fresh, fetched_at=now)
             slot["reading"], slot["failed_at"] = fresh, 0.0
+            _LAST_FAILURE.pop(account, None)
     if fresh is None:
         _logger.warning("usage_guard: %s usage unavailable; the guard fails open for %ds",
                         account_label(account), int(ttl))

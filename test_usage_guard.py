@@ -364,6 +364,16 @@ class FetcherTests(unittest.TestCase):
             self.assertIsNone(usage_guard.FETCHERS["anthropic"]())
         self.assertEqual(get_json.call_count, 1)
 
+    def test_a_non_auth_http_failure_keeps_its_status_in_the_reason(self):
+        """B2-N4: a non-401/403 HTTP error must not be swallowed into the generic
+        'no usable reading' reason; its status stays visible."""
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="tok"), \
+             patch("agent.anthropic_credentials._resolve_claude_code_token_from_credentials",
+                   return_value="tok", create=True), \
+             patch("agent.account_usage._get_json", side_effect=_unauthorized(500)):
+            self.assertIsNone(usage_guard.FETCHERS["anthropic"]())
+        self.assertIn("500", usage_guard.last_failure("anthropic"))
+
     def test_codex_uses_the_weekly_and_session_windows(self):
         reset = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)
         snapshot = SimpleNamespace(available=True, windows=(
@@ -612,6 +622,22 @@ class ForcedReadTests(unittest.TestCase):
         with self._fetchers(anthropic=[None]):
             self.assertIsNone(usage_guard.read("anthropic", _cfg(), now=1000.0, force=True))
         self.assertNotEqual(usage_guard.last_failure("anthropic"), "")
+
+    def test_a_successful_read_clears_a_reason_set_concurrently_after_the_pop(self):
+        """B2-N4: the pop happens before the fetch and the set after it, so a reason a
+        concurrent failed thread wrote in between must not survive a read whose own
+        fetch succeeded."""
+        def fetcher():
+            # Simulate another thread's failed read writing its reason after this
+            # read's own pre-fetch pop, but before this read's own success write.
+            with usage_guard._LOCK:
+                usage_guard._LAST_FAILURE["anthropic"] = "a concurrent failure's reason"
+            return _reading(40)
+
+        with patch.dict(usage_guard.FETCHERS, {"anthropic": fetcher}):
+            reading = usage_guard.read("anthropic", _cfg(), now=1000.0, force=True)
+        self.assertIsNotNone(reading)
+        self.assertEqual(usage_guard.last_failure("anthropic"), "")
 
     def test_an_account_without_a_fetcher_is_still_nothing_to_force(self):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0, force=True))

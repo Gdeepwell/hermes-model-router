@@ -4538,11 +4538,17 @@ def _existing_remembered_directory(repository: object) -> Optional[Path]:
 
 
 def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
-                                 dispatch_cwd: Optional[Path] = None) -> Optional[Path]:
+                                 dispatch_cwd: Optional[Path] = None,
+                                 at_dispatch: bool = False) -> Optional[Path]:
     """Resolve a labelled review leaf's repository without reading the process cwd.
 
     The child request carries its workspace path. Dispatch has no child request, so
     it may supply the parent's cwd, but only an existing Git work tree is usable.
+    ``at_dispatch`` is the caller's own explicit signal for "this is a dispatch, not
+    an execution" -- it must not be inferred from ``dispatch_cwd is None``, since a
+    dispatch whose parent has no resolvable workspace hint also passes ``None``. The
+    remembered dispatch->repo map is consulted only at execution (``not at_dispatch``);
+    at dispatch the task's own sources (goal, aliases, request, cwd, default) decide.
     """
     goal_repo = _goal_repository(text)
     if goal_repo is not None:
@@ -4554,7 +4560,7 @@ def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Opt
             candidate = _repo_directory(str(value))
             if candidate is not None:
                 return candidate
-    if dispatch_cwd is None:
+    if not at_dispatch:
         dispatched_repo = _remembered_dispatch_review_repository(text)
         if dispatched_repo is not None:
             return dispatched_repo
@@ -4620,8 +4626,15 @@ def _verified_explicit_opus5_review_repo(text: str, cfg: Dict[str, Any]) -> Opti
 
 def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,
                                     dispatch_cwd: Optional[Path] = None,
-                                    requested_model: Optional[str] = None) -> Tuple[Optional[Tuple[Path, str]], str]:
-    """Return the static delegated-review route or the reason it cannot be taken."""
+                                    requested_model: Optional[str] = None,
+                                    at_dispatch: bool = False) -> Tuple[Optional[Tuple[Path, str]], str]:
+    """Return the static delegated-review route or the reason it cannot be taken.
+
+    ``at_dispatch`` is the caller's explicit "this is a dispatch" signal, passed
+    straight through to ``_delegated_review_repository``; a hint-less dispatch
+    (``dispatch_cwd is None``) must not be mistaken for an execution just because
+    it lacks a workspace hint.
+    """
     coding_cfg = cfg.get("coding_agent") or {}
     policy = coding_cfg.get("delegated_review") or {}
     if not policy.get("enabled"):
@@ -4649,7 +4662,8 @@ def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: 
     target = {"opus": "opus5", "sonnet": "sonnet5"}[alias]
     if not _is_callable_tier(target, cfg):
         return None, f"Claude {alias} review tier is switched off"
-    repo = _delegated_review_repository(text, cfg, request=request, dispatch_cwd=dispatch_cwd)
+    repo = _delegated_review_repository(text, cfg, request=request, dispatch_cwd=dispatch_cwd,
+                                        at_dispatch=at_dispatch)
     if repo is None:
         return None, "no repository could be resolved"
     if dispatch_cwd is not None:

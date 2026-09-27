@@ -299,9 +299,9 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
             goal = "[sonnet-review] Review the parser's isolated worktree behavior"
             with patch("model_router.shutil.which", return_value="/claude"):
                 first_dispatch, first_reason = router._delegated_claude_review_status(
-                    goal, self._config(), dispatch_cwd=first)
+                    goal, self._config(), dispatch_cwd=first, at_dispatch=True)
                 second_dispatch, second_reason = router._delegated_claude_review_status(
-                    goal, self._config(), dispatch_cwd=second)
+                    goal, self._config(), dispatch_cwd=second, at_dispatch=True)
         self.assertEqual(first_reason, "")
         self.assertEqual(second_reason, "")
         self.assertEqual(first_dispatch, (first.resolve(), "sonnet"))

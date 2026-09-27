@@ -236,3 +236,80 @@ class AdmissionTests(unittest.TestCase):
         call.assert_not_called()
         self.assertIn('Claude delegation closed: weekly usage 95% (hard limit 90%)', result)
         self.assertEqual([entry.args[0] for entry in read.call_args_list], ['anthropic'])
+
+    def test_workspace_hint_is_resolved_only_for_a_delegate_task_spawn(self):
+        """B2-N1: the per-tool-call cost of resolving the workspace hint (host import,
+        _resolve_workspace_hint stats) must never be paid for a non-delegate_task call,
+        or for delegate_task list/steer/stop actions."""
+        call = Mock(return_value='ran')
+        with patch.object(router, '_load_config', return_value={'enabled': True}), \
+             patch('tools.delegate_tool_progress._resolve_workspace_hint') as resolve_hint:
+            for kwargs in (
+                dict(tool_name='terminal', args={'command': 'ls'}, next_call=call),
+                dict(tool_name='delegate_task', args={'action': 'stop'}, next_call=call),
+            ):
+                with self.subTest(kwargs=kwargs):
+                    result = worker_admission.guard_tool_execution(**kwargs)
+                    self.assertEqual(result, 'ran')
+            resolve_hint.assert_not_called()
+
+    def test_workspace_hint_resolution_failure_is_logged(self):
+        """B2-N1: a raised host seam must leave a trace, not a silent None."""
+        call = Mock(return_value='admitted')
+        with patch.object(router, '_load_config', return_value={'enabled': True}), \
+             patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-terra')), \
+             patch.object(router, '_delegated_claude_review_status', return_value=(None, 'no repository')), \
+             patch.object(worker_admission, 'refusal', return_value=''), \
+             patch('agent.subagent_lifecycle.get_active_subagent_parent', side_effect=RuntimeError('host seam moved')), \
+             patch.object(worker_admission, '_logger') as logger:
+            result = worker_admission.guard_tool_execution(
+                tool_name='delegate_task', args={'goal': 'Implement parser'}, next_call=call)
+        self.assertEqual(result, 'admitted')
+        logger.debug.assert_called_once()
+        self.assertIn('host seam moved', str(logger.debug.call_args))
+
+    def test_hint_less_dispatch_never_consults_the_remembered_dispatch_map(self):
+        """B2-N2: an explicit at_dispatch=True keeps a hint-less dispatch from reading the
+        remembered dispatch->repo map, even after another dispatch remembered a repo for
+        the same goal; execution (dispatch_cwd is None, at_dispatch not passed) still
+        reads the map."""
+        call = Mock(return_value='admitted')
+        cfg = {
+            'enabled': True, 'callable': {'sonnet5': True},
+            'coding_agent': {'delegated_review': {'enabled': True, 'models': ['sonnet']}},
+        }
+        goal = '[sonnet-review] Review the parser in the isolated worktree'
+        with tempfile.TemporaryDirectory() as directory:
+            workspace_repo = Path(directory) / 'parent-workspace'
+            subprocess.run(['git', 'init', str(workspace_repo)], check=True, capture_output=True)
+            with patch.object(router, '_load_config', return_value=cfg), \
+                 patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-terra')), \
+                 patch('model_router.shutil.which', return_value='/claude'), \
+                 patch('agent.subagent_lifecycle.get_active_subagent_parent', return_value=object()), \
+                 patch('tools.delegate_tool_progress._resolve_workspace_hint', return_value=str(workspace_repo)), \
+                 patch.object(worker_admission, 'refusal', return_value=''):
+                worker_admission.guard_tool_execution(
+                    tool_name='delegate_task', args={'goal': goal}, next_call=call)
+                remembered = router._remembered_dispatch_review_repository(goal)
+            self.assertEqual(remembered, workspace_repo.resolve())
+
+            # A second, hint-less dispatch of the same goal must not resolve the
+            # remembered repository -- only an execution (never through this
+            # dispatch path) may.
+            with patch.object(router, '_load_config', return_value=cfg), \
+                 patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-terra')), \
+                 patch('model_router.shutil.which', return_value='/claude'), \
+                 patch('agent.subagent_lifecycle.get_active_subagent_parent', return_value=object()), \
+                 patch('tools.delegate_tool_progress._resolve_workspace_hint', return_value=None), \
+                 patch.object(worker_admission, 'refusal', return_value='') as refusal:
+                worker_admission.guard_tool_execution(
+                    tool_name='delegate_task', args={'goal': goal}, next_call=call)
+            # No repository resolved -> the ordinary (non-Claude) admission path runs,
+            # not the Claude-account check the remembered repo would have triggered.
+            self.assertEqual(refusal.call_args.args[0], 'openai-codex')
+
+            # Execution (no dispatch_cwd, no at_dispatch flag) still reads the map.
+            with patch('model_router.shutil.which', return_value='/claude'):
+                status = router._delegated_claude_review_status(goal, cfg)
+            self.assertIsNotNone(status[0])
+            self.assertEqual(status[0][0], workspace_repo.resolve())

@@ -285,6 +285,33 @@ class HandlerTests(unittest.TestCase):
                                            "Settings. Use delegate_task, which runs on the Codex route.")
         self.assertEqual(calls, [])
 
+    def test_switching_every_claude_model_off_is_audited(self):
+        """B2-N3: this refusal predates the availability_block branch and wrote no audit."""
+        cfg = _cfg()
+        for target in ("haiku", "sonnet5", "opus5"):
+            cfg["callable"][target] = False
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            self._call({"tasks": [{"goal": "g"}]}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertIn("every Claude model is switched off", entry["message"])
+
+    def test_a_tier_with_no_configured_model_is_audited(self):
+        """B2-N3: the 'tier has no model' refusal wrote no audit either."""
+        cfg = _cfg()
+        cfg["claude_delegation"]["tiers"]["sonnet"] = ""
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "claude-delegation.jsonl"
+            cfg["claude_delegation"]["log_path"] = str(log)
+            payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "sonnet"}, cfg=cfg)
+            entry = json.loads(log.read_text(encoding="utf-8").strip())
+        self.assertIn("has no model", payload["error"])
+        self.assertEqual(calls, [])
+        self.assertEqual(entry["outcome"], "refused")
+        self.assertIn("has no model", entry["message"])
+
     def _call_with_resolver_capture(self, args, *, cfg=None, parent=None, usage=40.0, result=None):
         """Like _call, but the fake delegate_task also calls the installed resolver wrapper
         (tools.delegate_tool._resolve_child_runtime) with realistic kwargs, so tests can observe

@@ -7,6 +7,9 @@ from types import SimpleNamespace
 
 from . import usage_guard
 
+import logging
+
+_logger = logging.getLogger("model_router.worker_admission")
 
 CLAUDE_OFF = "Claude workers are switched off in Settings. The parent model is unchanged."
 
@@ -56,13 +59,6 @@ def guard_tool_execution(**kwargs):
     from . import _delegated_claude_review_status, _load_config, _delegation_targets_detail
     from .claude_delegation import TIER_FOR_TARGET
     from .claude_opus_bridge import CLAUDE_REVIEW_MODELS
-    try:
-        from agent.subagent_lifecycle import get_active_subagent_parent
-        from tools.delegate_tool_progress import _resolve_workspace_hint
-        workspace_hint = _resolve_workspace_hint(get_active_subagent_parent())
-        dispatch_cwd = Path(workspace_hint) if workspace_hint else None
-    except Exception:
-        dispatch_cwd = None
 
     args, next_call = kwargs.get("args") or {}, kwargs["next_call"]
     name = str(kwargs.get("tool_name") or "").removeprefix("mcp__")
@@ -71,6 +67,18 @@ def guard_tool_execution(**kwargs):
     cfg = _load_config()
     if not cfg.get("enabled", True):
         return next_call(args)
+
+    # Resolved only for an actual delegate_task spawn: every other tool call
+    # (terminal, read_file, ...) must never pay for this lookup.
+    try:
+        from agent.subagent_lifecycle import get_active_subagent_parent
+        from tools.delegate_tool_progress import _resolve_workspace_hint
+        workspace_hint = _resolve_workspace_hint(get_active_subagent_parent())
+        dispatch_cwd = Path(workspace_hint) if workspace_hint else None
+    except Exception as exc:
+        dispatch_cwd = None
+        _logger.debug("worker_admission: could not resolve the parent's workspace hint: %s", exc)
+
     account, model = delegate_task_route()
     targets = _delegation_targets_detail()
     tasks = args.get("tasks") or [args]
@@ -81,6 +89,7 @@ def guard_tool_execution(**kwargs):
         requested_model = str(task.get("model") or args.get("model") or "").strip()
         review, _reason = _delegated_claude_review_status(
             goal, cfg, dispatch_cwd=dispatch_cwd, requested_model=requested_model,
+            at_dispatch=True,
         )
         if review is not None:
             _repo, alias = review

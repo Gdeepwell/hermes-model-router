@@ -824,7 +824,7 @@ def _save_usage_limits(raw, config: dict):
 
 MANAGED_EFFORT_TIERS = ("luna", "spark", "terra", "sol", "grok")
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
-_DEFAULT_MANAGED_EFFORT = {"grok": "medium"}
+_DEFAULT_MANAGED_EFFORT = {"luna": "low", "spark": "low", "terra": "medium", "sol": "high", "grok": "medium"}
 
 
 def _effective_managed_effort_defaults() -> dict:
@@ -843,9 +843,9 @@ def _effort_status(config: dict) -> dict:
     """GET's ``effort`` payload: a string for every managed tier, never ``null``.
 
     A managed tier absent from the merged config (e.g. an older shipped file
-    without ``effort.grok``) falls back to its effective default rather than
-    reporting ``None``, which ``_save_effort`` would otherwise reject on the
-    very next full-page save.
+    without ``effort.grok``) falls back to its effective default -- the router's
+    own shipped default when the router is importable, else ``_DEFAULT_MANAGED_EFFORT``
+    (which now covers every managed tier) -- so this never reports ``None``.
     """
     existing = config.get("effort") or {}
     defaults = _effective_managed_effort_defaults()
@@ -860,10 +860,10 @@ def _save_effort(raw, config: dict):
 
     Every submitted key and value is checked before ``config`` changes, so a
     partial payload cannot leave an earlier tier changed after a later one fails.
-    A ``None`` value for a managed tier is ignored rather than rejected: GET can
-    report ``None``/an effective default for a tier absent from the merged
-    config, and the frontend posts the whole visible ``effort`` block on every
-    save, so a value must round-trip without erroring the entire payload.
+    A ``None`` value for a managed tier is ignored rather than rejected, as a
+    belt-and-braces guard: GET (``_effort_status``) never reports ``None`` for a
+    managed tier, but the frontend still posts the whole visible ``effort`` block
+    on every save, so a value must round-trip without erroring the entire payload.
     """
     if not isinstance(raw, dict):
         return "effort must be an object of tier -> low, medium, high, or xhigh"

@@ -3147,6 +3147,19 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
         self.assertNotIn("grok", config["effort"])
         self.assertEqual(config["effort"]["luna"], before["effort"]["luna"])
 
+    def test_effort_status_never_returns_null_even_without_the_router_module(self):
+        """C2-N1: _DEFAULT_MANAGED_EFFORT must carry every managed tier's shipped
+        default, so _effort_status still promises never-null when the router
+        module itself is not importable (not just when a tier is merely absent
+        from an importable router's config)."""
+        config = {"effort": {"luna": "low"}}
+        with patch.object(web_viewer, "_router_module", return_value=None):
+            status = web_viewer._effort_status(config)
+        for tier in web_viewer.MANAGED_EFFORT_TIERS:
+            with self.subTest(tier=tier):
+                self.assertIsNotNone(status[tier])
+                self.assertIsInstance(status[tier], str)
+
 
 class FullPageFilterTests(unittest.TestCase):
     def test_controls_update_visible_cards_and_counts_together(self):
