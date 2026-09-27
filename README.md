@@ -288,7 +288,26 @@ its own provider, so a parent on a fallback account silently lost its contract
 and worked alone. A second gate compounded it by recognising only Sol and
 `default_model` as orchestrators.
 
-The forced conductor uses `orchestration.conductor`, then the callable
+**Every parent tier orchestrates (1.19.0).** Grok, Qwen, Luna and Sol parents get
+the same forced preflight as Terra; before, only Sol and `default_model` did, so a
+session switched to Grok never delegated at all. Sol's own Opus-bridge preflight
+still takes precedence when it is configured. `orchestration.min_chars` applies to
+every router-owned parent; an external (Claude) parent is preflighted regardless
+of length, as before.
+
+**The written objective decides, not the user's message (1.20.0).** `min_chars`
+only skips a *fresh* short prompt. A short follow-up after earlier assistant work
+("csinald meg" after a discussed plan) is preflighted anyway, and the parent is
+told to write the plan out as a self-contained goal, since the conductor never sees
+the conversation. The `pre_tool_call` gate then measures that goal: under
+`orchestration.min_goal_chars` (default 500; 0 turns it off) the planner call is
+refused with a message, nothing is spawned, a `preflight_declined` event is logged,
+and the parent continues with its full toolset. Only the router's own forced
+planner call is measured, recognised by its pinned contract. Above the threshold
+the conductor still decides how many workers (zero included) the task deserves.
+
+The forced conductor uses `orchestration.conductor`, then the parent's own tier
+(while `orchestration.conductor_follows_parent`, default on, is set), then the callable
 `default_model` and its fallback chain, skipping targets that are switched off
 or that the `delegate_task` schema cannot reach. On hosts without a `model` parameter,
 an off-provider goal prefix cannot create an off-provider conductor; if no
@@ -882,7 +901,7 @@ without rerunning check_fns, so the router clears that memo (a private
 `model_tools` helper) when Claude's availability flips, on a routed request or
 before a gateway message is dispatched.
 
-**Older configs.** Before 1.19.0 a `workflow: codex | claude_delegation` key (and
+**Older configs.** Before 1.21.0 a `workflow: codex | claude_delegation` key (and
 `claude_delegation.enabled`) switched Claude on and off. Both are retired. A
 `router_config.local.yaml` that still has them keeps working: at load time the
 router reads `workflow: codex` (or `enabled: false`) as all three Claude models
@@ -1402,7 +1421,7 @@ skipped here.
 
 ## Version
 
-**1.19.0** — Reasoning effort for delegated Claude and Grok, Claude as a
+**1.21.0** — Reasoning effort for delegated Claude and Grok, Claude as a
 switchable account, and a Claude main agent from the dashboard.
 
 - Delegated Claude reviews use the repository they were asked to review, have their
@@ -1452,6 +1471,17 @@ switchable account, and a Claude main agent from the dashboard.
   removed before the delegated-leaf classifier runs, so their instruction words
   cannot promote a read-only `[luna]` or `[spark]` leaf to Terra. The raw request
   remains available to logs and the Claude CLI bridge.
+
+**1.20.0** — The objective the parent writes decides whether a conductor is
+spawned, not the length of the user's message: a short follow-up is preflighted,
+and a composed goal under `orchestration.min_goal_chars` returns to the parent
+without spawning anything.
+
+**1.19.0** — Every parent tier orchestrates, not only Terra and Sol: a Grok,
+Qwen, Luna or bridge-less Sol parent gets the forced conductor preflight, and the
+conductor follows the parent's own tier by default
+(`orchestration.conductor_follows_parent`), so planning stays on the account the
+session runs on instead of always returning to Codex.
 
 **1.18.1** — A tier switched off in Settings leaves the Model Router overview (and
 its account box once no tier is left), and it is dropped from Hermes's fallback
