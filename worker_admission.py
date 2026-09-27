@@ -56,6 +56,13 @@ def guard_tool_execution(**kwargs):
     from . import _delegated_claude_review_status, _load_config, _delegation_targets_detail
     from .claude_delegation import TIER_FOR_TARGET
     from .claude_opus_bridge import CLAUDE_REVIEW_MODELS
+    try:
+        from agent.subagent_lifecycle import get_active_subagent_parent
+        from tools.delegate_tool_progress import _resolve_workspace_hint
+        workspace_hint = _resolve_workspace_hint(get_active_subagent_parent())
+        dispatch_cwd = Path(workspace_hint) if workspace_hint else None
+    except Exception:
+        dispatch_cwd = None
 
     args, next_call = kwargs.get("args") or {}, kwargs["next_call"]
     name = str(kwargs.get("tool_name") or "").removeprefix("mcp__")
@@ -73,7 +80,7 @@ def guard_tool_execution(**kwargs):
         goal = str(task.get("goal") or args.get("goal") or "")
         requested_model = str(task.get("model") or args.get("model") or "").strip()
         review, _reason = _delegated_claude_review_status(
-            goal, cfg, dispatch_cwd=Path.cwd(), requested_model=requested_model,
+            goal, cfg, dispatch_cwd=dispatch_cwd, requested_model=requested_model,
         )
         if review is not None:
             _repo, alias = review

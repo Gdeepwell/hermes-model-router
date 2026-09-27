@@ -86,6 +86,8 @@ coding_agent:
     max_chars: 8000
   delegated_review:
     enabled: true
+    # Reviews need more inspection turns than bounded coding tasks; they do not inherit max_turns above.
+    max_turns: 16
     max_chars: 8000
     models:
     - opus

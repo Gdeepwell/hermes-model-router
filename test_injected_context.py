@@ -8,10 +8,14 @@ import importlib.util
 import os
 from pathlib import Path
 import pwd
+import subprocess
+import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
-from model_router import classify_request, route_llm_request
+import model_router as router
+from model_router import _maybe_run_opus5, classify_request, route_llm_request, usage_guard
 
 
 MODELS = {
@@ -113,6 +117,36 @@ class InjectedContextClassificationTests(unittest.TestCase):
             GOAL + "\n\n<EXTREMELY_IMPORTANT>\n"
             "superpowers:using-superpowers bootstrap for hermes\nPlease fix the parser."
         )
+
+    def test_execution_bridge_uses_stripped_text_for_workspace_and_length_but_sends_raw_task(self):
+        goal = "[sonnet-review] Review the parser and report only."
+        bootstrap = self.real_superpowers_bootstrap()
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "workspace"
+            repo.mkdir()
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            cfg = {
+                **CFG,
+                "coding_agent": {"delegated_review": {
+                    "enabled": True, "models": ["sonnet"], "max_chars": len(goal) + 1,
+                }},
+            }
+            request = {
+                "instructions": f"WORKSPACE PATH:\n{repo}\nUse this exact path.",
+                "messages": [{"role": "user", "content": goal + "\n\n" + bootstrap}],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"), \
+                 patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
+                 patch("model_router._run_opus5_bridge", return_value={
+                     "result": "reviewed", "effective_model": "claude-sonnet-5",
+                 }) as bridge:
+                route, reason = router._delegated_claude_review_status(goal, cfg, request=request)
+                result = _maybe_run_opus5(request, cfg, platform="subagent", api_mode="codex_responses")
+        self.assertEqual(reason, "")
+        self.assertEqual(route, (repo.resolve(), "sonnet"))
+        self.assertEqual(result.model, "claude-sonnet-5")
+        self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
+        self.assertEqual(bridge.call_args.kwargs["task"], goal + "\n\n" + bootstrap)
 
     def test_unsigned_host_tags_remain_operator_text(self):
         for tag, block in UNSIGNED_CONTEXTS.items():

@@ -151,6 +151,24 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
                     "[sonnet-review] Review parser", self._config(), request=request)
         self.assertEqual(routed, (repo.resolve(), "sonnet"))
 
+    def test_workspace_path_uses_the_last_host_appended_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context_repo = self._git_repo(directory)
+            workspace_repo = Path(directory) / "workspace"
+            workspace_repo.mkdir()
+            subprocess.run(["git", "init", str(workspace_repo)], check=True, capture_output=True)
+            request = {
+                "instructions": (
+                    f"CONTEXT:\nWORKSPACE PATH:\n{context_repo}\nPasted brief.\n"
+                    f"WORKSPACE PATH:\n{workspace_repo}\nUse this exact path."
+                ),
+                "messages": [{"role": "user", "content": "[sonnet-review] Review parser"}],
+            }
+            with patch("model_router.shutil.which", return_value="/claude"):
+                routed = router._verified_delegated_claude_review(
+                    "[sonnet-review] Review parser", self._config(), request=request)
+        self.assertEqual(routed, (workspace_repo.resolve(), "sonnet"))
+
     def test_workspace_path_in_a_chat_system_message_resolves_a_review(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = self._git_repo(directory)
@@ -426,6 +444,22 @@ class AccountOfExecutionTests(unittest.TestCase):
             self.assertIn('ROUTER WORKER STOPPED', result.output_text)
             codex.assert_not_called()
             self.assertEqual(bridge.call_count, 0 if claude == 95 else 1)
+
+    def test_failed_review_bridge_records_the_fallback_reason_and_audit(self):
+        with patch('model_router._log_decision') as route_log, \
+             patch('model_router.claude_delegation._log') as audit:
+            result, codex, bridge, _ = self._route(
+                codex=10, claude=10, bridge_error=RuntimeError('Claude Code reached max turns'))
+        self.assertEqual(result, 'Codex ran')
+        codex.assert_called_once()
+        bridge.assert_called_once()
+        self.assertTrue(any(
+            'Claude review failed (Claude Code reached max turns); ran as an ordinary terra worker' in call.args[0].reason
+            for call in route_log.call_args_list
+        ))
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.args[1]['outcome'], 'error')
+        self.assertIn('Claude Code reached max turns', audit.call_args.args[1]['message'])
 
     def test_no_eligible_bridge_does_not_probe_claude(self):
         result, codex, bridge, read = self._route(codex=10, claude=10, eligible=False)

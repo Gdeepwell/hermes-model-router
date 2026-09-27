@@ -239,6 +239,7 @@ class NegatedVerbTests(unittest.TestCase):
         for text in (
             "[luna] Make no edits but rewrite the config in /home/x.",
             "[spark] No edits and rewrite the schema in /home/x.",
+            "[luna] Make no changes except bump the version in /home/x.",
         ):
             with self.subTest(text=text):
                 self.assertFalse(_is_spark_read_only_work(text))
@@ -277,6 +278,17 @@ class NothingObjectTests(unittest.TestCase):
             chat_request(self.DISPATCHED), 1, CFG, allow_plan_label_over_design=True
         )
         self.assertEqual(decision.tier, "luna")
+
+    def test_exception_clauses_after_nothing_are_writes(self):
+        for text in (
+            "[luna] Change nothing except the timeout in /home/x/config.yaml.",
+            "[spark] Modify nothing but the config in /home/x.",
+            "[luna] Edit nothing other than the version string in /home/x.",
+            "[spark] Make no changes apart from the README in /home/x.",
+            "[luna] Change nothing besides the test fixture in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
 
     def test_nothing_does_not_hide_a_real_instruction(self):
         """Only the verb directly refusing its object is stripped."""

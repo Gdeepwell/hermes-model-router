@@ -49,10 +49,21 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         self.assertEqual(bridge["state"], "error")
         run.assert_called_once()
 
+    @patch("model_router.claude_opus_bridge.dispatch")
+    def test_delegated_reviews_use_their_own_configured_turn_limit(self, bridge):
+        from model_router import _run_opus5_bridge
+
+        bridge.return_value = {"result": "reviewed"}
+        _run_opus5_bridge(
+            repo="/tmp", task="[sonnet-review] Review parser", write=False, review=True,
+            cfg={"coding_agent": {"max_turns": 3, "delegated_review": {"max_turns": 17}}},
+        )
+        self.assertEqual(bridge.call_args.kwargs["max_turns"], 17)
+
     @patch("claude_opus_bridge._log_decision")
     @patch("claude_opus_bridge.subprocess.run")
     def test_lifecycle_records_started_then_one_terminal_with_parent_and_precedence(self, run, log):
-        run.return_value.returncode = 0
+        run.return_value.returncode = 1
         run.return_value.stderr = ""
         run.return_value.stdout = json.dumps({
             "subtype": "error_max_turns", "is_error": True,
@@ -282,6 +293,11 @@ class HostPackageImportTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as cwd:
             env = {"HOME": cwd, "HERMES_HOME": cwd + "/.hermes", "PATH": os.environ.get("PATH", "")}
-            result = subprocess.run([sys.executable, "-c", probe], cwd=cwd, env=env, text=True, capture_output=True)
+            with patch("subprocess.run", wraps=subprocess.run) as run:
+                result = subprocess.run(
+                    [sys.executable, "-c", probe], cwd=cwd, env=env, text=True,
+                    capture_output=True, timeout=60,
+                )
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertEqual(result.stdout.strip(), "OK")

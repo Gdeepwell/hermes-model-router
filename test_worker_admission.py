@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import unittest
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import model_router as router
@@ -75,6 +76,31 @@ class AdmissionTests(unittest.TestCase):
             self.assertIn('closed', result)
             self.assertEqual(worker_admission.guard_tool_execution(tool_name='delegate_task',
                              args={'action': 'stop'}, next_call=call), 'controlled')
+
+    def test_pathless_review_uses_the_active_parent_workspace_not_process_cwd(self):
+        call = Mock(return_value='admitted')
+        cfg = {
+            'enabled': True, 'callable': {'sonnet5': True},
+            'coding_agent': {'delegated_review': {'enabled': True, 'models': ['sonnet']}},
+        }
+        goal = '[sonnet-review] Review the parser in the isolated worktree'
+        with tempfile.TemporaryDirectory() as directory:
+            process_repo = Path(directory) / 'process-cwd'
+            workspace_repo = Path(directory) / 'parent-workspace'
+            for repo in (process_repo, workspace_repo):
+                subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
+            with patch.object(router, '_load_config', return_value=cfg), \
+                 patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-terra')), \
+                 patch('model_router.shutil.which', return_value='/claude'), \
+                 patch.object(worker_admission.Path, 'cwd', return_value=process_repo), \
+                 patch('agent.subagent_lifecycle.get_active_subagent_parent', return_value=object()), \
+                 patch('tools.delegate_tool_progress._resolve_workspace_hint', return_value=str(workspace_repo)), \
+                 patch.object(worker_admission, 'refusal', return_value=''):
+                result = worker_admission.guard_tool_execution(
+                    tool_name='delegate_task', args={'goal': goal}, next_call=call)
+                remembered = router._remembered_dispatch_review_repository(goal)
+        self.assertEqual(result, 'admitted')
+        self.assertEqual(remembered, workspace_repo.resolve())
 
     def test_resolvable_review_uses_the_claude_account_at_dispatch(self):
         call = Mock(return_value='admitted')

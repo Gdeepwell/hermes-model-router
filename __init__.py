@@ -716,7 +716,7 @@ _SPARK_MUTATING_VERBS = (
     r"commitold|stabilizald|tavolitsd\s+el|nevezd\s+at|alakitsd\s+at|"
     r"refaktorald|csereld|irasd\s+at"
 )
-_SPARK_MUTATING_WORK = re.compile(rf"\b({_SPARK_MUTATING_VERBS})\b")
+_SPARK_MUTATING_WORK = re.compile(rf"\b({_SPARK_MUTATING_VERBS})(?:s|es)?\b")
 _SPARK_READ_ONLY_WORK = re.compile(
     r"\b(inspect|read|review|audit|report|analy[sz]e|compare|search|find|"
     r"identify|list|check|investigate|research|explore|trace|map|survey|"
@@ -969,12 +969,14 @@ def _without_verbs_as_nouns(text: str) -> str:
 # purpose: dropping the whole clause would hide a real instruction standing next
 # to it, so "make no edits but rewrite the config" must still read as a write.
 _NEGATED_VERB = re.compile(
-    rf"\bno\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?\b", re.I)
+    rf"\bno\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?\b"
+    rf"(?!\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b)", re.I)
 # "change nothing", "modify absolutely nothing": the same refusal with the verb
 # first. Only a verb whose direct object is "nothing" is stripped, so "edit the
 # schema so that nothing breaks" and "fix the parser; nothing else" still write.
 _NOTHING_OBJECT_VERB = re.compile(
-    rf"\b(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing\b", re.I)
+    rf"\b(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing\b"
+    rf"(?!\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b)", re.I)
 
 
 def _without_negated_verbs(text: str) -> str:
@@ -4450,9 +4452,9 @@ def _workspace_repository(request: Optional[Dict[str, Any]]) -> Optional[Path]:
         if isinstance(item, dict) and str(item.get("role") or "").casefold() == "system"
     )
     for text in texts:
-        match = _WORKSPACE_PATH_BLOCK.search(text or "")
-        if match:
-            candidate = _repo_directory(match.group(1).strip())
+        matches = list(_WORKSPACE_PATH_BLOCK.finditer(text or ""))
+        if matches:
+            candidate = _repo_directory(matches[-1].group(1).strip())
             if candidate is not None:
                 return candidate
     return None
@@ -4659,7 +4661,7 @@ def _run_opus5_bridge(*, repo: str, task: str, write: bool, review: bool = False
         requested_alias=requested_alias,
         adjustment=adjustment,
         timeout=int(coding_cfg.get("timeout_seconds", 300)),
-        max_turns=coding_cfg.get("max_turns"),
+        max_turns=(coding_cfg.get("delegated_review") or {}).get("max_turns") if review else coding_cfg.get("max_turns"),
         max_budget_usd=coding_cfg.get("max_budget_usd", 5.0),
         parent_session_id=str(context.get("parent_session_id") or context.get("session_id")
                               or str(context.get("turn_id") or "").split(":", 1)[0]),
@@ -4710,9 +4712,10 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     if not isinstance(source_request, dict):
         source_request = request
     text = _last_user_text_and_index(_request_items(source_request))[0]
+    routing_text = _without_host_injected_context(_without_router_contract(text))
 
     from .claude_opus_bridge import review_model_alias
-    requested_alias = review_model_alias(text) or "opus"
+    requested_alias = review_model_alias(routing_text) or "opus"
     adjustment = ""
 
     def audit_refusal(message: str) -> None:
@@ -4752,7 +4755,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         str(kwargs.get("platform", "")).casefold() == "subagent"
         or ":sa-" in str(kwargs.get("turn_id", ""))
     ):
-        delegated = _verified_delegated_claude_review(text, cfg, request=source_request)
+        delegated = _verified_delegated_claude_review(routing_text, cfg, request=source_request)
         if delegated is not None:
             repo, _requested_alias = delegated
             alias = admitted_alias()
@@ -4779,7 +4782,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
 
     if not coding_cfg.get("enabled"):
         return None
-    review_repo = _verified_explicit_opus5_review_repo(text, cfg)
+    review_repo = _verified_explicit_opus5_review_repo(routing_text, cfg)
     if review_repo is not None:
         alias = admitted_alias()
         if alias is None:
@@ -4799,7 +4802,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
             provider=str(kwargs.get("provider") or ""),
         )
         return _opus5_response(result)
-    explicit_ui_repo = _verified_explicit_opus5_ui_repo(text, cfg)
+    explicit_ui_repo = _verified_explicit_opus5_ui_repo(routing_text, cfg)
     if explicit_ui_repo is not None:
         alias = admitted_alias()
         if alias is None:
@@ -4911,9 +4914,38 @@ def run_llm_with_transient_failover(**kwargs: Any) -> Any:
     opus_context = {key: value for key, value in kwargs.items() if key not in {"request", "next_call", "retry_call"}}
     try:
         opus_response = _maybe_run_opus5(request, cfg, **opus_context)
-    except Exception:
+    except Exception as error:
         # OAuth, entitlement and bridge failures fall back to the normal route.
         # A failed attempt must never fabricate an Opus viewer/log entry.
+        source_request = kwargs.get("original_request")
+        if not isinstance(source_request, dict):
+            source_request = request
+        review_text = _without_host_injected_context(
+            _without_router_contract(_last_user_text_and_index(_request_items(source_request))[0])
+        )
+        from .claude_opus_bridge import review_model_alias
+        if review_model_alias(review_text) is not None:
+            message = str(error).strip()[:300] or type(error).__name__
+            active_model = str(request.get("model", ""))
+            active_tier = next(
+                (tier for tier, model in (cfg.get("models") or {}).items() if model == active_model),
+                str(cfg.get("default_model") or "terra"),
+            )
+            _logger.warning("Claude review bridge failed; falling back to %s", active_tier, exc_info=True)
+            claude_delegation._log(cfg, {
+                "event": "bridge_claude", "outcome": "error", "message": message,
+                "tier_requested": review_model_alias(review_text),
+                "tier_used": review_model_alias(review_text),
+                "session_id": str(kwargs.get("session_id") or ""),
+                "turn_id": str(kwargs.get("turn_id") or ""),
+            })
+            _log_decision(
+                RouteDecision(
+                    active_tier, active_model,
+                    f"Claude review failed ({message}); ran as an ordinary {active_tier} worker",
+                ),
+                {**kwargs, "request": request}, cfg,
+            )
         opus_response = None
     if opus_response is not None:
         return opus_response

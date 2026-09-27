@@ -146,7 +146,7 @@ def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, ma
     """Apply the fixed terminal precedence required by the bridge contract."""
     if timeout:
         return "timeout"
-    if malformed or returncode:
+    if malformed:
         return "error"
     payload = payload or {}
     subtype = str(payload.get("subtype") or "").casefold()
@@ -154,6 +154,8 @@ def _terminal_state(payload: dict[str, Any] | None, *, timeout: bool = False, ma
         return "max-turn"
     if "budget" in subtype:
         return "budget"
+    if returncode:
+        return "error"
     if _effective_model(payload, expected_model) != expected_model:
         return "error"
     return "success" if subtype in {"success", ""} and not payload.get("is_error") else "error"
@@ -245,25 +247,20 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "error",
                                           "timestamp": time.time(), "duration_seconds": time.time() - started_at})
         raise
-    if completed.returncode:
-        _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "error",
-                                          "timestamp": time.time(), "duration_seconds": time.time() - started_at,
-                                          "returncode": completed.returncode})
-        raise RuntimeError(f"Claude Code failed with exit {completed.returncode}: {completed.stderr.strip()[:500]}")
     try:
         payload = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         _append_lifecycle(lifecycle_path, {**base_event, "event": "terminal", "state": "error",
                                           "timestamp": time.time(), "duration_seconds": time.time() - started_at,
-                                          "malformed": True})
+                                          "malformed": True, "returncode": completed.returncode})
         raise RuntimeError("Claude Code did not return JSON output") from exc
     effective_model = _effective_model(payload, expected_model)
-    state = _terminal_state(payload, expected_model=expected_model)
+    state = _terminal_state(payload, returncode=completed.returncode, expected_model=expected_model)
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
     _append_lifecycle(lifecycle_path, {
         **base_event, "event": "terminal", "state": state, "timestamp": time.time(),
         "duration_seconds": time.time() - started_at, "subtype": str(payload.get("subtype") or ""),
-        "canonical_model": effective_model, "num_turns": payload.get("num_turns"),
+        "returncode": completed.returncode, "canonical_model": effective_model, "num_turns": payload.get("num_turns"),
         "input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
         "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
         "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
@@ -273,6 +270,8 @@ def dispatch(task: str, repo: Path, *, write: bool = False, review: bool = False
         raise RuntimeError("Claude Code reached max turns")
     if state == "budget":
         raise RuntimeError("Claude Code exhausted its budget")
+    if completed.returncode:
+        raise RuntimeError(f"Claude Code failed with exit {completed.returncode}: {completed.stderr.strip()[:500]}")
     if effective_model != expected_model:
         raise RuntimeError(f"Claude Code did not serve {expected_model}; effective model was {effective_model or 'missing'}")
     if state != "success":
