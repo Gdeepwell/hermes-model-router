@@ -827,11 +827,43 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 _DEFAULT_MANAGED_EFFORT = {"grok": "medium"}
 
 
+def _effective_managed_effort_defaults() -> dict:
+    """The effective default effort level for every managed tier: the router's own
+    shipped defaults layered over ``_DEFAULT_MANAGED_EFFORT`` (the fallback used
+    when the router module itself is not importable)."""
+    router = _router_module()
+    router_defaults = getattr(router, "_DEFAULT_CONFIG", {}) if router is not None else {}
+    effective_defaults = dict(_DEFAULT_MANAGED_EFFORT)
+    if isinstance(router_defaults, dict) and isinstance(router_defaults.get("effort"), dict):
+        effective_defaults.update(router_defaults["effort"])
+    return effective_defaults
+
+
+def _effort_status(config: dict) -> dict:
+    """GET's ``effort`` payload: a string for every managed tier, never ``null``.
+
+    A managed tier absent from the merged config (e.g. an older shipped file
+    without ``effort.grok``) falls back to its effective default rather than
+    reporting ``None``, which ``_save_effort`` would otherwise reject on the
+    very next full-page save.
+    """
+    existing = config.get("effort") or {}
+    defaults = _effective_managed_effort_defaults()
+    return {
+        tier: existing.get(tier, defaults.get(tier))
+        for tier in MANAGED_EFFORT_TIERS
+    }
+
+
 def _save_effort(raw, config: dict):
     """Update only dashboard-managed routed-tier effort levels from Settings.
 
     Every submitted key and value is checked before ``config`` changes, so a
     partial payload cannot leave an earlier tier changed after a later one fails.
+    A ``None`` value for a managed tier is ignored rather than rejected: GET can
+    report ``None``/an effective default for a tier absent from the merged
+    config, and the frontend posts the whole visible ``effort`` block on every
+    save, so a value must round-trip without erroring the entire payload.
     """
     if not isinstance(raw, dict):
         return "effort must be an object of tier -> low, medium, high, or xhigh"
@@ -839,6 +871,8 @@ def _save_effort(raw, config: dict):
     for tier, value in raw.items():
         if tier not in MANAGED_EFFORT_TIERS:
             return f"The dashboard cannot edit effort key '{tier}'"
+        if value is None:
+            continue
         if not isinstance(value, str):
             return f"effort.{tier} must be one of: low, medium, high, xhigh"
         normalized = value.strip().casefold()
@@ -850,11 +884,7 @@ def _save_effort(raw, config: dict):
         return None
     existing_effort = config.get("effort")
     existing_effort = existing_effort if isinstance(existing_effort, dict) else {}
-    router = _router_module()
-    router_defaults = getattr(router, "_DEFAULT_CONFIG", {}) if router is not None else {}
-    effective_defaults = dict(_DEFAULT_MANAGED_EFFORT)
-    if isinstance(router_defaults, dict) and isinstance(router_defaults.get("effort"), dict):
-        effective_defaults.update(router_defaults["effort"])
+    effective_defaults = _effective_managed_effort_defaults()
     to_write = {}
     for tier, value in cleaned.items():
         if tier not in existing_effort and value == effective_defaults.get(tier):
@@ -1844,7 +1874,7 @@ function usageError(account){const message=((currentConfig||{}).usage_errors||{}
 function accountCard(account,info){const callable=currentConfig.callable||{},cooldowns=currentConfig.cooldowns||{},load=(currentConfig.load||{})[account]||0,d=info.delegation||{};
   const loadText=`<span class="usage-load">${t('account.load')}: ${t('account.load.calls').replace('{n}',load).replace('{m}',currentConfig.window_minutes||60)}</span>`;
   const hasEffort=info.tiers.some(m=>ROUTER_EFFORT_TIERS.includes(m))||account==='anthropic';
-  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m],effort=ROUTER_EFFORT_TIERS.includes(m)?renderEffort([m],!on):account==='anthropic'?renderClaudeReasoningEffort([m],!on):'';return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${effort}${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${cool.reason}`:''}</span>`:''}</div>`}).join('');
+  const models=info.tiers.map(m=>{const on=callable[m]!==false,cool=cooldowns[m],effort=ROUTER_EFFORT_TIERS.includes(m)?renderEffort([m],!on):account==='anthropic'?renderClaudeReasoningEffort([m],!on):'';return `<div class="model-switch${on?'':' disabled'}${cool?' cooling':''}"><label class="switch"><input type="checkbox" data-model="${m}" ${on?'checked':''}><span class="slider"></span></label><span title="${t('card.'+m)}">${shortModelName(t('card.'+m))}</span>${effort}${cool?`<span class="cooldown-pill">${t('settings.cooling')} · ${Math.ceil(cool.seconds/60)}m${cool.reason?` · ${escapeHtml(cool.reason)}`:''}</span>`:''}</div>`}).join('');
   const modelControls=`<div class="account-row models"><span>${t('account.models')}</span><div class="model-list${hasEffort?'':' no-effort'}">${models}</div></div>`;
   const u=info.usage,usage=info.has_usage_source?(u?usageRow('account.usage.week',u.weekly,u.weekly_resets_at,info.soft_percent,info.hard_percent)+usageRow('account.usage.session',u.session,u.session_resets_at,info.soft_percent,info.hard_percent)+`<div class="usage-age">${ageText(info.usage_age_seconds)} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${usageError(account)}${loadText}</div>`:`<div class="usage-age">${t('account.state.unknown')} <button type="button" data-refresh-usage="${account}">${t('account.usage.refresh')}</button>${usageError(account)}${loadText}</div>`):`<div class="usage-none">${t('account.usage.none')}</div><div class="usage-age">${loadText}</div>`;
   const off=info.guard?'':'disabled',step=Object.entries(info.step_down||{}).map(([a,b])=>`${a} → ${b}`).join(', ');
@@ -2519,7 +2549,7 @@ class Handler(BaseHTTPRequestHandler):
                         "delegation_limits": router._host_delegation_limits() if router else {},
                         "balance": _balance_status(config),
                         "default_model": config.get("default_model", "terra"),
-                        "effort": {tier: (config.get("effort") or {}).get(tier) for tier in MANAGED_EFFORT_TIERS},
+                        "effort": _effort_status(config),
                         "claude_reasoning_effort": _claude_reasoning_status(config),
                         "preferences": config.get("preferences") or {},
                         "work_kinds": work_kinds,

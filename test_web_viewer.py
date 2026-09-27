@@ -1942,6 +1942,20 @@ class AccountCardTests(DashboardProbeMixin, unittest.TestCase):
         out = self._run(script)
         self.assertIn("3 failures within 60s", out)
 
+    def test_cooldown_pill_escapes_its_reason(self):
+        """C-M4: the reason is untrusted (upstream failure text) and must go through
+        escapeHtml like the other reason strings in this file (state.reason, usage
+        errors), not be interpolated raw into the pill."""
+        config = {
+            "callable": {}, "cooldowns": {"luna": {"seconds": 120, "reason": "<img src=x onerror=alert(1)>"}},
+            "load": {}, "window_minutes": 60, "accounts": {"openai-codex": self.CODEX_INFO},
+        }
+        script = (f"let currentConfig={json.dumps(config)};"
+                  f"console.log(accountCard('openai-codex',currentConfig.accounts['openai-codex']));")
+        out = self._run(script)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", out)
+        self.assertNotIn("<img src=x onerror=alert(1)>", out)
+
     def test_a_card_greys_out_at_twice_the_cache_seconds_not_a_fixed_ten_minutes(self):
         """M10: staleness used to be a hardcoded 600s; it now follows 2x
         whatever cache_seconds the accounts payload actually served."""
@@ -3085,6 +3099,53 @@ class ReasoningEffortSettingsTests(DashboardProbeMixin, unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertIn("opus5", error)
         self.assertEqual(config, before)
+
+    def test_get_never_returns_null_for_a_managed_effort_tier_missing_from_config(self):
+        """C-M3: with the shipped ``effort.grok`` key removed, GET must still report a
+        string (the effective default), not null; a full-page save posting that value
+        back must succeed and write no grok key."""
+        older = json.loads(json.dumps(self.CONFIG))
+        for key in ("models", "callable", "tier_providers", "effort"):
+            older[key].pop("grok", None)
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "router_config.yaml"
+            config_path.write_text(web_viewer.yaml.safe_dump(older), encoding="utf-8")
+            status, payload = self._request(config_path, "GET")
+            self.assertEqual(status, 200)
+            self.assertIn("grok", payload["effort"])
+            self.assertIsNotNone(payload["effort"]["grok"])
+            self.assertIsInstance(payload["effort"]["grok"], str)
+
+            full_payload = {
+                "callable": older["callable"],
+                "default_model": "terra",
+                "effort": dict(payload["effort"]),
+                "claude_reasoning_effort": {},
+                "preferences": {},
+                "hermes_fallback": {},
+                "usage_limits": {},
+            }
+            with patch.object(web_viewer, "_read_hermes_snapshot", return_value=(None, {
+                "model": {"default": "gpt-5.6-terra", "provider": "openai-codex"},
+            })), patch.object(web_viewer, "_hermes_chain", return_value=[]):
+                status, body = self._request(config_path, "POST", full_payload)
+            self.assertEqual(status, 200, body)
+            self.assertTrue(body["success"])
+            local = config_path.with_name("router_config.local.yaml")
+            written = web_viewer.yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else {}
+            self.assertNotIn("grok", written.get("effort", {}))
+
+    def test_save_effort_ignores_a_none_value_instead_of_erroring(self):
+        """C-M3: ``_save_effort`` must skip a posted ``None`` for a managed tier (the
+        shape GET can produce for an unmanaged/absent value) rather than rejecting the
+        whole payload."""
+        config = {"effort": {"luna": "low", "terra": "medium"}}
+        before = json.loads(json.dumps(config))
+        error = web_viewer._save_effort({"grok": None, "terra": "high"}, config)
+        self.assertIsNone(error)
+        self.assertEqual(config["effort"]["terra"], "high")
+        self.assertNotIn("grok", config["effort"])
+        self.assertEqual(config["effort"]["luna"], before["effort"]["luna"])
 
 
 class FullPageFilterTests(unittest.TestCase):
