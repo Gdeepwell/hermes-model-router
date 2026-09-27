@@ -1136,6 +1136,17 @@ def _last_user_text_and_index(items: Iterable[Any]) -> tuple[str, int]:
     return "", -1
 
 
+def _has_prior_exchange(items: Iterable[Any], user_index: int) -> bool:
+    """Whether the latest user turn follows earlier assistant work in this request."""
+    for item in list(items)[:max(0, user_index)]:
+        if isinstance(item, dict) and (
+            item.get("role") == "assistant"
+            or item.get("type") in {"function_call", "function_call_output"}
+        ):
+            return True
+    return False
+
+
 def _prompt_preview(request: Any) -> str:
     """Return the complete latest user prompt on a single line."""
     if not isinstance(request, dict):
@@ -3047,7 +3058,10 @@ def _prepare_orchestration_delegation(
     instruction = (
         f"\n\n[INTERNAL ORCHESTRATOR PREFLIGHT]\n"
         f"{lead}This creates a dedicated {orchestrator_tier} planner and conductor, not a benchmark worker. "
-        "Give that conductor the full current objective. It must first inspect any current image itself and Create a structured dispatch plan "
+        "Give that conductor the full current objective as a self-contained goal: it does not see this conversation, "
+        "so a short user turn such as 'do it' stands for the plan discussed before it, written out in full. "
+        "If the turn needs no real work (an acknowledgement, a direct answer), write a one-line goal instead: "
+        "the router then returns control to you without spawning anything. It must first inspect any current image itself and Create a structured dispatch plan "
         f"before any implementation. The plan may contain zero to {max_tasks} independent workers; do not invent work merely to fill slots. "
         f"{orchestrator_tier} chooses the decomposition from the actual task. {_leaf_label_contract(cfg)}"
         f"{_read_only_leaf_sentence(cfg)}"
@@ -3319,9 +3333,15 @@ def _orchestration_skip_reason(
     # and a short prompt ("csinald meg") routinely opens the longest loops.
     # Router-owned tiers only: an external parent (a Claude account the session
     # fell back to) has always been preflighted regardless of length.
+    #
+    # A short follow-up is not judged by its own length either: "csinald meg"
+    # after a discussed plan stands for that whole plan. The parent then writes
+    # the self-contained objective, and on_pre_tool_call measures *that*
+    # (orchestration.min_goal_chars) -- a small objective returns to the parent
+    # without spawning anything.
     if decision.tier in (cfg.get("models") or {}) and not sol_preflight and not is_rescue:
         min_chars = max(0, int(policy.get("min_chars", 180) or 0))
-        if len(user_text) < min_chars:
+        if len(user_text) < min_chars and not _has_prior_exchange(items, user_index):
             return f"prompt_shorter_than_min_chars:{len(user_text)}<{min_chars}"
     # Explicit bounded UI requests authorised for the verified bridge are a
     # single-hop exception: Sol retains policy ownership, but no Sol/Terra/Spark
@@ -4903,6 +4923,46 @@ def _hermes_worker_fallback_configured() -> bool:
         return False
 
 
+_CONDUCTOR_CONTRACT = re.compile(r"^You are the \S+ planning conductor\.")
+
+
+def _declined_conductor_goal(args: Dict[str, Any], cfg: Dict[str, Any], turn_id: str = "") -> str:
+    """Refusal text when a forced conductor's composed goal is too small to plan.
+
+    Whether a turn deserves a conductor is decided from the objective the parent
+    wrote, not from the user's message: "csinald meg" after a long discussion is
+    a large task, and the parent is the one that can expand it. Only the router's
+    own forced planner call is measured -- recognised by its pinned contract --
+    never a delegation the parent chose on its own.
+    """
+    policy = cfg.get("orchestration") or {}
+    min_goal = max(0, int(policy.get("min_goal_chars", 500) or 0))
+    if not min_goal or not policy.get("enabled"):
+        return ""
+    entries = args.get("tasks") if isinstance(args.get("tasks"), list) else [args]
+    if len(entries) != 1 or not isinstance(entries[0], dict):
+        return ""
+    entry = entries[0]
+    if not _CONDUCTOR_CONTRACT.match(str(entry.get("context") or args.get("context") or "")):
+        return ""
+    goal_chars = len(str(entry.get("goal") or "").strip())
+    if goal_chars >= min_goal:
+        return ""
+    with _SHADOW_LOCK:
+        _orchestration_event(cfg, {
+            "event": "preflight_declined",
+            "turn_id": turn_id,
+            "goal_chars": goal_chars,
+            "min_goal_chars": min_goal,
+        })
+    return (
+        f"No conductor for this turn: the objective you wrote is {goal_chars} characters, "
+        f"below orchestration.min_goal_chars ({min_goal}), so it is small enough to do directly. "
+        "Continue with your normal tools; you may still delegate an independent part to a worker. "
+        "Nothing was spawned."
+    )
+
+
 def on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, **_: Any) -> Optional[Dict[str, str]]:
     """Refuse a ``delegate_task`` that names a target switched off or cooling down.
 
@@ -4923,6 +4983,9 @@ def on_pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None,
         return None
     try:
         cfg = _load_config()
+        declined = _declined_conductor_goal(args, cfg, str(_.get("turn_id") or ""))
+        if declined:
+            return {"action": "block", "message": declined}
         switched_on = cfg.get("callable") or {}
         rescued = None
         blocked = []

@@ -146,6 +146,74 @@ class AnyParentGetsThePreflightTests(_Patched):
         self.assert_preflighted(self.route("grok"), "terra")
 
 
+class ShortFollowUpTests(_Patched):
+    """"csinald meg" after a discussed plan stands for that plan: its own length
+    must not decide whether a conductor is considered."""
+
+    def follow_up(self, tier="grok", text="csinald meg"):
+        model = MODELS[tier]
+        request = _request(model, text)
+        request["input"][:0] = [
+            {"role": "user", "content": [{"type": "input_text", "text": LONG_TASK}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "Terv: ..."}]},
+        ]
+        return route_llm_request(request=request, model=model, provider=PROVIDERS[tier],
+                                 api_call_count=1, turn_id=f"follow-up-{tier}", platform="cli")
+
+    def test_a_short_follow_up_still_gets_the_preflight(self):
+        routed = self.follow_up()
+        schema = routed["request"]["tools"][0]["parameters"]["properties"]
+        self.assertEqual(schema["role"]["enum"], ["orchestrator"])
+
+    def test_the_parent_is_told_to_write_the_plan_out_in_full(self):
+        text = self.follow_up()["request"]["input"][-1]["content"][-1]["text"]
+        self.assertIn("it does not see this conversation", text)
+        self.assertIn("returns control to you without spawning anything", text)
+
+
+class ComposedGoalGateTests(unittest.TestCase):
+    """The objective the parent wrote decides whether a conductor is spawned."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.cfg = _cfg(self._dir.name)
+
+    def call(self, args):
+        with patch.object(router, "_load_config", return_value=self.cfg):
+            return router.on_pre_tool_call(tool_name="delegate_task", args=args, turn_id="goal-turn")
+
+    @staticmethod
+    def conductor(goal, tier="grok"):
+        return {"goal": goal, "role": "orchestrator", "model": tier,
+                "context": f"You are the {tier} planning conductor. Do not perform design analysis."}
+
+    def events(self):
+        path = Path(self.cfg["orchestration"]["path"])
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_a_small_objective_returns_to_the_parent(self):
+        result = self.call(self.conductor("Koszonom, ennyi volt."))
+        self.assertEqual(result["action"], "block")
+        self.assertIn("Nothing was spawned", result["message"])
+        declined = [e for e in self.events() if e["event"] == "preflight_declined"]
+        self.assertEqual([(e["turn_id"], e["min_goal_chars"]) for e in declined], [("goal-turn", 500)])
+
+    def test_a_written_out_plan_spawns_the_conductor(self):
+        self.assertIsNone(self.call(self.conductor(LONG_TASK)))
+
+    def test_the_batch_shape_is_measured_the_same_way(self):
+        result = self.call({"tasks": [self.conductor("csinald meg")]})
+        self.assertEqual(result["action"], "block")
+
+    def test_a_delegation_the_parent_chose_itself_is_never_measured(self):
+        self.assertIsNone(self.call({"goal": "[luna] olvasd el a README-t", "model": "luna"}))
+
+    def test_zero_switches_the_gate_off(self):
+        self.cfg["orchestration"]["min_goal_chars"] = 0
+        self.assertIsNone(self.call(self.conductor("csinald meg")))
+
+
 class ConductorFollowsParentTests(unittest.TestCase):
     CFG = {"models": MODELS, "tier_providers": PROVIDERS,
            "callable": {**{tier: True for tier in MODELS}, "opus5": True},

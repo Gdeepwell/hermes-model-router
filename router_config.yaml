@@ -152,7 +152,11 @@ orchestration:
   # Terra on Terra). Off: it uses default_model and its fallback chain, as
   # before 1.19.0. `conductor: <tier>` pins it outright and wins over both.
   conductor_follows_parent: true
+  # min_chars gates a fresh short prompt only. A short follow-up ("do it" after a
+  # discussed plan) is preflighted anyway, and the objective the parent writes for
+  # the conductor decides: under min_goal_chars nothing is spawned.
   min_chars: 1000
+  min_goal_chars: 500
   max_tasks: 2
   rescue_min_calls: 6
   path: ~/.hermes/logs/terra-spark-orchestration.jsonl

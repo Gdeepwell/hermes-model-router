@@ -258,6 +258,17 @@ still takes precedence when it is configured. `orchestration.min_chars` applies 
 every router-owned parent; an external (Claude) parent is preflighted regardless
 of length, as before.
 
+**The written objective decides, not the user's message (1.20.0).** `min_chars`
+only skips a *fresh* short prompt. A short follow-up after earlier assistant work
+("csinald meg" after a discussed plan) is preflighted anyway, and the parent is
+told to write the plan out as a self-contained goal, since the conductor never sees
+the conversation. The `pre_tool_call` gate then measures that goal: under
+`orchestration.min_goal_chars` (default 500; 0 turns it off) the planner call is
+refused with a message, nothing is spawned, a `preflight_declined` event is logged,
+and the parent continues with its full toolset. Only the router's own forced
+planner call is measured, recognised by its pinned contract. Above the threshold
+the conductor still decides how many workers (zero included) the task deserves.
+
 The forced conductor uses `orchestration.conductor`, then the parent's own tier
 (while `orchestration.conductor_follows_parent`, default on, is set), then the callable
 `default_model` and its fallback chain, skipping targets the current workflow
@@ -1338,6 +1349,11 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.20.0** — The objective the parent writes decides whether a conductor is
+spawned, not the length of the user's message: a short follow-up is preflighted,
+and a composed goal under `orchestration.min_goal_chars` returns to the parent
+without spawning anything.
 
 **1.19.0** — Every parent tier orchestrates, not only Terra and Sol: a Grok,
 Qwen, Luna or bridge-less Sol parent gets the forced conductor preflight, and the
