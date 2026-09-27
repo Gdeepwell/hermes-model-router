@@ -1661,6 +1661,7 @@ def classify_request(
     )
     items = _request_items(request)
     user_text, user_index = _last_user_text_and_index(items)
+    user_text = _without_host_injected_context(_without_router_contract(user_text))
     eligible = _eligible_tiers(
         user_text,
         has_image_attachment=_request_has_image_attachment(request),
@@ -1702,6 +1703,24 @@ def _without_router_contract(text: str) -> str:
     return text[:cut].rstrip() if cut > 0 else text
 
 
+# Hermes appends host/plugin context after the operator's turn. These are the
+# exact tagged blocks known to carry instructions that must not alter routing.
+_HOST_INJECTED_CONTEXT_TAGS = ("memory-context", "EXTREMELY_IMPORTANT")
+_HOST_INJECTED_CONTEXT_BLOCK = re.compile(
+    r"(?P<prefix>^|\n[ \t]*\n)[ \t]*<(?P<tag>"
+    + "|".join(map(re.escape, _HOST_INJECTED_CONTEXT_TAGS))
+    + r")>(?:.*?</(?P=tag)>|.*\Z)",
+    re.DOTALL,
+)
+
+
+def _without_host_injected_context(text: str) -> str:
+    """Drop exact host/plugin context blocks appended after the operator text."""
+    if not text:
+        return text
+    return _HOST_INJECTED_CONTEXT_BLOCK.sub(lambda match: match.group("prefix"), text).rstrip()
+
+
 def _classify_request(
     request: Dict[str, Any],
     api_call_count: int = 1,
@@ -1714,8 +1733,8 @@ def _classify_request(
     has_image_attachment = _request_has_image_attachment(request)
     items = _request_items(request)
     user_text, user_index = _last_user_text_and_index(items)
-    # Classify what the operator asked for, not the rulebook this plugin attached to it.
-    user_text = _without_router_contract(user_text)
+    # Classify what the operator asked for, not context the host or this plugin attached.
+    user_text = _without_host_injected_context(_without_router_contract(user_text))
     text = _normalise(user_text)
 
     # A closed praise/approval follow-up has no implementation objective.  Check
@@ -3861,6 +3880,7 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
     )
     session_policy = cfg.get("session_policy") or {}
     latest_user_text, _ = _last_user_text_and_index(_request_items(request))
+    latest_user_text = _without_host_injected_context(_without_router_contract(latest_user_text))
     explicit_root_override = bool(
         re.match(r"^\s*\[(?:luna|spark|terra|sol)(?::xhigh)?\](?:\s|$)", _normalise(latest_user_text))
     )
@@ -3899,6 +3919,7 @@ def _route_llm_request(**kwargs: Any) -> Optional[Dict[str, Any]]:
         # a hard safety signal overrides the worker; Sol being the normal parent
         # default must not silently promote every safe child.
         user_text, _ = _last_user_text_and_index(_request_items(request))
+        user_text = _without_host_injected_context(_without_router_contract(user_text))
         if decision.tier != "sol" and not _is_spark_read_only_request(user_text):
             decision = _decision("terra", "Spark is restricted to non-design read-only subtasks", cfg)
         explicit = decision.reason.startswith("explicit [")

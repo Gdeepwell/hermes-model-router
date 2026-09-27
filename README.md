@@ -1445,6 +1445,10 @@ switchable account, and a Claude main agent from the dashboard.
   loaded as `hermes_plugins.model_router`, where its top-level `model_router`
   import failed, so the `delegate_task` admission guard raised on every call and
   dispatches went out without the usage-limit or Claude-switch check.
+- Hermes's appended `<memory-context>` and Superpowers bootstrap blocks are
+  removed before the delegated-leaf classifier runs, so their instruction words
+  cannot promote a read-only `[luna]` or `[spark]` leaf to Terra. The raw request
+  remains available to logs and the Claude CLI bridge.
 
 **1.18.1** — A tier switched off in Settings leaves the Model Router overview (and
 its account box once no tier is left), and it is dropped from Hermes's fallback
