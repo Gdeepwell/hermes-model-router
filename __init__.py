@@ -3362,12 +3362,17 @@ def _orchestration_skip_reason(
     user_text, user_index = _last_user_text_and_index(items)
     if not user_text:
         return "no_user_text"
+    # Read what the operator actually asked for, not host/plugin context appended
+    # after it -- the superpowers bootstrap names delegate_task in its own text, so
+    # reading raw text here made every bootstrapped root turn look like an explicit
+    # delegation choice and lose its forced preflight.
+    operator_text = _without_host_injected_context(_without_router_contract(user_text))
     # The operator explicitly named a delegation tool for this turn -- the forced
     # delegate_task planning preflight would override that choice. `user_text` is
     # the incoming request's own latest user turn, read before this same call adds
     # the router's routing note or preflight contract to it (those are appended to
     # a deep copy further down the pipeline), so this cannot fire on our own text.
-    if re.search(r"\bdelegate_(?:claude|task)\b", user_text):
+    if re.search(r"\bdelegate_(?:claude|task)\b", operator_text):
         return "explicit_delegation_tool"
     # A task too short to decompose is not worth a planner round trip plus up to
     # max_tasks bounded workers. Without this gate every actionable Terra turn
@@ -4498,20 +4503,23 @@ def _remembered_dispatch_review_repository(text: str) -> Optional[Path]:
             _DISPATCH_REVIEW_REPOSITORIES, normalised,
             _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS,
         )
-        if found:
-            return _existing_remembered_directory(repository)
-        matching_entry: Optional[Tuple[str, object]] = None
-        for goal, (recorded_at, candidate) in list(_DISPATCH_REVIEW_REPOSITORIES.items()):
-            if time.monotonic() - recorded_at >= _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS:
-                _DISPATCH_REVIEW_REPOSITORIES.pop(goal, None)
-            elif _dispatch_review_repository_match(normalised, goal):
-                if matching_entry is None or len(goal) > len(matching_entry[0]):
-                    matching_entry = (goal, candidate)
-        if matching_entry is None:
-            return None
-        goal, repository = matching_entry
-        _DISPATCH_REVIEW_REPOSITORIES.move_to_end(goal)
-        return _existing_remembered_directory(repository)
+        if not found:
+            matching_entry: Optional[Tuple[str, object]] = None
+            for goal, (recorded_at, candidate) in list(_DISPATCH_REVIEW_REPOSITORIES.items()):
+                if time.monotonic() - recorded_at >= _DISPATCH_REVIEW_REPOSITORY_TTL_SECONDS:
+                    _DISPATCH_REVIEW_REPOSITORIES.pop(goal, None)
+                elif _dispatch_review_repository_match(normalised, goal):
+                    if matching_entry is None or len(goal) > len(matching_entry[0]):
+                        matching_entry = (goal, candidate)
+            if matching_entry is None:
+                return None
+            goal, repository = matching_entry
+            _DISPATCH_REVIEW_REPOSITORIES.move_to_end(goal)
+        # Copy the candidate under the lock, then stat it (Path.is_dir, a
+        # filesystem call) only after releasing the lock: a slow or stalled
+        # stat must not block every other route holding this shared lock.
+        candidate = repository
+    return _existing_remembered_directory(candidate)
 
 
 def _existing_remembered_directory(repository: object) -> Optional[Path]:
@@ -4641,7 +4649,12 @@ def _delegated_claude_review_status(text: str, cfg: Dict[str, Any], *, request: 
 
 
 def _verified_delegated_claude_review(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None) -> Optional[Tuple[Path, str]]:
-    """Resolve a delegated, read-only Claude review leaf to (repo, Claude tier).
+    """Resolve a delegated, read-only Claude review leaf to (repo, Claude tier), or None.
+
+    Thin wrapper over ``_delegated_claude_review_status``, which now also checks
+    the dispatch-time ``requested_model`` against the review label and returns the
+    reason a route was refused; this wrapper drops both and keeps only the
+    (repo, tier) result, for callers that just need to know whether a route exists.
 
     Deliberately independent of ``coding_agent.enabled``. That switch also arms
     the conservative coding classifier, which fires with no explicit label and
