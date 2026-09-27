@@ -334,3 +334,35 @@ class HostPackageImportTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["timeout"], 60)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertEqual(result.stdout.strip(), "OK")
+
+    def test_a_package_load_leaves_sys_path_unchanged(self):
+        """B-M1: the sys.path.insert for script mode must not run when the bridge
+        is loaded as part of the plugin package -- it must stay inside the
+        `else` branch of `if __package__:`."""
+        import os
+        import subprocess
+        import sys
+
+        plugin_dir = str(Path(__file__).resolve().parent)
+        plugin_parent = str(Path(plugin_dir).resolve().parent)
+        probe = (
+            "import importlib, importlib.util, sys, types\n"
+            "sys.modules['hermes_plugins'] = types.ModuleType('hermes_plugins')\n"
+            "sys.modules['hermes_plugins'].__path__ = []\n"
+            f"spec = importlib.util.spec_from_file_location('hermes_plugins.model_router', {plugin_dir + '/__init__.py'!r}, submodule_search_locations=[{plugin_dir!r}])\n"
+            "plugin = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = plugin\n"
+            "spec.loader.exec_module(plugin)\n"
+            "before = list(sys.path)\n"
+            "importlib.import_module('hermes_plugins.model_router.claude_opus_bridge')\n"
+            f"assert {plugin_parent!r} not in sys.path, 'script-mode sys.path.insert ran for a package load'\n"
+            "print('OK')\n"
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            env = {"HOME": cwd, "HERMES_HOME": cwd + "/.hermes", "PATH": os.environ.get("PATH", "")}
+            result = subprocess.run(
+                [sys.executable, "-c", probe], cwd=cwd, env=env, text=True,
+                capture_output=True, timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertEqual(result.stdout.strip(), "OK")

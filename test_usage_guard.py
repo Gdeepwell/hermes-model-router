@@ -577,6 +577,42 @@ class ForcedReadTests(unittest.TestCase):
             usage_guard._import_hermes("hermes_yaml_probe")
         self.assertIn("hermes_yaml_probe", sys.modules)
 
+    def test_writes_to_last_failure_happen_under_the_lock(self):
+        """B-M2: every write (and clearing pop) of _LAST_FAILURE must happen while
+        holding usage_guard._LOCK."""
+
+        class _LockCheckingDict(dict):
+            def __init__(self):
+                super().__init__()
+                self.violations = []
+
+            def __setitem__(self, key, value):
+                if not usage_guard._LOCK.locked():
+                    self.violations.append(("set", key))
+                return super().__setitem__(key, value)
+
+            def pop(self, key, default=None):
+                if not usage_guard._LOCK.locked():
+                    self.violations.append(("pop", key))
+                return super().pop(key, default)
+
+        checked = _LockCheckingDict()
+
+        def broken():
+            usage_guard._import_failed("anthropic", ModuleNotFoundError("no module"))
+
+        with patch.object(usage_guard, "_LAST_FAILURE", checked), \
+             patch.dict(usage_guard.FETCHERS, {"anthropic": broken}):
+            usage_guard.read("anthropic", _cfg(), now=1000.0, force=True)
+        self.assertEqual(checked.violations, [])
+
+    def test_a_fetcher_returning_none_without_raising_leaves_a_reason(self):
+        """B-M2: last_failure() must never be '' right after a failed read that
+        raised nothing (no token, empty payload)."""
+        with self._fetchers(anthropic=[None]):
+            self.assertIsNone(usage_guard.read("anthropic", _cfg(), now=1000.0, force=True))
+        self.assertNotEqual(usage_guard.last_failure("anthropic"), "")
+
     def test_an_account_without_a_fetcher_is_still_nothing_to_force(self):
         self.assertIsNone(usage_guard.read("qwen-token", _cfg(), now=1000.0, force=True))
 

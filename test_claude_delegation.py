@@ -660,6 +660,45 @@ class ReasoningBridgeCompatibilityTests(unittest.TestCase):
         self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
 
 
+class ReasoningBridgeStateHolderTests(unittest.TestCase):
+    """B-M3: the shared per-process holder must be a real module object, not a
+    SimpleNamespace, so code that walks sys.modules expecting modules (reload
+    tooling, some warning/pickle helpers, inspect.getmodule) does not trip on it."""
+
+    def test_the_state_holder_is_a_real_module_registered_under_its_key(self):
+        self.assertIsInstance(claude_delegation._REASONING_BRIDGE_STATE, types.ModuleType)
+        self.assertIs(
+            sys.modules[claude_delegation._REASONING_BRIDGE_STATE_KEY],
+            claude_delegation._REASONING_BRIDGE_STATE,
+        )
+
+
+class ReasoningBridgeStatusAfterReplacementTests(unittest.TestCase):
+    """B-M4: status must notice the host function was swapped out from under an
+    installed bridge, not just trust the ``installed`` flag forever."""
+
+    def setUp(self):
+        self.addCleanup(claude_delegation._reset_reasoning_bridge_for_tests)
+
+    def test_status_reports_unavailable_once_the_host_seam_is_replaced(self):
+        ok, reason = claude_delegation.install_reasoning_bridge()
+        self.assertTrue(ok, reason)
+        self.assertEqual(claude_delegation.reasoning_bridge_status(), (True, ""))
+
+        import tools.delegate_tool as delegate_tool
+
+        wrapper = claude_delegation._REASONING_BRIDGE_STATE.wrapper
+        replacement = lambda **kwargs: None
+        delegate_tool._resolve_child_runtime = replacement
+        try:
+            ok2, reason2 = claude_delegation.reasoning_bridge_status()
+            self.assertFalse(ok2)
+            self.assertNotEqual(reason2, "")
+            self.assertIn("_resolve_child_runtime", reason2)
+        finally:
+            delegate_tool._resolve_child_runtime = wrapper
+
+
 class RegisterTests(unittest.TestCase):
     def setUp(self):
         self.addCleanup(setattr, claude_delegation, "_ACTIVE", False)

@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Any
 
 # A plugin script can be run directly; make its parent plugin namespace importable
-# without depending on the caller's PYTHONPATH.
+# without depending on the caller's PYTHONPATH. Only needed in script mode: a
+# package load already has its parent importable through the normal package
+# machinery, and inserting the resolved plugin-parent directory at sys.path[0]
+# there would leak into every other import in the host Hermes process.
 _PLUGIN_PARENT = Path(__file__).resolve().parent.parent
-if str(_PLUGIN_PARENT) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_PARENT))
 
 if __package__:
     # Loaded as part of the plugin package. Hermes names it
@@ -35,6 +36,8 @@ if __package__:
     from . import RouteDecision, _load_config, _log_decision, _normalise
     from .hermes_paths import hermes_path
 else:
+    if str(_PLUGIN_PARENT) not in sys.path:
+        sys.path.insert(0, str(_PLUGIN_PARENT))
     from model_router import RouteDecision, _load_config, _log_decision, _normalise
     from model_router.hermes_paths import hermes_path
 

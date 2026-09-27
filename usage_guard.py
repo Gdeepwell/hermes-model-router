@@ -232,7 +232,8 @@ def _import_hermes(module: str) -> None:
 
 
 def _import_failed(account: str, exc: BaseException) -> None:
-    _LAST_FAILURE[account] = f"Hermes usage code could not be imported: {type(exc).__name__}: {exc}"
+    with _LOCK:
+        _LAST_FAILURE[account] = f"Hermes usage code could not be imported: {type(exc).__name__}: {exc}"
 
 
 def _fetch_anthropic() -> Optional[Reading]:
@@ -398,16 +399,20 @@ def read(account: str, cfg: Dict[str, Any], *, now: Optional[float] = None,
                 return reading
             if now - _slot(account)["failed_at"] < ttl:
                 return None
-    _LAST_FAILURE.pop(account, None)
+    with _LOCK:
+        _LAST_FAILURE.pop(account, None)
     try:
         fresh = fetcher()
     except Exception as exc:
-        _LAST_FAILURE[account] = f"{type(exc).__name__}: {exc}"
+        with _LOCK:
+            _LAST_FAILURE[account] = f"{type(exc).__name__}: {exc}"
         fresh = None
     with _LOCK:
         slot = _slot(account)
         if fresh is None:
             slot["failed_at"] = now
+            if not _LAST_FAILURE.get(account):
+                _LAST_FAILURE[account] = "no usable reading"
         else:
             fresh = replace(fresh, fetched_at=now)
             slot["reading"], slot["failed_at"] = fresh, 0.0

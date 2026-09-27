@@ -118,20 +118,23 @@ _REASONING_BRIDGE_STATE_KEY = "_hermes_model_router_claude_reasoning_state"
 
 
 def _new_reasoning_bridge_state() -> Any:
-    return types.SimpleNamespace(
-        scope=ContextVar("claude_delegation_reasoning_scope", default=None),
-        lock=threading.Lock(),
-        installed=False,
-        reason="not yet installed",
-        original=None,
-        wrapper=None,
-    )
+    state = types.ModuleType(_REASONING_BRIDGE_STATE_KEY)
+    state.scope = ContextVar("claude_delegation_reasoning_scope", default=None)
+    state.lock = threading.Lock()
+    state.installed = False
+    state.reason = "not yet installed"
+    state.original = None
+    state.wrapper = None
+    return state
 
 
-# ``sys.modules`` is only a per-process identity registry here: this holder is
-# deliberately an ordinary object, not a module. A newer copy backfills fields
-# it knows about on an older holder; a non-holder or incompatible field type is
-# still unsupported rather than silently replaced.
+# ``sys.modules`` is a per-process identity registry: this holder is a real
+# ``types.ModuleType`` (not a plain namespace object) so code that walks
+# ``sys.modules`` expecting module objects -- ``importlib.reload``-style
+# tooling, some warning/pickle helpers, ``inspect.getmodule`` -- does not trip
+# over it. A newer copy backfills fields it knows about on an older holder; a
+# non-holder or incompatible field type is still unsupported rather than
+# silently replaced.
 _REASONING_BRIDGE_STATE: Any = sys.modules.setdefault(
     _REASONING_BRIDGE_STATE_KEY,
     _new_reasoning_bridge_state(),
@@ -352,15 +355,27 @@ def install_reasoning_bridge() -> Tuple[bool, str]:
 def reasoning_bridge_status() -> Tuple[bool, str]:
     """Whether the reasoning-effort bridge is usable right now, and why not when it isn't.
 
-    ``(True, "")`` when THIS process already installed it. Otherwise falls
-    back to ``reasoning_bridge_compatibility()``'s side-effect-free probe, so
-    a process that queries status before ever installing (the standalone
-    dashboard) still reports "available" whenever the host seam this bridge
-    needs is actually compatible -- "available" means "the host seam is
-    compatible", not "this process installed the wrapper".
+    ``(True, "")`` when THIS process already installed it *and* the host's
+    ``tools.delegate_tool._resolve_child_runtime`` is still the installed
+    wrapper -- a later replacement (a host refactor, a reload, another copy's
+    reinstall) means the bridge is no longer the seam actually in effect, even
+    though ``state.installed`` was never reset. Otherwise falls back to
+    ``reasoning_bridge_compatibility()``'s side-effect-free probe, so a process
+    that queries status before ever installing (the standalone dashboard)
+    still reports "available" whenever the host seam this bridge needs is
+    actually compatible -- "available" means "the host seam is compatible",
+    not "this process installed the wrapper".
     """
-    if _REASONING_BRIDGE_STATE.installed:
-        return True, ""
+    state = _REASONING_BRIDGE_STATE
+    if state.installed:
+        delegate_tool = sys.modules.get("tools.delegate_tool")
+        current = getattr(delegate_tool, "_resolve_child_runtime", None) if delegate_tool is not None else None
+        if current is state.wrapper:
+            return True, ""
+        return False, (
+            "tools.delegate_tool._resolve_child_runtime is no longer the installed "
+            "reasoning-effort wrapper; the host seam moved after install"
+        )
     return reasoning_bridge_compatibility()
 
 
