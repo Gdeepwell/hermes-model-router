@@ -5,6 +5,7 @@ their write verbs turn a read-only [luna] report into Terra work.
 """
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import pwd
@@ -147,6 +148,45 @@ class InjectedContextClassificationTests(unittest.TestCase):
         self.assertEqual(result.model, "claude-sonnet-5")
         self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
         self.assertEqual(bridge.call_args.kwargs["task"], goal + "\n\n" + bootstrap)
+
+    def test_explicit_ui_bridge_write_intent_uses_stripped_text(self):
+        """A2-N4: _opus5_write_intent must read routing_text, not raw text, so a
+        write verb inside the host bootstrap does not grant write capability to
+        a read-only explicit UI request.
+        """
+        goal = "[opus5] Let Opus review the CSS layout spacing and tell me what looks off."
+        bootstrap = self.real_superpowers_bootstrap()
+        with tempfile.TemporaryDirectory() as repo_dir, tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(repo_dir)
+            route_log = Path(temp_dir) / "router.jsonl"
+            route_log.write_text(json.dumps({
+                "timestamp": "2099-01-01T00:00:00+00:00",
+                "tier": "opus5",
+                "model": "claude-opus-5-5",
+                "reason": "verified probe",
+            }) + "\n", encoding="utf-8")
+            cfg = {
+                **CFG,
+                "logging": {"enabled": True, "path": str(route_log)},
+                "coding_agent": {
+                    "enabled": True,
+                    "canonical_model": "claude-opus-5-5",
+                    "default_repo": str(repo),
+                    "explicit_ui": {
+                        "enabled": True,
+                        "max_chars": 1200,
+                        "require_recent_verified_probe_seconds": 86400,
+                    },
+                },
+            }
+            request = {"messages": [{"role": "user", "content": goal + "\n\n" + bootstrap}]}
+            with patch("model_router.shutil.which", return_value="/usr/bin/claude"), \
+                 patch("model_router._run_opus5_bridge", return_value={
+                     "result": "ok", "effective_model": "claude-opus-5-5",
+                 }) as bridge:
+                _maybe_run_opus5(request, cfg, platform="parent", api_mode="codex_responses")
+        bridge.assert_called_once()
+        self.assertFalse(bridge.call_args.kwargs["write"])
 
     def test_unsigned_host_tags_remain_operator_text(self):
         for tag, block in UNSIGNED_CONTEXTS.items():

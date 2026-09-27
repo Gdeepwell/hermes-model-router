@@ -310,6 +310,25 @@ class NothingObjectTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(_is_spark_read_only_work(text))
 
+    def test_widened_exception_words_after_nothing_are_writes(self):
+        """A2-N2: save, aside from, else but, other then join the shared alternation."""
+        for text in (
+            "[luna] Change nothing save the timeout in /home/x.",
+            "[luna] Modify nothing aside from the README in /home/x.",
+            "[luna] Change nothing else but the README in /home/x.",
+            "[luna] Change nothing other then the timeout in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+    def test_a_plain_but_after_a_refusal_stays_a_write(self):
+        """A2-N3 ruling: a plain coordinating 'but' after a refusal is a write,
+        the safe (Terra) direction. Pinned so a later reviewer does not flip it.
+        """
+        self.assertFalse(_is_spark_read_only_work(
+            "[luna] Make no edits, but list the files in /home/x."
+        ))
+
     def test_nothing_does_not_hide_a_real_instruction(self):
         """Only the verb directly refusing its object is stripped."""
         for text in (

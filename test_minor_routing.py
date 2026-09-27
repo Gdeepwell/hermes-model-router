@@ -95,6 +95,42 @@ class OrchestrationSkipReasonBootstrapTests(unittest.TestCase):
         self.assertEqual(reason, "explicit_delegation_tool")
 
 
+class OrchestrationSkipReasonMinCharsBootstrapTests(unittest.TestCase):
+    """A2-N1: the A-M2 fix stripped the tool-name check but not min_chars or
+    the bounded-UI check, so a short operator turn plus the real bootstrap
+    (which pushes total length over min_chars and the bounded-UI max_chars)
+    used to fall through the length gate and force a planner preflight.
+    """
+
+    SHORT_OPERATOR_TEXT = "Fix the typo in README.md line 3."
+
+    def _kwargs(self, text: str) -> dict:
+        request = {
+            "messages": [{"role": "user", "content": text}],
+            "tools": [{"type": "function", "function": {"name": "delegate_task"}}],
+        }
+        return {
+            "request": request, "api_call_count": 1,
+            "platform": "parent", "turn_id": "s1:root",
+        }
+
+    def test_short_operator_text_with_real_bootstrap_still_hits_min_chars(self):
+        bootstrap = real_superpowers_bootstrap(self)
+        decision = router._decision(CFG["default_model"], "x", CFG)
+        with patch("model_router._host_delegation_limits",
+                   return_value={"conductor_available": True}), \
+             patch("model_router._conductor_tier", return_value="terra"):
+            without_bootstrap = router._orchestration_skip_reason(
+                self._kwargs(self.SHORT_OPERATOR_TEXT), CFG, decision,
+            )
+            with_bootstrap = router._orchestration_skip_reason(
+                self._kwargs(self.SHORT_OPERATOR_TEXT + "\n\n" + bootstrap), CFG, decision,
+            )
+        expected = f"prompt_shorter_than_min_chars:{len(self.SHORT_OPERATOR_TEXT)}<180"
+        self.assertEqual(without_bootstrap, expected)
+        self.assertEqual(with_bootstrap, expected)
+
+
 class RememberedRepositoryLockTests(unittest.TestCase):
     def setUp(self):
         router._DISPATCH_REVIEW_REPOSITORIES.clear()

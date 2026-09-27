@@ -968,22 +968,31 @@ def _without_verbs_as_nouns(text: str) -> str:
 # Stripped here as a phrase rather than added to the prohibition clauses on
 # purpose: dropping the whole clause would hide a real instruction standing next
 # to it, so "make no edits but rewrite the config" must still read as a write.
+#
+# One shared exception alternation, reused by all three regexes, so the set of
+# words that authorise a change after a refusal cannot drift between them.
+# "but" alone is deliberately included (the plan's ruling, Terra-safe
+# direction): "change nothing, but report ..." over-matches to a write rather
+# than under-matching a real exception clause to read-only.
+_REFUSAL_EXCEPTION_WORDS = (
+    r"except|but|save|other\s+th(?:a|e)n|apart\s+from|aside\s+from|besides"
+)
 _NEGATED_VERB = re.compile(
     rf"\bno\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?\b"
-    rf"(?!\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b)", re.I)
+    rf"(?!\s*,?\s*(?:else\s+)?(?:{_REFUSAL_EXCEPTION_WORDS})\b)", re.I)
 # "change nothing", "modify absolutely nothing": the same refusal with the verb
 # first. Only a verb whose direct object is "nothing" is stripped, so "edit the
 # schema so that nothing breaks" and "fix the parser; nothing else" still write.
 _NOTHING_OBJECT_VERB = re.compile(
     rf"\b(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing\b"
-    rf"(?!\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b)", re.I)
+    rf"(?!\s*,?\s*(?:else\s+)?(?:{_REFUSAL_EXCEPTION_WORDS})\b)", re.I)
 # A refusal with an immediate exception still authorises a change. This must be
 # checked before refusal phrases are stripped, while the strippers retain their
 # narrow lookaheads so only the refusal itself is removed in ordinary prose.
 _REFUSAL_WITH_EXCEPTION = re.compile(
     rf"\b(?:no\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?"
     rf"|(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing)"
-    rf"\s*,?\s*(?:except|but|other\s+than|apart\s+from|besides)\b", re.I)
+    rf"\s*,?\s*(?:else\s+)?(?:{_REFUSAL_EXCEPTION_WORDS})\b", re.I)
 
 
 def _without_negated_verbs(text: str) -> str:
@@ -3382,12 +3391,12 @@ def _orchestration_skip_reason(
     # and a short prompt ("csinald meg") routinely opens the longest loops.
     if decision.tier == str(cfg.get("default_model", "terra")) and not sol_preflight and not is_rescue:
         min_chars = max(0, int(policy.get("min_chars", 180) or 0))
-        if len(user_text) < min_chars:
-            return f"prompt_shorter_than_min_chars:{len(user_text)}<{min_chars}"
+        if len(operator_text) < min_chars:
+            return f"prompt_shorter_than_min_chars:{len(operator_text)}<{min_chars}"
     # Explicit bounded UI requests authorised for the verified bridge are a
     # single-hop exception: Sol retains policy ownership, but no Sol/Terra/Spark
     # planner call is created before Opus execution middleware handles the turn.
-    if decision.tier == "sol" and _is_explicit_bounded_opus_ui_request(user_text, cfg):
+    if decision.tier == "sol" and _is_explicit_bounded_opus_ui_request(operator_text, cfg):
         return "explicit_bounded_opus_ui_request"
     # A normal first-call preflight must be before parent tool work. The rescue
     # path intentionally runs inside an existing tool loop.
@@ -4844,7 +4853,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
         result = _run_opus5_bridge(
             repo=str(explicit_ui_repo),
             task=f"[opus5] {text}",
-            write=_opus5_write_intent(text),
+            write=_opus5_write_intent(routing_text),
             model=alias,
             requested_alias=requested_alias,
             adjustment=adjustment,
@@ -4876,7 +4885,7 @@ def _maybe_run_opus5(request: Dict[str, Any], cfg: Dict[str, Any], **kwargs: Any
     result = _run_opus5_bridge(
         repo=str(repo_path.resolve()),
         task=text,
-        write=_opus5_write_intent(text),
+        write=_opus5_write_intent(routing_text),
         model=alias,
         requested_alias=requested_alias,
         adjustment=adjustment,
