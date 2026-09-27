@@ -244,5 +244,50 @@ class NegatedVerbTests(unittest.TestCase):
                 self.assertFalse(_is_spark_read_only_work(text))
 
 
+class NothingObjectTests(unittest.TestCase):
+    """"Change nothing": the refusal written with the verb first.
+
+    Observed 2026-09-27: a [luna] smoke check whose context said "No files in
+    scope; change nothing." ran on Terra, reason "Luna is restricted to
+    non-design read-only subtasks". The "no <verb>" phrase filter reads only the
+    word order "no edits"; the verb-first "<verb> nothing" kept its write verb.
+    """
+
+    # The goal and context exactly as dispatched; Hermes joins them into the
+    # child's first user message.
+    DISPATCHED = (
+        "[luna] Report the output of `git -C /home/x/repo log -1 --format=%h` "
+        "and nothing else.\n\nCONTEXT:\nRead-only smoke test of routing. "
+        "Worktree: /home/x/repo, branch feat/x, base a8334c4. No files in scope; "
+        "change nothing. Verify: output is a short commit hash."
+    )
+
+    def test_refusing_with_nothing_is_not_writing(self):
+        for text in (
+            "[luna] Report the schema in /home/x; change nothing.",
+            "[spark] Inspect the router in /home/x and modify nothing.",
+            "[luna] Map the flow in /home/x, edit nothing, write nothing.",
+            "[luna] List the tables in /home/x. Change absolutely nothing.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_the_dispatched_smoke_check_keeps_its_luna_label(self):
+        decision = classify_request(
+            chat_request(self.DISPATCHED), 1, CFG, allow_plan_label_over_design=True
+        )
+        self.assertEqual(decision.tier, "luna")
+
+    def test_nothing_does_not_hide_a_real_instruction(self):
+        """Only the verb directly refusing its object is stripped."""
+        for text in (
+            "[luna] Change nothing in the tests but rewrite the config in /home/x.",
+            "[luna] Fix the parser in /home/x; nothing else.",
+            "[spark] Edit the schema in /home/x so that nothing breaks.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+
 if __name__ == "__main__":
     unittest.main()

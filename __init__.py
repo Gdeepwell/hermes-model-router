@@ -970,11 +970,16 @@ def _without_verbs_as_nouns(text: str) -> str:
 # to it, so "make no edits but rewrite the config" must still read as a write.
 _NEGATED_VERB = re.compile(
     rf"\bno\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}(?:{_SPARK_MUTATING_VERBS})s?\b", re.I)
+# "change nothing", "modify absolutely nothing": the same refusal with the verb
+# first. Only a verb whose direct object is "nothing" is stripped, so "edit the
+# schema so that nothing breaks" and "fix the parser; nothing else" still write.
+_NOTHING_OBJECT_VERB = re.compile(
+    rf"\b(?:{_SPARK_MUTATING_VERBS})\s+(?:absolutely\s+)?nothing\b", re.I)
 
 
 def _without_negated_verbs(text: str) -> str:
-    """Remove write verbs a goal explicitly refuses ("make no edits")."""
-    return _NEGATED_VERB.sub(" ", text or "")
+    """Remove write verbs a goal explicitly refuses ("make no edits", "change nothing")."""
+    return _NOTHING_OBJECT_VERB.sub(" ", _NEGATED_VERB.sub(" ", text or ""))
 
 
 def _without_non_instructing_verbs(text: str) -> str:
