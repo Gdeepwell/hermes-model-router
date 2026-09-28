@@ -299,9 +299,36 @@ def _fetch_codex() -> Optional[Reading]:
     return Reading(weekly, session, weekly_reset, session_reset, time.time())
 
 
+def _fetch_grok() -> Optional[Reading]:
+    """SuperGrok subscription usage (an unofficial endpoint, Hermes's own `xai-oauth` reader).
+
+    One shared *weekly* pool across API/Chat/Build/Voice -- no 5-hour session window --
+    so this only ever reports the weekly figure; ``session`` stays None and the guard's
+    5-hour/tighter windows fall back to weekly alone for this account.
+    """
+    try:
+        _import_hermes("agent.account_usage")
+        from agent.account_usage import fetch_account_usage
+    except Exception as exc:
+        _import_failed("xai-oauth", exc)
+        return None
+    snapshot = fetch_account_usage("xai-oauth")
+    if snapshot is None or not getattr(snapshot, "available", False):
+        return None
+    weekly = weekly_reset = None
+    for window in getattr(snapshot, "windows", ()) or ():
+        if str(getattr(window, "label", "")) == "SuperGrok weekly credits":
+            weekly, weekly_reset = _num(getattr(window, "used_percent", None)), _iso(getattr(window, "reset_at", None))
+            break
+    if weekly is None:
+        return None
+    return Reading(weekly, None, weekly_reset, None, time.time())
+
+
 FETCHERS: Dict[str, Callable[[], Optional[Reading]]] = {
     "anthropic": _fetch_anthropic,
     "openai-codex": _fetch_codex,
+    "xai-oauth": _fetch_grok,
 }
 
 

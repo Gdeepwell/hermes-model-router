@@ -61,9 +61,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(usage_guard.state("anthropic", {}, _reading(99)), "unknown")
         self.assertEqual(usage_guard.apply("anthropic", "opus5", {}, _reading(99)), GuardOutcome("opus5"))
 
-    def test_fetchers_exist_for_both_accounts_only(self):
+    def test_fetchers_exist_for_the_configured_accounts_only(self):
         self.assertTrue(usage_guard.has_fetcher("anthropic"))
         self.assertTrue(usage_guard.has_fetcher("openai-codex"))
+        self.assertTrue(usage_guard.has_fetcher("xai-oauth"))
         self.assertFalse(usage_guard.has_fetcher("qwen-token"))
 
 
@@ -390,6 +391,32 @@ class FetcherTests(unittest.TestCase):
     def test_codex_unavailable_reads_nothing(self):
         with patch("agent.account_usage.fetch_account_usage", return_value=SimpleNamespace(available=False, windows=())):
             self.assertIsNone(usage_guard.FETCHERS["openai-codex"]())
+
+    def test_grok_uses_the_weekly_supergrok_window_only(self):
+        """SuperGrok has one shared weekly pool, no 5-hour session window."""
+        reset = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)
+        snapshot = SimpleNamespace(available=True, windows=(
+            SimpleNamespace(label="SuperGrok weekly credits", used_percent=18.0, reset_at=reset),
+            SimpleNamespace(label="Grok Build weekly", used_percent=16.0, reset_at=reset),
+            SimpleNamespace(label="API weekly", used_percent=2.0, reset_at=reset),
+        ))
+        with patch("agent.account_usage.fetch_account_usage", return_value=snapshot) as fetch:
+            reading = usage_guard.FETCHERS["xai-oauth"]()
+        fetch.assert_called_once_with("xai-oauth")
+        self.assertEqual((reading.weekly, reading.session), (18.0, None))
+        self.assertEqual(reading.weekly_resets_at, reset.isoformat())
+        self.assertIsNone(reading.session_resets_at)
+
+    def test_grok_unavailable_reads_nothing(self):
+        with patch("agent.account_usage.fetch_account_usage", return_value=SimpleNamespace(available=False, windows=())):
+            self.assertIsNone(usage_guard.FETCHERS["xai-oauth"]())
+
+    def test_grok_with_no_recognized_window_reads_nothing(self):
+        snapshot = SimpleNamespace(available=True, windows=(
+            SimpleNamespace(label="Grok Build weekly", used_percent=16.0, reset_at=None),
+        ))
+        with patch("agent.account_usage.fetch_account_usage", return_value=snapshot):
+            self.assertIsNone(usage_guard.FETCHERS["xai-oauth"]())
 
 
 from model_router import (  # noqa: E402

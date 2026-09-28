@@ -72,9 +72,29 @@ enable it:
 Grok is then a `delegate_task(model="grok")` target, a preference-chain entry, a
 fallback for the main agent or the workers, and a `heavy` peer next to Terra,
 Opus and Sonnet. It takes the same `reasoning.effort` levels as the Codex tiers
-(`low` to `xhigh`, default `medium`). xAI publishes no usage endpoint, so its card
-shows no usage bars; a quota refusal still benches the tier through the ordinary
-cooldown. A Grok parent is written with `api_mode: codex_responses`.
+(`low` to `xhigh`, default `medium`). A Grok parent is written with
+`api_mode: codex_responses`.
+
+xAI publishes no *official* usage endpoint, but `hermes usage`/`/usage` and the
+dashboard's account card read the same undocumented billing endpoint the Grok
+CLI itself uses (`https://cli-chat-proxy.grok.com/v1/billing?format=credits`,
+sent your stored `xai-oauth` bearer, no API key, no cookie). SuperGrok has a
+single **weekly** pool shared across API/Chat/Build/Voice — no 5-hour session
+window — so only the weekly figure shows and `usage_guard`'s 5-hour/tighter
+comparisons fall back to weekly alone for this account. This is an unofficial
+endpoint xAI can change or remove without notice; a failed read just leaves the
+card blank and the ordinary cooldown still benches the tier on a quota refusal.
+To apply the same soft/hard delegation limits Claude and Codex get, add it
+under `usage_guard.accounts` in `router_config.local.yaml`:
+
+```yaml
+usage_guard:
+  accounts:
+    xai-oauth:
+      soft_percent: 70
+      hard_percent: 90
+      step_down: {grok: terra}
+```
 
 ### Substitution groups
 
