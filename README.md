@@ -1441,6 +1441,10 @@ skipped here.
 
 ## Version
 
+**1.21.2** — Overview account groups: the weekly usage bar sits at the bottom
+of its card even when the group holds a single model (Grok), so the bars line up
+across groups, and the percentage and its reset time no longer run together.
+
 **1.21.1** — A review goal naming a path the OS refuses (a component over the
 name-length limit) no longer raises out of the `delegate_task` admission guard,
 which Hermes would then skip; the lookup reads it as "no repository", and a
