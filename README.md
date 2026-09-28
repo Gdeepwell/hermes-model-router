@@ -1421,6 +1421,11 @@ skipped here.
 
 ## Version
 
+**1.21.1** — A review goal naming a path the OS refuses (a component over the
+name-length limit) no longer raises out of the `delegate_task` admission guard,
+which Hermes would then skip; the lookup reads it as "no repository", and a
+failed review lookup falls through to the ordinary target check.
+
 **1.21.0** — Reasoning effort for delegated Claude and Grok, Claude as a
 switchable account, and a Claude main agent from the dashboard.
 

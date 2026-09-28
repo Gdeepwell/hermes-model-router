@@ -184,10 +184,19 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
         self.assertEqual(routed, (repo.resolve(), "sonnet"))
 
     def test_nonexistent_goal_and_shipped_aliases_are_skipped(self):
-        cfg = self._config(repo_aliases={"router": "/home/deepwell/hermes-model-router"})
+        cfg = self._config(repo_aliases={"router": "/nonexistent/model-router-alias-target"})
         with patch("model_router.shutil.which", return_value="/claude"):
             routed = router._verified_delegated_claude_review(
                 "[sonnet-review] Review /not/a/repository, router", cfg)
+        self.assertIsNone(routed)
+
+    def test_a_path_the_os_refuses_is_skipped_rather_than_raised(self):
+        # A component over NAME_MAX makes is_dir() raise ENAMETOOLONG; raising here
+        # would let Hermes skip the admission guard, so it must read as "no repo".
+        cfg = self._config()
+        with patch("model_router.shutil.which", return_value="/claude"):
+            routed = router._verified_delegated_claude_review(
+                "[sonnet-review] Review /tmp/" + "x" * 300 + "/src", cfg)
         self.assertIsNone(routed)
 
     def test_resolved_sonnet_review_calls_the_cli_bridge(self):

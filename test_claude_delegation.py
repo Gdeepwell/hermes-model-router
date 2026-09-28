@@ -1017,6 +1017,12 @@ class RealHostTests(unittest.TestCase):
         self.assertIn("disabled for this test", payload["error"])
 
 
+def _parent_stub():
+    """A parent agent with the attributes the host resolver reads directly
+    (``model``, ``base_url``); everything else it reads through getattr."""
+    return SimpleNamespace(model=None, base_url=None)
+
+
 class ReasoningScopeIsolationTests(unittest.TestCase):
     """Deferred Task 1 finding: the wrapper's substitution/non-substitution logic, covered
     directly against the real installed host seam."""
@@ -1036,7 +1042,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
         )
 
     def test_a_matching_scope_substitutes_the_reasoning_config(self):
-        parent = SimpleNamespace()
+        parent = _parent_stub()
         with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"}):
             result = self._resolve(parent_agent=parent, model="claude-sonnet-5")
         self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
@@ -1087,7 +1093,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
     def test_an_unscoped_call_returns_the_original_result_object(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
-        parent = SimpleNamespace()
+        parent = _parent_stub()
         # No scope active: the wrapper must pass the host's object straight through,
         # unchanged, not a copy of it.
         returned = self._resolve(parent_agent=parent, model="claude-sonnet-5")
@@ -1096,7 +1102,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
     def test_a_different_parent_object_is_not_substituted(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
-        scoped_parent, other_parent = SimpleNamespace(), SimpleNamespace()
+        scoped_parent, other_parent = _parent_stub(), _parent_stub()
         with claude_delegation.reasoning_scope(scoped_parent, "sonnet", "claude-sonnet-5",
                                                 {"enabled": True, "effort": "high"}):
             returned = self._resolve(parent_agent=other_parent, model="claude-sonnet-5")
@@ -1105,7 +1111,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
     def test_a_non_anthropic_override_provider_is_not_substituted(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
-        parent = SimpleNamespace()
+        parent = _parent_stub()
         with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
                                                 {"enabled": True, "effort": "high"}):
             returned = self._resolve(parent_agent=parent, model="claude-sonnet-5", override_provider="openai-codex")
@@ -1114,7 +1120,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
     def test_a_different_model_is_not_substituted(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
-        parent = SimpleNamespace()
+        parent = _parent_stub()
         with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
                                                 {"enabled": True, "effort": "high"}):
             returned = self._resolve(parent_agent=parent, model="claude-opus-5-5")
@@ -1133,7 +1139,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
             except Exception as exc:  # pragma: no cover - surfaced via errors list
                 errors.append((name, exc))
 
-        parent_a, parent_b = SimpleNamespace(), SimpleNamespace()
+        parent_a, parent_b = _parent_stub(), _parent_stub()
         t1 = threading.Thread(target=worker, args=("a", parent_a, "claude-sonnet-5", "high"))
         t2 = threading.Thread(target=worker, args=("b", parent_b, "claude-opus-5-5", "low"))
         t1.start()

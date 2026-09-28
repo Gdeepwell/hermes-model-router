@@ -599,7 +599,7 @@ _CLAUDE_SWITCHES: Tuple[str, ...] = ("opus5", "sonnet5", "haiku")
 
 
 def _legacy_claude_verdict(local: Dict[str, Any]) -> Optional[bool]:
-    """What a pre-1.20 local file said about Claude, or None when it said nothing.
+    """What a pre-1.21 local file said about Claude, or None when it said nothing.
 
     ``workflow: codex`` means off and ``workflow: claude_delegation`` means on.
     Any other value, null or blank included, counts as absent, so
@@ -4466,12 +4466,29 @@ def _bounded_cache_put(cache: OrderedDict, key: Any, value: Any, *, max_entries:
             cache.popitem(last=False)
 
 
+def _existing_directory(path: Path) -> Optional[Path]:
+    """``path`` resolved when it is a directory, else None -- never raises.
+
+    The path often comes from a task's text, so a name the OS refuses (a
+    component over NAME_MAX raises ENAMETOOLONG, not False) must read as "no
+    directory" rather than escape into the admission guard, which the host
+    then skips.
+    """
+    try:
+        return path.resolve() if path.is_dir() else None
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
 def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path]:
     """Return an existing directory, collapsing a Git child to its work-tree root."""
-    candidate = Path(str(value).strip()).expanduser()
-    if not candidate.is_dir():
+    try:
+        candidate = Path(str(value).strip()).expanduser()
+    except RuntimeError:
         return None
-    candidate = candidate.resolve()
+    candidate = _existing_directory(candidate)
+    if candidate is None:
+        return None
     cache_key = (str(candidate), git_top_level)
     found, cached = _bounded_cache_get(
         _REPO_DIRECTORY_CACHE, cache_key, _REPO_DIRECTORY_CACHE_TTL_SECONDS,
@@ -4486,8 +4503,7 @@ def _repo_directory(value: str, *, git_top_level: bool = False) -> Optional[Path
     except (OSError, subprocess.TimeoutExpired):
         completed = None
     if completed is not None and completed.returncode == 0:
-        root = Path(completed.stdout.strip())
-        result = root.resolve() if root.is_dir() else None
+        result = _existing_directory(Path(completed.stdout.strip()))
     else:
         result = None if git_top_level else candidate
     _bounded_cache_put(
@@ -4575,7 +4591,7 @@ def _remembered_dispatch_review_repository(text: str) -> Optional[Path]:
 def _existing_remembered_directory(repository: object) -> Optional[Path]:
     if not isinstance(repository, Path):
         return None
-    return repository if repository.is_dir() else None
+    return repository if _existing_directory(repository) is not None else None
 
 
 def _delegated_review_repository(text: str, cfg: Dict[str, Any], *, request: Optional[Dict[str, Any]] = None,

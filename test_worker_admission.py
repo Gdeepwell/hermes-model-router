@@ -77,6 +77,18 @@ class AdmissionTests(unittest.TestCase):
             self.assertEqual(worker_admission.guard_tool_execution(tool_name='delegate_task',
                              args={'action': 'stop'}, next_call=call), 'controlled')
 
+    def test_a_failing_review_lookup_still_checks_the_target_account(self):
+        # Raising out of the guard would make Hermes skip it (fail open).
+        call = Mock(return_value='admitted')
+        with patch.object(router, '_load_config', return_value=ROUTER_CFG), \
+             patch.object(router, '_delegated_claude_review_status', side_effect=OSError(36, 'File name too long')), \
+             patch.object(worker_admission, 'delegate_task_route', return_value=('openai-codex', 'gpt-terra')), \
+             patch.object(usage_guard, 'read', return_value=usage_guard.Reading(95, 0, None, None, time.time())):
+            result = worker_admission.guard_tool_execution(tool_name='delegate_task',
+                        args={'tasks': [{'goal': '[sonnet-review] Review /x'}]}, next_call=call)
+        call.assert_not_called()
+        self.assertIn('closed', result)
+
     def test_pathless_review_uses_the_active_parent_workspace_not_process_cwd(self):
         call = Mock(return_value='admitted')
         cfg = {

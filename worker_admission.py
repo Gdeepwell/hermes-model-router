@@ -87,10 +87,17 @@ def guard_tool_execution(**kwargs):
         task = task if isinstance(task, dict) else {}
         goal = str(task.get("goal") or args.get("goal") or "")
         requested_model = str(task.get("model") or args.get("model") or "").strip()
-        review, _reason = _delegated_claude_review_status(
-            goal, cfg, dispatch_cwd=dispatch_cwd, requested_model=requested_model,
-            at_dispatch=True,
-        )
+        # The review lookup reads paths out of the goal text. Raising from here
+        # would make Hermes skip this whole guard (execution middleware fails
+        # open), so a failed lookup falls through to the ordinary target check.
+        try:
+            review, _reason = _delegated_claude_review_status(
+                goal, cfg, dispatch_cwd=dispatch_cwd, requested_model=requested_model,
+                at_dispatch=True,
+            )
+        except Exception as exc:
+            review = None
+            _logger.warning("worker_admission: review lookup failed, checking the target instead: %s", exc)
         if review is not None:
             _repo, alias = review
             message = refusal("anthropic", CLAUDE_REVIEW_MODELS[alias], cfg, blocking=True)
