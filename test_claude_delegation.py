@@ -32,7 +32,7 @@ from model_router.claude_delegation import (
 
 CLAUDE_DELEGATION = {
     "enabled": True,
-    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
+    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
 }
 
@@ -171,7 +171,7 @@ class HandlerTests(unittest.TestCase):
 
     def test_the_default_tier_applies_when_none_is_given(self):
         _payload, calls = self._call({"tasks": [{"goal": "g"}]})
-        self.assertEqual(calls[0]["credentials_cfg"]["model"], "claude-sonnet-5")
+        self.assertEqual(calls[0]["credentials_cfg"]["model"], "claude-sonnet-5-5")
 
     def test_an_orchestrator_child_waits_for_its_workers(self):
         """Same rule as Hermes: a child at depth > 0 needs results within its turn."""
@@ -206,7 +206,7 @@ class HandlerTests(unittest.TestCase):
 
     def test_the_soft_limit_lowers_opus_and_says_so(self):
         payload, calls = self._call({"tasks": [{"goal": "g"}], "tier": "opus"}, usage=75.0)
-        self.assertEqual(calls[0]["credentials_cfg"]["model"], "claude-sonnet-5")
+        self.assertEqual(calls[0]["credentials_cfg"]["model"], "claude-sonnet-5-5")
         self.assertEqual(payload["claude_tier"], "sonnet")
         self.assertEqual(payload["tier_adjusted"], "opus→sonnet (weekly usage 75%)")
 
@@ -501,12 +501,12 @@ class ReasoningBridgeTests(unittest.TestCase):
 
         parent = SimpleNamespace()
         scope = claude_delegation._ReasoningScope(
-            parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"},
+            parent, "sonnet", "claude-sonnet-5-5", {"enabled": True, "effort": "high"},
         )
         token = claude_delegation._REASONING_SCOPE.set(scope)
         try:
             result = claude_delegation._wrap_resolve_child_runtime(resolver)(
-                parent_agent=parent, model="claude-sonnet-5", override_provider="anthropic",
+                parent_agent=parent, model="claude-sonnet-5-5", override_provider="anthropic",
             )
         finally:
             claude_delegation._REASONING_SCOPE.reset(token)
@@ -614,9 +614,9 @@ class ReasoningBridgeTests(unittest.TestCase):
             self.assertEqual(copy_b.install_reasoning_bridge(), (True, ""))
 
             parent = SimpleNamespace()
-            with copy_a.reasoning_scope(parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"}):
+            with copy_a.reasoning_scope(parent, "sonnet", "claude-sonnet-5-5", {"enabled": True, "effort": "high"}):
                 result = delegate_tool._resolve_child_runtime(
-                    parent_agent=parent, model="claude-sonnet-5", override_provider="anthropic",
+                    parent_agent=parent, model="claude-sonnet-5-5", override_provider="anthropic",
                 )
         self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
 
@@ -977,11 +977,11 @@ class RealHostTests(unittest.TestCase):
         )
         resolver = sys.modules["tools.delegate_tool"]._resolve_child_runtime
         with claude_delegation.reasoning_scope(
-            parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"},
+            parent, "sonnet", "claude-sonnet-5-5", {"enabled": True, "effort": "high"},
         ):
             # Same call shape as tools/delegate_tool.py's _build_child_agent, ~219-225.
             rt = resolver(
-                parent, delegation_cfg={}, parent_api_key="k", model="claude-sonnet-5",
+                parent, delegation_cfg={}, parent_api_key="k", model="claude-sonnet-5-5",
                 override_provider="anthropic", override_base_url=None, override_api_key=None,
                 override_api_mode=None, override_acp_command=None, override_acp_args=None,
                 routing_cfg=None,
@@ -992,7 +992,7 @@ class RealHostTests(unittest.TestCase):
         from agent.anthropic_adapter import build_anthropic_kwargs
 
         kwargs = build_anthropic_kwargs(
-            "claude-sonnet-5", [], [], 4096, {"enabled": True, "effort": "high"},
+            "claude-sonnet-5-5", [], [], 4096, {"enabled": True, "effort": "high"},
         )
         self.assertEqual(kwargs["thinking"]["type"], "adaptive")
         self.assertEqual(kwargs["output_config"]["effort"], "high")
@@ -1043,8 +1043,8 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
 
     def test_a_matching_scope_substitutes_the_reasoning_config(self):
         parent = _parent_stub()
-        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5", {"enabled": True, "effort": "high"}):
-            result = self._resolve(parent_agent=parent, model="claude-sonnet-5")
+        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5-5", {"enabled": True, "effort": "high"}):
+            result = self._resolve(parent_agent=parent, model="claude-sonnet-5-5")
         self.assertEqual(result["reasoning_config"], {"enabled": True, "effort": "high"})
 
     def _stub_original_resolver(self, sentinel):
@@ -1096,32 +1096,32 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
         parent = _parent_stub()
         # No scope active: the wrapper must pass the host's object straight through,
         # unchanged, not a copy of it.
-        returned = self._resolve(parent_agent=parent, model="claude-sonnet-5")
+        returned = self._resolve(parent_agent=parent, model="claude-sonnet-5-5")
         self.assertIs(returned, sentinel)
 
     def test_a_different_parent_object_is_not_substituted(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
         scoped_parent, other_parent = _parent_stub(), _parent_stub()
-        with claude_delegation.reasoning_scope(scoped_parent, "sonnet", "claude-sonnet-5",
+        with claude_delegation.reasoning_scope(scoped_parent, "sonnet", "claude-sonnet-5-5",
                                                 {"enabled": True, "effort": "high"}):
-            returned = self._resolve(parent_agent=other_parent, model="claude-sonnet-5")
+            returned = self._resolve(parent_agent=other_parent, model="claude-sonnet-5-5")
         self.assertIs(returned, sentinel)
 
     def test_a_non_anthropic_override_provider_is_not_substituted(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
         parent = _parent_stub()
-        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
+        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5-5",
                                                 {"enabled": True, "effort": "high"}):
-            returned = self._resolve(parent_agent=parent, model="claude-sonnet-5", override_provider="openai-codex")
+            returned = self._resolve(parent_agent=parent, model="claude-sonnet-5-5", override_provider="openai-codex")
         self.assertIs(returned, sentinel)
 
     def test_a_different_model_is_not_substituted(self):
         sentinel = {"marker": object()}
         self._stub_original_resolver(sentinel)
         parent = _parent_stub()
-        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5",
+        with claude_delegation.reasoning_scope(parent, "sonnet", "claude-sonnet-5-5",
                                                 {"enabled": True, "effort": "high"}):
             returned = self._resolve(parent_agent=parent, model="claude-opus-5-5")
         self.assertIs(returned, sentinel)
@@ -1140,7 +1140,7 @@ class ReasoningScopeIsolationTests(unittest.TestCase):
                 errors.append((name, exc))
 
         parent_a, parent_b = _parent_stub(), _parent_stub()
-        t1 = threading.Thread(target=worker, args=("a", parent_a, "claude-sonnet-5", "high"))
+        t1 = threading.Thread(target=worker, args=("a", parent_a, "claude-sonnet-5-5", "high"))
         t2 = threading.Thread(target=worker, args=("b", parent_b, "claude-opus-5-5", "low"))
         t1.start()
         t2.start()
@@ -1167,7 +1167,7 @@ class OfferedNamesTests(unittest.TestCase):
         path.write_text(
             "delegation:\n  targets:\n"
             "    opus5: {provider: anthropic, model: claude-opus-5-5}\n"
-            "    sonnet5: {provider: anthropic, model: claude-sonnet-5}\n",
+            "    sonnet5: {provider: anthropic, model: claude-sonnet-5-5}\n",
             encoding="utf-8",
         )
         return path

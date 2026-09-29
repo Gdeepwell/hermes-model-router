@@ -44,7 +44,7 @@ REASONING_LEVELS: Tuple[str, ...] = ("low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT: Dict[str, str] = {"sonnet": "medium", "opus": "medium"}
 
 DEFAULTS: Dict[str, Any] = {
-    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"},
+    "tiers": {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"},
     "default_tier": "sonnet",
     "log_path": "",
     "reasoning_effort": dict(DEFAULT_REASONING_EFFORT),

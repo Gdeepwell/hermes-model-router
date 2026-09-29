@@ -26,7 +26,7 @@ class AdmissionTests(unittest.TestCase):
     def test_live_switch_stops_existing_claude_child_on_its_next_call(self):
         switches = {"sonnet5": True}
         downstream = Mock(return_value="Claude continued")
-        request = {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "Continue"}]}
+        request = {"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "Continue"}]}
         with patch.object(router, "_load_config", side_effect=lambda: {"enabled": True, "callable": dict(switches)}):
             kwargs = dict(request=request, original_request=request, next_call=downstream,
                           provider="anthropic", platform="subagent", turn_id="root:sa-1")
@@ -38,7 +38,7 @@ class AdmissionTests(unittest.TestCase):
         downstream.assert_called_once()
 
     def test_anthropic_fallback_child_obeys_the_current_claude_switch(self):
-        request = {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "Continue"}]}
+        request = {"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "Continue"}]}
         downstream = Mock(return_value="Fallback child ran")
         for on, should_run in ((True, True), (False, False)):
             with self.subTest(sonnet5=on), patch.object(router, "_load_config", return_value={
@@ -133,7 +133,7 @@ class AdmissionTests(unittest.TestCase):
                 tool_name='delegate_task', args={'tasks': [{'goal': '[sonnet-review] Review parser'}]}, next_call=call)
         self.assertEqual(result, 'admitted')
         status.assert_called_once()
-        refusal.assert_called_once_with('anthropic', 'claude-sonnet-5', cfg, blocking=True)
+        refusal.assert_called_once_with('anthropic', 'claude-sonnet-5-5', cfg, blocking=True)
 
     def test_review_task_naming_a_non_claude_model_uses_the_named_target_check(self):
         call = Mock(return_value='admitted')
@@ -181,7 +181,7 @@ class AdmissionTests(unittest.TestCase):
             result = worker_admission.guard_tool_execution(
                 tool_name='delegate_task', args={'goal': '[sonnet-review] Review parser'}, next_call=call)
         call.assert_not_called()
-        refusal.assert_called_once_with('anthropic', 'claude-sonnet-5', cfg, blocking=True)
+        refusal.assert_called_once_with('anthropic', 'claude-sonnet-5-5', cfg, blocking=True)
         self.assertIn('Claude account closed', result)
 
     def test_review_without_a_resolvable_repository_keeps_the_codex_check(self):

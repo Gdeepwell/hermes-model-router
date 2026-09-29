@@ -1850,7 +1850,7 @@ class ModelRouterTests(unittest.TestCase):
         leaf's single call becomes a bridge subprocess and its verdict becomes
         the leaf's answer."""
         with tempfile.TemporaryDirectory() as repo:
-            result = {"result": "SONNET REVIEW COMPLETE", "effective_model": "claude-sonnet-5"}
+            result = {"result": "SONNET REVIEW COMPLETE", "effective_model": "claude-sonnet-5-5"}
             prompt = "[sonnet-review] Review the pending calendar diff for regressions. Report only."
             with patch("model_router._load_config", return_value=self._delegated_review_cfg(repo)), patch(
                 "model_router.shutil.which", return_value="/usr/bin/claude"
@@ -1870,7 +1870,7 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(bridge.call_args.kwargs["model"], "sonnet")
         self.assertTrue(bridge.call_args.kwargs["review"])
         self.assertFalse(bridge.call_args.kwargs["write"])
-        self.assertEqual(response.model, "claude-sonnet-5")
+        self.assertEqual(response.model, "claude-sonnet-5-5")
 
     def test_a_root_turn_is_never_diverted_into_the_bridge(self):
         """The documented hazard of this bridge is that it captures the first

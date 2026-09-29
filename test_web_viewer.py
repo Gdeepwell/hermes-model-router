@@ -793,7 +793,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
 
     OPTIONS = [
         {"key": "opus5", "provider": "anthropic", "model": "claude-opus-5-5"},
-        {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"},
+        {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5-5"},
         {"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"},
     ]
 
@@ -904,9 +904,9 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
             target = Path(directory) / "config.yaml"
             target.write_text("model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n", encoding="utf-8")
             options = [{"key": "qwen", "provider": "qwen-token", "model": "qwen3.7-plus"},
-                       {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"}]
+                       {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5-5"}]
             qwen = {"provider": "qwen-token", "model": "qwen3.7-plus"}
-            sonnet = {"provider": "anthropic", "model": "claude-sonnet-5"}
+            sonnet = {"provider": "anthropic", "model": "claude-sonnet-5-5"}
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target), \
                  patch.object(web_viewer, "_fallback_chain_options", return_value=options):
                 error = web_viewer._save_hermes_fallback(
@@ -941,12 +941,12 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
         router_cfg = {
             "models": {"terra": "gpt-5.6-terra", "sol": "gpt-6-sol"},
             "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
-            "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
+            "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}},
         }
         with patch.object(web_viewer, "_read_hermes_config", return_value={}):
             options = web_viewer._fallback_chain_options(router_cfg)
         self.assertIn({"key": "sol", "provider": "openai-codex", "model": "gpt-6-sol"}, options)
-        self.assertIn({"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"}, options)
+        self.assertIn({"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5-5"}, options)
 
     def test_options_still_include_the_hermes_delegation_targets(self):
         router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
@@ -970,7 +970,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
                 "fallback_providers:\n- provider: openai-codex\n  model: gpt-6-sol\n"
                 "delegation:\n  targets:\n"
                 "    opus5:\n      provider: anthropic\n      model: claude-opus-5-5\n"
-                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
+                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5-5\n",
                 encoding="utf-8")
             router_cfg = {"models": {}, "tier_providers": {}, "claude_delegation": {"tiers": {}}}
             with patch.object(web_viewer, "HERMES_CONFIG_PATH", target):
@@ -1009,7 +1009,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
                 "models": {"terra": "gpt-5.6-terra", "sol": "gpt-6-sol"},
                 "tier_providers": {"terra": "openai-codex", "sol": "openai-codex"},
                 "preferences": {},
-                "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
+                "claude_delegation": {"tiers": {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}},
             }
             with open(config_path, "w", encoding="utf-8") as f:
                 web_viewer.yaml.dump(router_cfg, f)
@@ -1019,7 +1019,7 @@ class HermesFallbackChainTests(DashboardProbeMixin, unittest.TestCase):
                 "fallback_providers:\n- provider: openai-codex\n  model: gpt-6-sol\n"
                 "delegation:\n  targets:\n"
                 "    opus5:\n      provider: anthropic\n      model: claude-opus-5-5\n"
-                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5\n",
+                "    sonnet5:\n      provider: anthropic\n      model: claude-sonnet-5-5\n",
                 encoding="utf-8")
 
             payload = json.dumps({
@@ -2253,10 +2253,10 @@ class DelegationChipTests(DashboardProbeMixin, unittest.TestCase):
             lifecycle.write_text('\n'.join(json.dumps(event) for event in [
                 {'bridge_run_id':'bridge','event':'started','state':'running','timestamp':101,
                  'parent_session_id':'parent','requested_tier':'opus','effective_tier':'sonnet',
-                 'requested_model':'claude-sonnet-5','review':True,'requested_read_only':True},
+                 'requested_model':'claude-sonnet-5-5','review':True,'requested_read_only':True},
                 {'bridge_run_id':'bridge','event':'terminal','state':'success','timestamp':111,
                  'parent_session_id':'parent','requested_tier':'opus','effective_tier':'sonnet',
-                 'canonical_model':'claude-sonnet-5','review':True,'requested_read_only':True,
+                 'canonical_model':'claude-sonnet-5-5','review':True,'requested_read_only':True,
                  'adjusted':'opus5→sonnet5 (weekly usage 75%)'},
             ])+'\n')
             activity = load_agent_activity(db, now=112, router_log_path=router,
@@ -3289,7 +3289,7 @@ const renderSettings=()=>{};
             original_write = web_viewer._atomic_write
             def competing_write(path, content):
                 if path == config.with_name('router_config.local.yaml'):
-                    hermes.write_text('provider: anthropic\nmodel: claude-sonnet-5\n', encoding='utf-8')
+                    hermes.write_text('provider: anthropic\nmodel: claude-sonnet-5-5\n', encoding='utf-8')
                     raise OSError('router disk write failed')
                 return original_write(path, content)
             def change_default(_requested, _config, *, hermes, persist):
@@ -3300,7 +3300,7 @@ const renderSettings=()=>{};
                  patch.object(web_viewer, '_save_default_model', side_effect=change_default):
                 with self.assertRaisesRegex(RuntimeError, 'automatic rollback refused'):
                     web_viewer._save_config_payload({'default_model': 'sol', 'callable': {'terra': False, 'sol': True}})
-            self.assertIn('claude-sonnet-5', hermes.read_text(encoding='utf-8'))
+            self.assertIn('claude-sonnet-5-5', hermes.read_text(encoding='utf-8'))
             self.assertFalse(config.with_name('router_config.local.yaml').exists())
 
     def test_delayed_get_does_not_replace_a_newer_local_edit(self):
@@ -3829,7 +3829,7 @@ class MainParentTests(DashboardProbeMixin, unittest.TestCase):
         "callable": {"terra": True, "sol": True, "qwen": False,
                      "opus5": True, "sonnet5": True, "haiku": False},
         "claude_delegation": {"tiers": {"haiku": "claude-haiku-4-5-20251001",
-                                        "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5"}},
+                                        "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}},
         "default_model": "terra",
     }
     HERMES = ("model:\n  default: gpt-5.6-terra\n  provider: openai-codex\n  api_mode: codex_responses\n"
@@ -3846,7 +3846,7 @@ class MainParentTests(DashboardProbeMixin, unittest.TestCase):
     def test_only_switched_on_claude_models_are_offered(self):
         options = web_viewer._claude_parent_options(self._config())
         self.assertEqual(options, [
-            {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5"},
+            {"key": "sonnet5", "provider": "anthropic", "model": "claude-sonnet-5-5"},
             {"key": "opus5", "provider": "anthropic", "model": "claude-opus-5-5"},
         ])
 

@@ -257,7 +257,7 @@ class WorkerOrderNoteTests(unittest.TestCase):
 
     def test_a_leaf_with_only_the_tool_search_bridge_gets_no_worker_order_note(self):
         cases = (
-            ("claude-sonnet-5", "anthropic", _anthropic_request("Inspect the parser.", self._BRIDGE)),
+            ("claude-sonnet-5-5", "anthropic", _anthropic_request("Inspect the parser.", self._BRIDGE)),
             ("gpt-5.6-terra", "openai-codex", _openai_request("Inspect the parser.", self._BRIDGE)),
         )
         for model, provider, request in cases:

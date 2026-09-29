@@ -139,13 +139,13 @@ class InjectedContextClassificationTests(unittest.TestCase):
             with patch("model_router.shutil.which", return_value="/claude"), \
                  patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
                  patch("model_router._run_opus5_bridge", return_value={
-                     "result": "reviewed", "effective_model": "claude-sonnet-5",
+                     "result": "reviewed", "effective_model": "claude-sonnet-5-5",
                  }) as bridge:
                 route, reason = router._delegated_claude_review_status(goal, cfg, request=request)
                 result = _maybe_run_opus5(request, cfg, platform="subagent", api_mode="codex_responses")
         self.assertEqual(reason, "")
         self.assertEqual(route, (repo.resolve(), "sonnet"))
-        self.assertEqual(result.model, "claude-sonnet-5")
+        self.assertEqual(result.model, "claude-sonnet-5-5")
         self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
         self.assertEqual(bridge.call_args.kwargs["task"], goal + "\n\n" + bootstrap)
 

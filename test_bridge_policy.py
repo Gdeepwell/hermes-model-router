@@ -18,7 +18,7 @@ class BridgePolicyTests(unittest.TestCase):
         request = {"messages": [{"role": "user", "content": f"[{label}-review] Review parser"}]}
         with patch("model_router._verified_delegated_claude_review", return_value=(Path("/tmp"), label)), \
              patch("model_router.usage_guard.read", return_value=usage_guard.Reading(weekly, 10, None, None, time.time())), \
-             patch("model_router._run_opus5_bridge", return_value={"result": "reviewed", "model": "claude-sonnet-5"}) as bridge:
+             patch("model_router._run_opus5_bridge", return_value={"result": "reviewed", "model": "claude-sonnet-5-5"}) as bridge:
             _maybe_run_opus5(request, cfg, platform="subagent", api_mode="codex_responses")
         return bridge
 
@@ -209,10 +209,10 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
             with patch("model_router.shutil.which", return_value="/claude"), \
                  patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
                  patch("model_router._run_opus5_bridge", return_value={
-                     "result": "reviewed", "effective_model": "claude-sonnet-5"}) as bridge:
+                     "result": "reviewed", "effective_model": "claude-sonnet-5-5"}) as bridge:
                 result = _maybe_run_opus5(request, self._config(), platform="subagent",
                                           api_mode="codex_responses")
-        self.assertEqual(result.model, "claude-sonnet-5")
+        self.assertEqual(result.model, "claude-sonnet-5-5")
         bridge.assert_called_once()
         self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
 
@@ -224,14 +224,14 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
             with patch("model_router.shutil.which", return_value="/claude"), \
                  patch("model_router.usage_guard.read", return_value=usage_guard.Reading(10, 0, None, None, time.time())), \
                  patch("model_router._run_opus5_bridge", return_value={
-                     "result": "reviewed", "effective_model": "claude-sonnet-5"}) as bridge:
+                     "result": "reviewed", "effective_model": "claude-sonnet-5-5"}) as bridge:
                 dispatch, reason = router._delegated_claude_review_status(
                     goal, self._config(), dispatch_cwd=repo)
                 result = _maybe_run_opus5(child_request, self._config(), platform="subagent",
                                           api_mode="codex_responses")
         self.assertEqual(reason, "")
         self.assertEqual(dispatch, (repo.resolve(), "sonnet"))
-        self.assertEqual(result.model, "claude-sonnet-5")
+        self.assertEqual(result.model, "claude-sonnet-5-5")
         self.assertEqual(bridge.call_args.kwargs["repo"], str(repo.resolve()))
 
     def test_dispatch_resolved_repository_expires_after_one_hour(self):
@@ -373,7 +373,7 @@ class DelegatedReviewRepositoryTests(unittest.TestCase):
         cfg = self._config()
         with patch("model_router.shutil.which", return_value="/claude"), \
              patch("model_router._delegation_targets_detail", return_value={
-                 "sonnet5": {"provider": "anthropic", "model": "claude-sonnet-5"},
+                 "sonnet5": {"provider": "anthropic", "model": "claude-sonnet-5-5"},
                  "terra": {"provider": "openai-codex", "model": "gpt-terra"},
              }):
             claude, claude_reason = router._delegated_claude_review_status(
@@ -418,7 +418,7 @@ class AccountOfExecutionTests(unittest.TestCase):
         reading = lambda weekly: usage_guard.Reading(weekly, 10, None, None, time.time())
         downstream = Mock(return_value='Codex ran')
         bridge = Mock(return_value={'result': 'Claude reviewed', 'effective_model':
-                                    'claude-sonnet-5' if label == 'sonnet' else 'claude-opus-5-5'})
+                                    'claude-sonnet-5-5' if label == 'sonnet' else 'claude-opus-5-5'})
         if bridge_error:
             bridge.side_effect = bridge_error
         request = {'model': 'gpt-terra', 'messages': [{'role': 'user', 'content':
@@ -438,7 +438,7 @@ class AccountOfExecutionTests(unittest.TestCase):
 
     def test_closed_codex_does_not_block_healthy_claude(self):
         result, codex, bridge, _ = self._route(codex=95, claude=10)
-        self.assertEqual(result.model, 'claude-sonnet-5')
+        self.assertEqual(result.model, 'claude-sonnet-5-5')
         bridge.assert_called_once()
         codex.assert_not_called()
 

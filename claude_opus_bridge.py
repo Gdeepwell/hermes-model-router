@@ -46,7 +46,7 @@ CANONICAL_OPUS_MODEL = "claude-opus-5-5"
 # spend the cheaper one on routine checks and reserve Opus for hard review --
 # the point of reaching Claude at all is that it draws on a separate quota, and
 # one tier would exhaust that quota on work Sonnet handles fine.
-CLAUDE_REVIEW_MODELS = {"opus": CANONICAL_OPUS_MODEL, "sonnet": "claude-sonnet-5"}
+CLAUDE_REVIEW_MODELS = {"opus": CANONICAL_OPUS_MODEL, "sonnet": "claude-sonnet-5-5"}
 DEFAULT_LIFECYCLE_PATH = hermes_path("~/.hermes/logs/claude-code-bridge.jsonl")
 # Eight turns repeatedly truncates read-only reviews before their verdict. A
 # bounded 16-turn review is cheaper than discarding and re-running an almost

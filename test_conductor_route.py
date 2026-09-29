@@ -160,7 +160,7 @@ class HostCapabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             cfg = _cfg(d)
             kwargs = {'request': _delegating_request(), 'api_call_count': 1, 'turn_id': 'flat-host'}
-            decision = router.RouteDecision('sonnet5', 'claude-sonnet-5', 'external', 'external')
+            decision = router.RouteDecision('sonnet5', 'claude-sonnet-5-5', 'external', 'external')
             with patch.object(router, '_delegation_target_names', return_value=('sonnet5',)), \
                  patch.object(router, '_host_delegation_limits', return_value={'conductor_available': False}):
                 self.assertIn('host_has_no_conductor_depth', router._orchestration_skip_reason(kwargs, cfg, decision))

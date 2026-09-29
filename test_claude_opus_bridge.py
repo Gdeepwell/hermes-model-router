@@ -218,7 +218,7 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         tier would burn the separate quota that is the reason to reach Claude."""
         run.return_value.returncode = 0
         run.return_value.stderr = ""
-        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}}, "result": "ok"})
+        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5-5": {}}, "result": "ok"})
         with tempfile.TemporaryDirectory() as directory:
             out = dispatch("[sonnet-review] Review only", Path(directory), review=True,
                            lifecycle_path=Path(directory) / "bridge.jsonl")
@@ -227,16 +227,16 @@ class ClaudeOpusBridgeTests(unittest.TestCase):
         # Sonnet has no lower tier worth accepting: the result is trusted on the
         # strength of the model that produced it, so a silent drop must not happen.
         self.assertNotIn("--fallback-model", command)
-        self.assertEqual(out["effective_model"], "claude-sonnet-5")
+        self.assertEqual(out["effective_model"], "claude-sonnet-5-5")
         self.assertEqual((log.call_args.args[0].tier, log.call_args.args[0].model),
-                         ("sonnet5", "claude-sonnet-5"))
+                         ("sonnet5", "claude-sonnet-5-5"))
 
     @patch("claude_opus_bridge._log_decision")
     @patch("claude_opus_bridge.subprocess.run")
     def test_a_review_that_served_another_tier_is_rejected(self, run, log):
         run.return_value.returncode = 0
         run.return_value.stderr = ""
-        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}}, "result": "ok"})
+        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5-5": {}}, "result": "ok"})
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(RuntimeError):
                 dispatch("[opus-review] Review only", Path(directory), review=True)
@@ -283,7 +283,7 @@ class AdjustmentEvidenceTests(unittest.TestCase):
     def test_requested_and_effective_tiers_reach_lifecycle_and_route_log(self, run, logged):
         run.return_value.returncode = 0
         run.return_value.stderr = ""
-        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5": {}},
+        run.return_value.stdout = json.dumps({"modelUsage": {"claude-sonnet-5-5": {}},
                                               "result": "reviewed"})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bridge.jsonl"
@@ -295,7 +295,7 @@ class AdjustmentEvidenceTests(unittest.TestCase):
             self.assertEqual(event["requested_tier"], "opus")
             self.assertEqual(event["effective_tier"], "sonnet")
             self.assertIn("weekly usage 75%", event["adjusted"])
-        self.assertEqual(events[-1]["canonical_model"], "claude-sonnet-5")
+        self.assertEqual(events[-1]["canonical_model"], "claude-sonnet-5-5")
         self.assertIn("usage soft limit: opus5→sonnet5", logged.call_args.args[0].reason)
 
 

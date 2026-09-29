@@ -2,7 +2,7 @@
 
 Routing and delegation for Hermes Agent. It keeps the user-facing conversation on one durable parent model, lets that parent's plan choose which model runs each delegated worker, and records every decision in a privacy-safe audit log.
 
-The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, a SuperGrok subscription (Grok 4.7), and a Claude subscription (Opus 5.5/Sonnet 5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
+The point of choosing per worker is that the models sit on **different accounts**: Codex (Luna/Spark/Terra/Sol), a Qwen token plan, a SuperGrok subscription (Grok 4.7), and a Claude subscription (Opus 5.5/Sonnet 5.5/Haiku 4.5). Spreading independent work across them spends separate quotas in parallel instead of draining one.
 
 ## Install
 
@@ -33,7 +33,7 @@ is what keeps a single quota from carrying everything.
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
 | `grok` | Grok 4.7 | SuperGrok subscription (`xai-oauth`) | Delegation target, heavy peer of Terra/Opus/Sonnet; ships switched off |
 | `opus5` | Claude Opus 5.5 | Claude subscription | Delegation target for hard or consequential work (see below) |
-| `sonnet5` | Claude Sonnet 5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
+| `sonnet5` | Claude Sonnet 5.5 | Claude subscription | Delegation target, the everyday Claude worker (see below) |
 | `haiku` | Claude Haiku 4.5 | Claude subscription | Quick lookups and exploration; reached only through `delegate_claude` |
 
 `qwen`, `grok`, `opus5`, `sonnet5` and `haiku` are delegation targets rather than routable
@@ -169,7 +169,7 @@ delegation:
       model: claude-opus-5-5
     sonnet5:
       provider: anthropic
-      model: claude-sonnet-5
+      model: claude-sonnet-5-5
 ```
 
 
@@ -948,7 +948,7 @@ claude_delegation:
   log_path: ""          # JSONL audit log: registration + one line per delegate_claude call
   tiers:                 # model each short tier name actually starts
     haiku: claude-haiku-4-5-20251001
-    sonnet: claude-sonnet-5
+    sonnet: claude-sonnet-5-5
     opus: claude-opus-5-5
 ```
 
@@ -1440,6 +1440,14 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.22.0** — The Sonnet tier runs Claude Sonnet 5.5 (`claude-sonnet-5-5`)
+instead of Sonnet 5. The `claude_delegation.tiers.sonnet` default and the
+bridge's `sonnet` review model moved, so the bridge accepts a Sonnet review only
+when `modelUsage` reports `claude-sonnet-5-5`. The target key stays `sonnet5`,
+so preference chains, fallbacks and existing logs need no rewrite; the dashboard
+still counts old `claude-sonnet-5` log lines under the same card. The Hermes
+`delegation.targets.sonnet5.model` has to move with it.
 
 **1.21.2** — Overview account groups: the weekly usage bar sits at the bottom
 of its card even when the group holds a single model (Grok), so the bars line up

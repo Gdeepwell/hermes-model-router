@@ -387,19 +387,19 @@ class ExecutionGuardTests(unittest.TestCase):
 
     def test_a_claude_worker_whose_model_is_switched_off_is_refused(self):
         cfg = {"callable": {"opus5": True, "sonnet5": False, "haiku": True}}
-        self.assertEqual(worker_admission.refusal("anthropic", "claude-sonnet-5", cfg), self.MESSAGE)
+        self.assertEqual(worker_admission.refusal("anthropic", "claude-sonnet-5-5", cfg), self.MESSAGE)
         self.assertEqual(worker_admission.refusal("anthropic", "claude-opus-5-5", cfg), "")
 
     def test_a_claude_model_on_another_provider_is_refused_too(self):
         cfg = {"callable": dict.fromkeys(CLAUDE, False)}
-        self.assertEqual(worker_admission.refusal("openrouter", "claude-sonnet-5", cfg), self.MESSAGE)
+        self.assertEqual(worker_admission.refusal("openrouter", "claude-sonnet-5-5", cfg), self.MESSAGE)
 
     def test_an_unmapped_claude_model_needs_some_claude_switch_on(self):
         self.assertEqual(worker_admission.refusal("anthropic", "claude-x", _switches(False)), self.MESSAGE)
         self.assertEqual(worker_admission.refusal("anthropic", "claude-x", {"callable": {"haiku": True}}), "")
 
     def test_a_stale_workflow_no_longer_refuses(self):
-        self.assertEqual(worker_admission.refusal("anthropic", "claude-sonnet-5", _switches(True, workflow="codex")), "")
+        self.assertEqual(worker_admission.refusal("anthropic", "claude-sonnet-5-5", _switches(True, workflow="codex")), "")
 
     def test_other_accounts_are_untouched(self):
         self.assertEqual(worker_admission.refusal("openai-codex", "gpt-terra", _switches(False)), "")
@@ -451,7 +451,7 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_a_running_claude_child_stops_once_its_model_is_switched_off(self):
         cfg = {"enabled": True, "callable": {"sonnet5": True}}
         downstream = Mock(return_value="Claude continued")
-        request = {"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "Continue"}]}
+        request = {"model": "claude-sonnet-5-5", "messages": [{"role": "user", "content": "Continue"}]}
         with patch.object(model_router, "_load_config", side_effect=lambda: json.loads(json.dumps(cfg))):
             kwargs = dict(request=request, original_request=request, next_call=downstream,
                           provider="anthropic", platform="subagent", turn_id="root:sa-1")

@@ -35,7 +35,7 @@ def _cfg(temp_dir, **overrides):
     return cfg
 
 
-def _delegating_request(model="claude-sonnet-5", tool_name="delegate_task", text=ACTIONABLE):
+def _delegating_request(model="claude-sonnet-5-5", tool_name="delegate_task", text=ACTIONABLE):
     request = chat_request(text)
     # The body carries the model actually in use, as it does in a real call.
     request["model"] = model
@@ -61,7 +61,7 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
         tool to mcp__<name>. Matching the bare name told a Claude parent it had no
         delegate_task and skipped its preflight — measured live before this fix."""
         with tempfile.TemporaryDirectory() as d:
-            routed = self._route("claude-sonnet-5", _cfg(d), tool_name="mcp__delegate_task")
+            routed = self._route("claude-sonnet-5-5", _cfg(d), tool_name="mcp__delegate_task")
         self.assertIsNotNone(routed, "the mcp__-prefixed tool was not recognised")
         schema = routed["request"]["tools"][0]["parameters"]
         self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
@@ -86,11 +86,11 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
 
     def test_a_request_with_no_delegate_tool_is_still_skipped(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(self._route("claude-sonnet-5", _cfg(d), tool_name="read_file"))
+            self.assertIsNone(self._route("claude-sonnet-5-5", _cfg(d), tool_name="read_file"))
 
     def test_a_parent_on_another_account_still_gets_the_preflight(self):
         with tempfile.TemporaryDirectory() as d:
-            routed = self._route("claude-sonnet-5", _cfg(d))
+            routed = self._route("claude-sonnet-5-5", _cfg(d))
         self.assertIsNotNone(routed, "an external parent received no orchestration")
         schema = routed["request"]["tools"][0]["parameters"]
         self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
@@ -98,8 +98,8 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
     def test_the_external_parents_model_is_never_rewritten(self):
         """The router cannot switch providers; only the instructions are ours to add."""
         with tempfile.TemporaryDirectory() as d:
-            routed = self._route("claude-sonnet-5", _cfg(d))
-        self.assertEqual(routed["request"].get("model", "claude-sonnet-5"), "claude-sonnet-5")
+            routed = self._route("claude-sonnet-5-5", _cfg(d))
+        self.assertEqual(routed["request"].get("model", "claude-sonnet-5-5"), "claude-sonnet-5-5")
 
     def test_an_unknown_model_is_still_left_alone(self):
         """Only a configured delegation target counts; anything else is not ours."""
@@ -109,7 +109,7 @@ class ExternalParentOrchestrationTests(unittest.TestCase):
     def test_orchestration_disabled_still_means_disabled(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = _cfg(d, orchestration={"enabled": False, "path": str(Path(d) / "o.jsonl")})
-            self.assertIsNone(self._route("claude-sonnet-5", cfg))
+            self.assertIsNone(self._route("claude-sonnet-5-5", cfg))
 
 
 class ConductorTierTests(unittest.TestCase):
@@ -178,7 +178,7 @@ class ExplicitDelegationMentionTests(unittest.TestCase):
     -- the routing note (advisory only) still applies on that same call."""
 
     def _route(self, text, tool_name="delegate_task"):
-        request = _delegating_request("claude-sonnet-5", tool_name, text=text)
+        request = _delegating_request("claude-sonnet-5-5", tool_name, text=text)
         # A live session with Claude delegation carries delegate_claude next to
         # delegate_task, and the router offers it only then.
         request["tools"].append({"type": "function", "name": "delegate_claude",
@@ -190,7 +190,7 @@ class ExplicitDelegationMentionTests(unittest.TestCase):
              patch("model_router._delegation_target_names", return_value=("sonnet5", "opus5", "qwen")), \
              patch.object(claude_delegation, "_ACTIVE", True):
             return route_llm_request(
-                request=request, provider="anthropic", model="claude-sonnet-5",
+                request=request, provider="anthropic", model="claude-sonnet-5-5",
                 api_call_count=1, turn_id="external-parent-turn", platform="cli")
 
     def test_an_explicit_delegate_claude_mention_skips_the_forced_preflight(self):
@@ -206,7 +206,7 @@ class ExplicitDelegationMentionTests(unittest.TestCase):
 
     def test_a_normal_actionable_message_still_gets_the_preflight(self):
         """Confirms the new gate is scoped to an explicit mention, not a blanket skip."""
-        routed = ExternalParentOrchestrationTests()._route("claude-sonnet-5", _cfg(tempfile.mkdtemp()))
+        routed = ExternalParentOrchestrationTests()._route("claude-sonnet-5-5", _cfg(tempfile.mkdtemp()))
         self.assertIsNotNone(routed)
         schema = routed["request"]["tools"][0]["parameters"]
         self.assertEqual(schema["properties"]["role"]["enum"], ["orchestrator"])
@@ -217,7 +217,7 @@ class ContractTruthfulnessTests(unittest.TestCase):
         """That claim was disproven on 2026-09-09; leaving it in suppressed the very
         delegation the plugin exists to produce."""
         with tempfile.TemporaryDirectory() as d:
-            routed = ExternalParentOrchestrationTests()._route("claude-sonnet-5", _cfg(d))
+            routed = ExternalParentOrchestrationTests()._route("claude-sonnet-5-5", _cfg(d))
         contract = routed["request"]["tools"][0]["parameters"]["properties"]["context"]["enum"][0]
         self.assertNotIn("does not fund third-party API access", contract)
         self.assertNotIn("Claude delegation target is switched off", contract)

@@ -192,7 +192,7 @@ shadow:
 claude_delegation:
   tiers:
     haiku: claude-haiku-4-5-20251001
-    sonnet: claude-sonnet-5
+    sonnet: claude-sonnet-5-5
     opus: claude-opus-5-5
   default_tier: sonnet
   log_path: ~/.hermes/logs/claude-delegation.jsonl
