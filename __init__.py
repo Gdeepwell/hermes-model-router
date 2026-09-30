@@ -943,13 +943,45 @@ _CHANGE_ADJECTIVE = (
 # preposition puts the verb outside the work being asked for; failing that, an
 # adjective ("the requested edit") marks it as something decided elsewhere --
 # which is why the second arm requires one and the first does not.
+#
+# Two more arms cover the verb as the *subject or modifier* of a noun phrase.
+# Observed 2026-09-30: "[luna] Inspect the service color create/edit data flow
+# ... identify the probable root cause for a new service ... failing while an
+# existing service color update works." ran on Terra, reason "Luna is restricted
+# to non-design read-only subtasks" -- a bug report cannot describe the working
+# path without naming it. Both arms need a determiner in front, so an imperative
+# ("update the handler") never matches, and each has its own corroboration: a
+# behavioural predicate right after the verb ("color update works"), or a noun it
+# qualifies ("create/edit data flow", "the edit form"). The predicate arm also
+# needs a word between determiner and verb: "the fix works" is too often a
+# request to make it so.
+_NOUN_PHRASE_FILLER = (
+    rf"(?!(?:{_SPARK_MUTATING_VERBS}|to|should|must|will|would|can|could|may|"
+    rf"might|shall|please|then|and|or|but|so|also|not|do|does|did)\b)[\w-]+"
+)
+_NOUN_PHRASE_LEAD_WORDS = r"\b(?:the|a|an|this|that|its|their|any|our|your|each)\s+"
+_FINITE_PREDICATE = (
+    r"works|worked|succeeds|succeeded|fails|failed|breaks|broke|passes|passed|"
+    r"errors|errored|crashes|crashed|behaves|behaved|persists|persisted|"
+    r"returns|returned|throws|threw|rejects|rejected"
+)
+_COMPOUND_HEAD = (
+    r"flow|path|handler|endpoint|form|route|request|payload|modal|dialog|logic|"
+    r"mutation|action|button|screen|page|api|call|operation|scenario|case|branch"
+)
+_VERB_AS_NOUN_SUBJECT_LEAD = rf"{_NOUN_PHRASE_LEAD_WORDS}(?:{_NOUN_PHRASE_FILLER}\s+){{1,3}}"
+_VERB_AS_NOUN_MODIFIER_LEAD = rf"{_NOUN_PHRASE_LEAD_WORDS}(?:{_NOUN_PHRASE_FILLER}\s+){{0,3}}"
 _VERB_AS_NOUN = re.compile(
     rf"\b(?:before|after|prior\s+to|following|since|once|until)\s+"
     rf"(?:the|a|an|this|that|its|their|any)\s+(?:(?:{_CHANGE_ADJECTIVE})\s+){{0,2}}"
     rf"(?:{_SPARK_MUTATING_VERBS})s?\b"
     rf"|\b(?:the|a|an|this|that|its|their|any)\s+"
     rf"(?:(?:{_CHANGE_ADJECTIVE})\s+){{1,2}}"
-    rf"(?:{_SPARK_MUTATING_VERBS})s?\b",
+    rf"(?:{_SPARK_MUTATING_VERBS})s?\b"
+    rf"|{_VERB_AS_NOUN_SUBJECT_LEAD}(?:{_SPARK_MUTATING_VERBS})s?"
+    rf"(?=\s+(?:{_FINITE_PREDICATE})\b)"
+    rf"|{_VERB_AS_NOUN_MODIFIER_LEAD}(?:{_SPARK_MUTATING_VERBS})(?:/(?:{_SPARK_MUTATING_VERBS}))*"
+    rf"(?=\s+(?:data\s+)?(?:{_COMPOUND_HEAD})s?\b)",
     re.I,
 )
 

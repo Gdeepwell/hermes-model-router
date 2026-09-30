@@ -1441,6 +1441,14 @@ skipped here.
 
 ## Version
 
+**1.22.1** — A write verb inside a noun phrase no longer overrules a `[luna]` or
+`[spark]` label. A bug diagnosis must name the path that still works ("an
+existing service color update works") or the flow it inspects ("the create/edit
+data flow"), and that word read as an instruction, so a read-only Luna leaf ran
+on Terra. `_VERB_AS_NOUN` gained two arms, both behind a determiner so an
+imperative never matches: a verb followed by a behavioural predicate, and a verb
+qualifying a noun such as flow, form or endpoint.
+
 **1.22.0** — The Sonnet tier runs Claude Sonnet 5.5 (`claude-sonnet-5-5`)
 instead of Sonnet 5. The `claude_delegation.tiers.sonnet` default and the
 bridge's `sonnet` review model moved, so the bridge accepts a Sonnet review only

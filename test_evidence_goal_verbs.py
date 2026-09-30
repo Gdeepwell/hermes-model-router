@@ -340,5 +340,65 @@ class NothingObjectTests(unittest.TestCase):
                 self.assertFalse(_is_spark_read_only_work(text))
 
 
+class NounPhraseVerbTests(unittest.TestCase):
+    """A write verb inside a noun phrase: the subject or modifier, not the work.
+
+    Observed 2026-09-30: a [luna] bug diagnosis ran its eight calls on Terra,
+    reason "Luna is restricted to non-design read-only subtasks". The goal says
+    "without editing", but it has to name the path that still works ("an existing
+    service color update works"), and that "update" read as an instruction.
+    """
+
+    # The goal exactly as dispatched (deleg_a0243ff4, task 0).
+    DISPATCHED = (
+        "[luna] Inspect the service color create/edit data flow in "
+        "/home/deepwell/booking-saas on branch development at base a13ee2f without "
+        "editing. Identify the exact files, functions, existing test commands, and "
+        "probable root cause for a new service submitted with a valid hex color "
+        "failing while an existing service color update works. Acceptance: return "
+        "concise evidence with symbol names, request/payload shape, recommended "
+        "regression-test location, and verification commands."
+    )
+
+    def test_the_dispatched_goal_reads_as_read_only(self):
+        self.assertTrue(_is_spark_read_only_work(self.DISPATCHED))
+
+    def test_the_dispatched_goal_keeps_its_luna_label(self):
+        decision = classify_request(
+            chat_request(self.DISPATCHED), 1, CFG, allow_plan_label_over_design=True
+        )
+        self.assertEqual(decision.tier, "luna")
+
+    def test_a_verb_as_the_subject_of_a_predicate_is_a_noun(self):
+        for text in (
+            "[luna] Find why a new service fails while an existing service color update works.",
+            "[spark] Explain why the existing color edit works in /home/x.",
+            "[luna] Report whether the nightly config push failed in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_a_verb_qualifying_a_noun_is_a_noun(self):
+        for text in (
+            "[luna] Inspect the service color create/edit data flow in /home/x.",
+            "[spark] Map the edit form and its handlers in /home/x.",
+            "[luna] Trace the booking update endpoint in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_is_spark_read_only_work(text))
+
+    def test_an_imperative_is_still_an_instruction(self):
+        """No determiner in front, or a modal/verb between: the verb still writes."""
+        for text in (
+            "[luna] Update the service color handler in /home/x.",
+            "[spark] Edit the form so the save works in /home/x.",
+            "[luna] Fix the create flow in /home/x.",
+            "[luna] The agent should update the handler in /home/x.",
+            "[spark] Make sure the fix works in /home/x.",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_is_spark_read_only_work(text))
+
+
 if __name__ == "__main__":
     unittest.main()
