@@ -29,7 +29,7 @@ is what keeps a single quota from carrying everything.
 | `terra` | GPT-5.6 Terra | Codex | Durable default parent and conductor |
 | `luna` | GPT-6 Luna | Codex | Simple tasks, short answers |
 | `spark` | GPT-5.3 Codex-Spark | Codex | Read-only code analysis, bounded subtasks |
-| `sol` | GPT-6 Sol | Codex | Complex, security-sensitive, design |
+| `sol` | GPT-6.1 Sol | Codex | Complex, security-sensitive, design |
 | `qwen` | Qwen 3.7 Plus | Qwen token plan | Delegation target only |
 | `grok` | Grok 4.7 | SuperGrok subscription (`xai-oauth`) | Delegation target, heavy peer of Terra/Opus/Sonnet; ships switched off |
 | `opus5` | Claude Opus 5.5 | Claude subscription | Delegation target for hard or consequential work (see below) |
@@ -1440,6 +1440,13 @@ to import at all. Keep new tests in a `TestCase`; a bare `def test_*` is silentl
 skipped here.
 
 ## Version
+
+**1.23.0** — The Sol tier runs GPT-6.1 Sol (`gpt-6.1-sol`) instead of GPT-6 Sol.
+The live Codex model list for the account offers it (first by priority). Only the
+`models.sol` default moved; the tier key stays `sol`, so preference chains,
+fallbacks and existing logs need no rewrite, and the dashboard still counts older
+`gpt-6-sol` log lines under the Sol card. GPT-6.1 Sol has no `none` reasoning
+effort; the Sol efforts the router sends (medium, high, xhigh) are all supported.
 
 **1.22.1** — A write verb inside a noun phrase no longer overrules a `[luna]` or
 `[spark]` label. A bug diagnosis must name the path that still works ("an

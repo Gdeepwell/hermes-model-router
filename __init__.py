@@ -48,7 +48,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
         "luna": "gpt-6-luna",
         "spark": "gpt-5.3-codex-spark",
         "terra": "gpt-5.6-terra",
-        "sol": "gpt-6-sol",
+        "sol": "gpt-6.1-sol",
         "qwen": "qwen3.7-plus",
         "grok": "grok-4.7",
     },
