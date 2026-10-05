@@ -1520,6 +1520,10 @@ skipped here.
 
 ## Version
 
+**1.25.1** — An imperative overrides the classifier's chat label in the triage
+prefilter. "rendben indítsd el ennek a javítását, majd rakjad ki developmentre" was
+read as brief conversation and the fix ran untriaged on Terra alone.
+
 **1.25.0** — Triage replaces the forced conductor. The parent's first call of an
 actionable user turn is `triage_task`, where it decides itself whether it works
 alone or splits the work; questions and short remarks skip it. The router enforces

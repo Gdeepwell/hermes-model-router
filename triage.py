@@ -180,7 +180,10 @@ def skip_reason(kwargs: Dict[str, Any], cfg: Dict[str, Any], kind: str = "") -> 
     # The operator named the delegation tool: the decision is already made.
     if re.search(r"\bdelegate_(?:claude|task)\b", operator_text):
         return "explicit_delegation_tool"
-    if kind == "chat":
+    # The classifier's chat label is not trusted over an imperative: it read
+    # "rendben inditsd el ennek a javitasat majd rakjad ki developmentre" as
+    # brief non-actionable conversation (2026-10-05), and that fix ran untriaged.
+    if kind == "chat" and not _ACTION.search(text):
         return "chat"
     if is_conversational(text):
         return "conversational"

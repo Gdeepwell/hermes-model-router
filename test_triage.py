@@ -126,6 +126,28 @@ class TriageIsForcedTests(_Patched):
         request = self.route(text="rendben csinald meg !", prior=True)["request"]
         self.assertEqual([t["name"] for t in request["tools"]], ["tool_call"])
 
+    def test_an_imperative_labelled_chat_is_still_triaged(self):
+        """Live 2026-10-05: the classifier called this prompt brief conversation."""
+        text = "rendben inditsd el ennek a javitasat majd rakjad ki developmentre"
+        with patch.object(router, "classify_request",
+                          return_value=router.RouteDecision("luna", "gpt-6-luna", "brief", kind="chat")):
+            routed = router._triage_request(
+                {"request": _request(MODELS["terra"], text), "api_call_count": 1,
+                 "turn_id": "sess:sess:turn1", "platform": "cli", "provider": "openai-codex"},
+                self.cfg, router.RouteDecision("terra", MODELS["terra"], "pinned"))
+        self.assertEqual([t["name"] for t in routed["tools"]], ["tool_call"])
+
+    def test_a_chat_label_without_an_imperative_skips(self):
+        with patch.object(router, "classify_request",
+                          return_value=router.RouteDecision("luna", "gpt-6-luna", "brief", kind="chat")):
+            routed = router._triage_request(
+                {"request": _request(MODELS["terra"], "koszonom szepen, ez nagyon jo lett igy most mar"),
+                 "api_call_count": 1, "turn_id": "sess:sess:turn1", "platform": "cli",
+                 "provider": "openai-codex"},
+                self.cfg, router.RouteDecision("terra", MODELS["terra"], "pinned"))
+        self.assertIsNone(routed)
+        self.assertEqual(self.events()[-1]["reason"], "chat")
+
     def test_the_decision_is_logged(self):
         self.route()
         forced = [e for e in self.events() if e["event"] == "triage_forced"]
