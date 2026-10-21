@@ -156,26 +156,41 @@ Codex labels choose models within the configured provider and Claude workers use
 #### Triage: the parent decides
 
 The model that receives the prompt decides who does the work. On the first call
-of an actionable user turn the router narrows the toolset to `triage_task` (reached
-through the `tool_call` bridge, because Hermes defers plugin tools) and the parent
-records `decision: solo` or `decision: delegate`, with a kind, a scope, a one-line
-rationale and, for `delegate`, the planned subtasks and their routes. The routing
-note (preferred routes per kind of work, account usage) travels with that call.
-The next call has the full toolset again, and the tool result tells the parent what
-follows from its own decision.
+of an actionable user turn the router asks for `triage_task` through the deferred
+`tool_call` bridge and the parent records `decision: solo` or `decision: delegate`,
+with a kind, a scope, a one-line rationale and, for `delegate`, the planned
+subtasks and their routes. The routing note (preferred routes per kind of work,
+account usage) travels with that call. On a forced path, the advertised `calls[]`
+envelope permits exactly one `triage_task` entry with the triage arguments schema.
+On an advisory Claude path, the full toolset remains available and the older
+singular `name`/`arguments` bridge pinning remains intentionally unchanged;
+`calls[]` entries are not equivalently pinned there. The next call has the full
+toolset again, and the tool result tells the parent what follows from its own
+decision.
 
 Questions and short remarks with no imperative in them ("mi a következő
 kritikus?", "ment a levél") skip triage, as do workers, later calls of a turn,
 memory reviews, delegation completions and background-process notices. A short
 go-ahead after a discussion ("rendben, csináld meg!") is triaged: it stands for the
-whole discussed plan. A Claude parent with thinking on is asked rather than forced,
-because Anthropic refuses a forced tool choice while thinking.
+whole discussed plan. Claude 5 parents are advisory whether thinking is on or off;
+older Claude parents are advisory while thinking is on and forced while it is off.
+Codex remains a required-tool path. An advisory parent may answer without a recorded
+triage decision. Generic mandatory Anthropic choice is reconciled to `auto`; an
+authoritative named, ambiguous, unsupported, or malformed choice stops visibly
+rather than being silently discarded. The same reconciliation is used by triage
+and by an eligible triage-off conductor. Supported forms are the documented
+absent/`None`/`auto`/`none`/generic-mandatory forms; named authority wins over
+generic relaxation. The malformed or extended representations in the local caller
+matrix are defensive coverage, not a claim that the native host emits them. For the
+covered refusal path, the public stopped response is returned before ordinary,
+bridge, or downstream execution.
 
 While triage is on it replaces the forced conductor and the small-task budget, and
 the router enforces the worker budget on every `delegate_task` and `delegate_claude`
 spawn:
 
-- at most `max_workers_per_turn` (4) workers per user turn, sub-workers included;
+- at most `max_workers_per_turn` (4) admitted spawn attempts per user turn,
+  sub-workers included;
 - each worker may start `max_children_per_worker` (1) sub-worker;
 - a sub-worker never delegates.
 
@@ -188,9 +203,23 @@ triage:
 ```
 
 Hermes's `delegation.max_spawn_depth` must be at least 2 for a worker to reach its
-sub-worker. A refused spawn returns `Nothing was spawned.` and costs no budget. The
-triage log records each `triage_forced`/`triage_skipped` (with its reason), every
-`triage_decision`, and each `spawn_admitted`/`spawn_blocked`:
+sub-worker. Router-known refusals (unsupported label, declined conductor goal, and
+switched-off/cooling target) occur before charging. A budget-owned refusal is
+uncharged; a refusal by a later host or handler guard remains an admitted attempt
+with no refund, and `spawn_admitted` never proves that a worker launched or
+completed. The four-worker policy is not a host concurrency limit, batch width, or
+depth limit. The bounded child-session-to-originating-root association is process
+local, resets on restart, and uses this fallback for an unknown or expired child:
+the parent session's latest root-turn pointer, otherwise its session key; the event
+records `origin_source: "latest_session_pointer"`. An unknown late child can
+therefore count against a newer turn. Conflicting recorded origins refuse rather
+than use that fallback. Durable/background correlation remains S06 work. Triage-off
+retains its other guard paths and is not unlimited execution.
+
+The triage log records `triage_forced` only for a constrained request,
+`triage_advisory` for an advisory rewrite, and `triage_skipped` with its reason,
+plus `triage_decision`, `spawn_admitted`, and `spawn_blocked`. None of these events
+alone proves a remote call, recorded decision, worker launch, or completion:
 
 ```bash
 tail -20 ~/.hermes/logs/model-router-triage.jsonl | jq '{event, reason, decision, rationale}'
@@ -303,9 +332,9 @@ measured which of those features a particular Claude Code installation loads
 from `cwd`, so verify that setup in the target project rather than treating this
 paragraph as a capability probe.
 
-The router does not *route* these children — `route_llm_request` returns `None`
-for a model outside its own tier map, so nothing here rewrites them — but it does
-record them. Invisible to the router had meant invisible to the operator: a
+For an external-model request outside its tier map, the router may leave model and
+provider unchanged while still rewriting instructions or tools; it also records the
+result. Invisible to the router had meant invisible to the operator: a
 Claude worker produced no card, no count and no line in the per-account load, so
 the one account whose usage most needed watching was the one nothing reported on.
 They now appear as `opus5`, `sonnet5` and `haiku` alongside the other tiers, and
@@ -365,7 +394,64 @@ Hermes update; re-running Hermes's own update/install step resolves it.
 A read-only CLI bridge also exists (`[opus-review]` / `[sonnet-review]`,
 `coding_agent.delegated_review`). It replaces a single call rather than running
 an agent, so it cannot write and holds a child slot for the duration; the native
-target above supersedes it for ordinary work.
+target above supersedes it for ordinary work. CLI review identity is recorded as
+requested, resolved and observed: a CLI alias is not proof of the served model.
+An `exact` review requires recorded `exact_model` capability evidence and is
+refused before the CLI starts when that evidence is absent. The default
+`profile_preferred` review may use the configured ordinary provider route after
+an attempted CLI failure. A transient ordinary-provider failure is retried on a
+plugin-selected fallback only when the host passes a compatible `retry_call`;
+without that seam the router preserves the original downstream failure, makes no
+second `next_call` invocation, and writes no fallback routed-call record. For a
+successful CLI step-down or a response-shaped ordinary replacement, the
+router appends one compact, deterministic, plugin-owned `ROUTER SUBSTITUTION
+PROVENANCE v1` JSON line after the useful verdict. The line is hard-bounded to
+400 characters (including its prefix), so the host's dynamic 2,000-character
+minimum summary budget retains the complete line in its 500-character tail,
+whether or not the full-summary spill succeeds. It carries the marker version,
+kind, carrier, requested and resolved/admitted targets, actual provider/model
+(or `unknown`), policy/failure code, `satisfies_cross_provider_review: false`,
+and a short `ref`; successful CLI step-downs carry canonical `modelUsage` and
+Anthropic transport-owner facts, with `ref` resolving to the bridge lifecycle
+record. Parent-visible values are ASCII-safe and visibly suffixed when altered
+or shortened. For an ordinary replacement, the existing Claude audit event
+contains the fuller replacement record under that reference. That content survives the supported
+Codex Responses normalization, child-result projection, and parent summary
+budgeting; arbitrary response attributes do not. Survival under a configured
+static `delegation.max_summary_chars` requires roughly four times the marker
+length (about 1,600 for the 400-character maximum), because the host retains
+only a newline-snapped 25% tail; below that threshold the parent-visible
+survival guarantee is void. The dynamic 2,000-character floor is safe.
+When the replacement's first reply is only reasoning, commentary or a tool call
+and the child continues its turn, the router keeps the provenance for that turn
+(bounded, cleared at turn end) and appends the line to the reply that ends it;
+later interim replies are left unchanged. A refusal-only reply keeps its refusal text,
+with the line after it. Text the host builds outside the provider middleware is
+covered at final delivery: the router's `transform_llm_output` hook appends the
+line once to the turn's final text when that turn still holds replacement
+provenance and the text does not already carry a line the router delivered. This
+covers the iteration-limit summary (the child is still reported
+`status: completed`, `exit_reason: max_iterations`, `truncated: true`, now with
+the line) and any final reply the middleware did not mark. That line records
+`"carrier": "final_output"` and reports the executed provider/model as `unknown`
+/ `not_observed`, because the hook sees only text. A turn with no replacement is
+left unchanged. Host error endings (an incomplete-continuation partial, a
+content-filter refusal) reach the parent as `status: failed` without the line;
+an interrupted turn skips the output hook. It
+carries the requested/resolved/observed review identity and evidence sources,
+effort requested/applied state, policy/reason, planned replacement and final
+ordinary provider/model observation. Missing provider or model evidence remains
+explicitly `unknown`. The marker always says the result does **not** satisfy a
+cross-provider review requirement: a same-provider step-down or ordinary
+replacement is not independent review. Scalar legacy payloads with no supported
+response-content carrier remain byte-for-byte unchanged. The Claude audit keeps
+the typed failure and planned replacement separately; it is not the parent-facing
+provenance carrier. An exact route that
+cannot be admitted, or that fails after its one CLI attempt, stops at the
+execution-middleware boundary with a zero-token refusal response;
+the response states that no work was performed by that call. The direct bridge still
+carries its typed failure evidence internally. Neither response counts as a Claude
+review.
 
 ### A parent on a fallback account still orchestrates
 
@@ -576,8 +662,10 @@ protects ordinary save failures; it is not a cross-file crash transaction.
 
 ### Reasoning effort per tier
 
-A route carries an effort level, not just a model name. `effort:` sets it per tier,
-and separately for the cases where the same tier means different work:
+A route carries an effort level, not just a model name. `effort:` sets the one
+configured default for each tier; a bare `[<tier>]` label uses that same value the
+Settings tab shows. `sol_long` remains a separate automatic setting for long
+requests, not a label override:
 
 ```yaml
 effort:
@@ -585,35 +673,53 @@ effort:
   terra: medium
   sol: medium
   sol_long: medium            # reached by length, not by choice
-  explicit_sol: medium        # you asked for Sol
-  explicit_sol_xhigh: high    # you asked for Sol and said how hard
-  explicit_luna_xhigh: high   # ...and the same for every other tier
-  explicit_terra_xhigh: high
 ```
 
-`[<tier>:xhigh]` is the label form. It parsed for every tier from the start but
-was honoured only for Sol, so `[luna:xhigh]` ran silently at Luna's floor with no
-way to say otherwise; `explicit_<tier>` was unreadable config everywhere else for
-the same reason. Both keys are general since 1.9.5.
+When the user states effort for a Codex model, the parent writes
+`[<tier>:<level>]`. A supported stated level is preserved on the same tier and is
+never remapped between `high` and `xhigh`. Soft step-down is skipped for a stated
+level (the hard account limit can still close the account). A stated-level label for
+a switched-off/cooling tier or a Luna/Spark read-only violation is refused at
+dispatch; where a request has no refusal seam, a substitution preserves the stated
+level only when the destination supports it, otherwise it stops visibly. Luna, Terra, and Sol accept
+`low`, `medium`, `high`, `xhigh`, and `max`; Spark accepts `low`, `medium`,
+`high`, and `xhigh`. No tier accepts `none`. An unsupported level is refused
+before delegation, while an unsupported label on a root user message is ordinary
+unlabelled text. Otherwise the parent writes a bare `[<tier>]` label.
+Labels match after case folding and accent stripping (`[SOL:HIGH]` and `[sól:high]`
+are `[sol:high]`), both at dispatch and at submission. A root `[spark:<level>]` that
+defers to a `default_model` on another provider (the shipped `qwen`) never runs on
+that default. Its level is validated on the tier the turn actually reaches: the
+active tier, or the fallback that replaces a switched-off default. While the active
+tier itself is unavailable, the label is refused visibly.
 
-Resolution walks from the most specific key to the plain tier, and **a key you
-have not written changes nothing** — that is what makes adding a tier here
-optional rather than a behaviour change. An escalation degrades to its tier's
-`explicit_` key rather than to the tier's floor, so a missing
-`explicit_<tier>_xhigh` means "no escalation configured" instead of silently
-capping the request.
+The stated level is also enforced where the request leaves the router. Execution
+middleware reads the host's original request, not the routed one. If a later
+`llm_request` middleware removes or changes the stated level, or moves the request
+to a model whose tier lacks it, the call stops with a zero-token router response and
+no provider call. This applies while the router is enabled, on the configured
+`openai-codex` provider, in `codex_responses` mode. A labelled turn on a Codex model
+the router does not route stops the same way rather than being sent at another level.
+A retry through a host `retry_call` carries the stated level to the fallback tier, or
+stops when that tier lacks it.
+Two limits are accepted. The final check protects the stated level, not the stated
+tier: a later middleware that moves `[sol:high]` to Terra at `high` is sent, while the
+route record still names Sol. Every such stop reuses the worker text
+(`[ROUTER WORKER STOPPED] … Re-dispatch this task on an available account.`), even on
+a root turn or when no account is involved.
 
-The Settings tab edits the five plain routed-tier keys: `luna`, `spark`,
-`terra`, `sol`, and `grok`, in dropdowns beside their switches in the Codex and
-Grok account cards' **Models** blocks. `effort.grok` reaches Grok the same way
-as the Codex tiers' effort. `opus5` is a route/log marker; Qwen has no dashboard effort
-control because the router strips reasoning; and Claude-only `haiku` / `sonnet5`
-are not routed here — this `effort:` map cannot reach a delegated Claude child at
-all, since the router never runs on that call. Sonnet and Opus have their own
-controls beside their switches in the Claude account card: see [Claude reasoning
-effort](#claude-reasoning-effort). The situational `sol_long` and
-`explicit_<tier>` / `explicit_<tier>_xhigh` keys remain file-only in
-`router_config.yaml` or its local overlay.
+`explicit_<tier>` and `explicit_<tier>_xhigh` are retired effort keys. The router
+ignores them in a local overlay and never rewrites that overlay automatically.
+When they remain in `router_config.local.yaml`, Settings names them and offers an
+owner-triggered removal that writes only the local delta. The Settings tab edits
+the five plain routed-tier keys: `luna`, `spark`, `terra`, `sol`, and `grok`, in
+dropdowns beside their switches in the Codex and Grok account cards' **Models**
+blocks. `effort.grok` reaches Grok the same way as the Codex tiers' effort.
+`opus5` is a route/log marker; Qwen has no dashboard effort control because the
+router strips reasoning; and Claude-only `haiku` / `sonnet5` are not routed here
+— this `effort:` map cannot reach a delegated Claude child at all. Sonnet and
+Opus have their own controls beside their switches in the Claude account card:
+see [Claude reasoning effort](#claude-reasoning-effort).
 
 ### Images force a vision-capable route
 
@@ -627,7 +733,7 @@ Historical image attachments are stripped from replayed context rather than rese
 ### Quota fallback
 
 Distinct from `fallbacks`, which handles a *disabled* tier. `quota_fallbacks`
-handles a tier that answered `429` mid-turn:
+selects a possible replacement only for a Spark quota failure (`429`) mid-turn:
 
 ```yaml
 quota_fallbacks:
@@ -636,17 +742,21 @@ quota_fallbacks:
     effort: medium
 ```
 
-It fires once per turn and only if the replacement is itself callable, so an
-exhausted Spark continues on Luna instead of failing the turn.
+When a host supplies a compatible `retry_call`, the callback permits at most one
+eligible, policy-permitted replacement; it does not guarantee that a candidate is
+callable or that a retry will occur. The installed host supplies no compatible
+callback: the original failure propagates, and recorded failure state can steer
+later calls instead. The current call can fail.
 
-Note what that last condition rules out. A usage quota belongs to the account, and
-the failure is recorded **before** a replacement is looked for — which benches
-every sibling on that account first. So on a genuine quota exhaustion this
-substitution cannot fire at all: the configured replacement is already cooling.
-What survives here is the case it is actually good for — a transient blip, or a
-model this account cannot use — where a same-account sibling is the right answer.
-Moving quota-stopped work needs a different account, and that is a dispatch
-decision, not a model swap.
+Quota, transient failure, and unavailable-model handling use separate selection
+mechanisms, but share one recording guard: failure history and cooldown entry occur
+only when cooldowns are enabled and the affected router tier is applicable. With
+cooldowns disabled, those helpers write no failure/cooldown state and the cooldown
+availability policy is disabled. Under that guard, quota enters cooldown immediately
+using a provider reset hint capped by `quota_max_seconds`, or `quota_seconds` when
+no hint is available; transient failures enter only after the configured recent-failure
+threshold; and unavailable-model cooldown uses its configured duration. Moving work
+to another account remains a dispatch decision, not a model swap.
 
 ### A model this account cannot use
 
@@ -656,20 +766,20 @@ what decides whether a leaf survives:
 | Condition | Recognised by | What happens |
 |---|---|---|
 | Switched off in the dashboard | `callable: false` | the `fallbacks` chain, at routing time |
-| Quota exhausted (429) | account/weekly quota wording | `quota_fallbacks`, then a 15-minute cooldown |
-| Provider blip (5xx) | 500/502/503/504, connection resets | a hardcoded substitute, then a short cooldown |
-| **Refused outright (400/404)** | *"is not supported when using…"*, *"does not exist or you do not have access"* | the configured `fallbacks` chain, then a 6-hour cooldown |
+| Quota exhausted (429) | account/weekly quota wording | Spark-only `quota_fallbacks`, only with a host `retry_call`; under the shared enabled/applicable-tier guard, a provider reset hint is capped by `quota_max_seconds`, otherwise `quota_seconds` (default 15 minutes) applies |
+| Provider blip (5xx) | 500/502/503/504, connection resets | transient selection only with a host `retry_call`; under the shared enabled/applicable-tier guard, failure state is recorded and cooldown starts only at the configured recent-failure threshold |
+| **Refused outright (400/404)** | *"is not supported when using…"*, *"does not exist or you do not have access"* | configured `fallbacks` only with a host `retry_call`; under the shared enabled/applicable-tier guard, the unavailable-model cooldown uses configured `unavailable_seconds` |
 
 The last row was a gap until 1.8.1. A tier switched **on** but refused by the
 provider — `The 'gpt-5.3-codex-spark' model is not supported when using Codex with
 a ChatGPT account.` — matched no runtime failover, so the leaf simply aborted.
 
-It deliberately walks the **configured** `fallbacks` chain rather than the
-hardcoded transient map: if you wrote `spark: luna`, a Spark that does not exist
-on your account belongs on Luna, not wherever the blip handler would have put it.
+When a compatible host retry seam is present, unavailable-model selection walks the
+**configured** `fallbacks` chain rather than the transient map: if you wrote
+`spark: luna`, an unavailable Spark selects Luna rather than a transient substitute.
 The cooldown is long because nothing about this recovers by waiting; tune it with
-`cooldown.unavailable_seconds`. Design and image guards still apply — an
-unavailable model is no reason to break a routing policy.
+`cooldown.unavailable_seconds`. Design and image guards still apply — an unavailable
+model is no reason to break a routing policy.
 
 An ordinary malformed-request 400 is untouched and still raises.
 
@@ -720,10 +830,11 @@ may not route work somewhere policy forbids.
 
 ### Retrying a failed downstream request
 
-The plugin can re-issue one failed provider call through Hermes's `llm_execution`
-middleware (`retry_call`), which is what lets a route that fails on arrival be
-answered by a different model without failing the turn. It needs a Hermes new
-enough to pass `retry_call` to execution middleware.
+The plugin retries a failed provider call only when the host explicitly supplies a
+compatible `retry_call` to `llm_execution` middleware. The installed host supplies
+no such callback, so a failure on arrival propagates unchanged to the host or parent
+owner; the plugin neither calls single-use `next_call` again nor writes a routed-call
+record for an unsubmitted fallback.
 
 ### Live Dashboard
 
@@ -919,9 +1030,11 @@ cooldown:
 run: `delegate_task` rejects the whole batch. Keep them equal.
 
 Declining to dispatch is logged too. `terra-spark-orchestration.jsonl` records
-`preflight_forced` when a conductor is created and `preflight_skipped` — with
-the gate that rejected it — when one is not, so a turn that ran twenty calls
-with no worker says why.
+`preflight_forced` before the conductor/preflight builder is called, and
+`preflight_skipped` — with the gate that rejected it — when the preflight gate does
+not proceed. The former does not prove a conductor was created or that its contract
+was appended or delivered: the builder can refuse before those outcomes. It still
+helps explain why a turn that ran twenty calls had no worker.
 
 ### Usage reporting
 
@@ -1059,6 +1172,8 @@ usage_guard:
       step_down:
         sol: terra
 ```
+
+`soft_percent` may equal `hard_percent`: hard is checked first, so the soft band and step-down are off for that account; the dashboard accepts `0 < soft <= hard <= 100`.
 
 An account absent from `usage_guard.accounts` is never touched: no reading is
 fetched for it and its state reports `unknown`. Codex is stepped down by the
@@ -1245,6 +1360,215 @@ This is the *default*. A preference chain configured for that work kind replaces
 it — see above — because the operator asked to own the mapping. A single-entry
 chain (`sensitive: [sol]`) keeps the loud failure; add a second entry only if you
 would rather the work continue elsewhere than stop.
+
+### Runtime capability matrix and worker topology
+
+`runtime_capabilities.py` builds a read-only, frozen snapshot of what the host
+could support: spawn depth, concurrent children, the orchestrator switch, the
+checked delegation seams, and per-transport capabilities (`hermes_codex`,
+`hermes_claude`, `claude_cli`) for submission, model parameter, effort
+application, cancellation, async delivery, fallback ownership and mixed-target
+batches. Each entry is `supported`, `unsupported` or `unknown` with a reason; a
+missing, false or unverifiable seam is never `supported`. Discovery reads the
+request's tool schema and in-process host settings only: no model probe,
+subprocess, network call or config write.
+
+The default topology is `parent_direct` (the parent plans, workers run directly,
+host depth untouched). `nested_conductor` is granted only when depth is at least
+2, the orchestrator role is enabled, the host seams are callable and the chosen
+transport's submission is `supported`. An explicit nested request that fails
+returns `unsupported` with a reason and `parent_direct` as the selected topology;
+the router never raises the host depth, and a configured conductor alias alone
+selects nothing.
+
+`model_router.runtime_diagnostic(request, cfg)` returns a JSON-able view that keeps
+three things apart: *configured* features (router config), *runtime* capability
+(snapshot) and the *topology* (requested/selected; `active` is always `unknown`,
+since a snapshot cannot observe the running topology). Snapshots are cached (30 s,
+16 entries, locked) under a fingerprint of host limits, seam availability, schema
+property names and routing-config facts. A change to those inputs invalidates a
+snapshot; an arbitrary host revision, schema description, or property type change
+need not. A snapshot is evidence, not admission:
+fresh admission is still required immediately before execution. The diagnostic
+is not called on the routing path, so existing routing decisions are unchanged.
+
+### Target identity and configuration drift
+
+`execution_contracts.py` holds the frozen target-identity record: provider/account,
+transport, operator alias, requested/resolved/observed model (each with its evidence
+source), selection mode (`exact` or `profile_preferred`) and effort (requested/applied,
+with explicit `unknown`/`not_applicable`). `exact` is never substituted silently: a
+disagreement is a typed `ExactRouteMismatch` (failure class `exact-route-mismatch`);
+`profile_preferred` records the substitution. `target_identity.resolve_target()` builds
+the record from router config, `claude_delegation.tiers`, the host's named targets and
+the CLI alias map, cached by a fingerprint (30 s, 16 entries, locked) so a changed
+alias, tier or capability invalidates it. The Claude CLI is invoked with an alias, so
+its resolved identity is that alias; exact canonical CLI selection is `unsupported`
+unless `runtime_capabilities` reports `exact_model` as `supported`.
+
+`model_router.identity_diagnostic()` is a read-only, no-network view that lists each
+config owner's value per Claude tier and flags drift and observed mismatches.
+`target_identity.propose_host_migration()` returns an optional unified diff for
+`~/.hermes/config.yaml`; nothing is ever applied. No routing behaviour changes.
+
+### Execution records and offline adapter doubles
+
+`execution_contracts.py` also freezes the scheduler-facing records without adding a
+scheduler or dispatch path: a bounded `ExecutionRequest`, an `AttemptLifecycle`, a
+non-terminal `Submission`, and a terminal-only `WorkerResult`. The main records
+and adapter capability record carry explicit schema versions; boundary records
+have strict `as_dict()`/`from_dict()` validation: unknown
+routing fields, malformed IDs, invalid types, illegal lifecycle transitions and
+oversized inline payloads are rejected. A submission acceptance is only a handle;
+it cannot be consumed as a completed worker result. Execution success remains
+separate from validation evidence and later parent acceptance.
+
+Unknown effort and provider usage remain explicit (`"unknown"`) and provider usage
+may carry bounded future meter fields. Inline output is bounded; callers retain a
+bounded artifact reference plus failure and validation evidence rather than silently
+dropping those records. `OutputReference.bounded()` and `bounded_evidence()`
+require a caller-supplied full-content artifact reference when inline detail is
+oversized; they do not persist or verify the referenced artifact. Failure message
+and details have their own output references. Sequences are normalized to tuples,
+and nested usage/metadata are defensively copied into immutable collections.
+Usage/metadata have depth, finite-number, string and aggregate payload bounds;
+credential-named metadata fields (including nested API keys, cookies and bearer
+fields) are redacted before storage. This is key-based redaction, not a guarantee
+that arbitrary free text is secret-free; adapters must avoid supplying secrets.
+
+`legacy_direct_tool_request()` gives direct tools stable `legacy:<tool-id>`
+workflow/task/attempt identities without a TaskGraph (long IDs use a SHA-256
+suffix). Callers must explicitly supply permissions, mutation/write scope,
+acceptance criteria, tools, budgets/deadline and policies; the wrapper invents no
+authority or already-expired deadline.
+
+Lifecycles/results retain plan version, and results include changed-file paths.
+Post-submission states require the original handle; transitions cannot replace it.
+`unknown` cannot transition ordinarily: `reconcile()` explicitly records the
+caller's reconciled running/terminal observation without releasing workspace
+ownership or implementing reconciliation policy. Fake cancellation preserves
+terminal results and unknown liveness. Non-success results require typed failures,
+and success cannot carry failure or contradict a retained exact model/provider/
+effort constraint. Unknown observations are still unknown: execution success does
+not prove exact-route observability, verification or parent acceptance; production
+adapters/admission must enforce those requirements before accepting exact work.
+Retryability is a policy-owner input, not authorization inferred from model prose.
+
+`execution_test_doubles.py` supplies no-I/O scripted adapters for delayed completion,
+partial batches, capability refusal, observed-identity mismatch, unknown liveness
+and cancellation. They freeze the future adapter seam (`capabilities`,
+`can_execute`, `submit`, `result`, `cancel`) for S05 without wrapping production
+transports. TaskGraph construction (S08), event persistence/reconciliation (S06),
+scheduling and verification remain deferred.
+
+### Transport adapters
+
+`execution_adapters.py` wraps the actual legacy transport boundaries. Registered
+`delegate_task` execution retains the existing account guard as its sole admission
+owner; `delegate_claude` retains its existing admission/step-down and scoped effort
+handler, then invokes an explicitly raw host callable. Every Claude CLI entrypoint
+(the standalone `claude_opus_bridge.py` script, direct Python calls to
+`claude_opus_bridge.dispatch` and the middleware bridge) crosses one normalised CLI
+boundary exactly once, owned by the public `dispatch`: it validates input, then
+records one receipt around a private raw subprocess operation that never calls a
+public entrypoint back. Invalid input and an exact refusal raise before the boundary
+(nothing launched, no receipt); an attempted run leaves one receipt, one lifecycle
+`started`/`terminal` pair and, only on a validated success, one routed-call record.
+A caller that passes no identity gets a synthesized `profile_preferred` identity:
+requested model from the explicit tier, resolved value from the actual `--model`
+alias argument, observed model only from the validated CLI result, and account
+`unknown`. A supplied preferred identity can be corrected to admitted transport and
+resolved facts; an exact identity is re-checked against the CLI `exact_model`
+capability before launch, so a direct call cannot bypass it. The shared normalized
+boundary is not uniform admission: standalone callers own usage/account checks,
+receive only a process-memory receipt, and are never stably deduplicated across
+runs. Its durable evidence is the lifecycle log and, only after validated success,
+one routed-call record. No boundary calls its own public entrypoint recursively or
+performs a second account admission.
+Legacy goals, context, supported tool payloads and host-owned budgets/permissions
+remain authoritative. They are **not** converted into fabricated `ExecutionRequest`
+permissions, criteria or deadlines.
+
+Structured requests are more restrictive than those legacy tools. On the current
+transports, the adapter cannot enforce the complete mandatory request contract:
+trusted context/revision resolution, permission and required-tool fit, workspace and
+write-scope enforcement, deadline/timeout ownership, credential-account binding and
+substitution policy must all be proven. Consequently **all current structured submit
+cells explicitly return typed `unsupported`/capability refusal before dispatch**.
+A supported host model or effort seam alone does not make a full request supported.
+Requested Claude effort is not silently replaced with configured per-tier effort;
+Haiku accurately remains `not_applicable`. Capability lists advertise implemented
+adapter methods only, not host cancellation or structured submission that the
+adapter cannot deliver. There is no scheduler or activation switch in this slice.
+
+Legacy responses are returned unchanged and separately normalized into bounded,
+process-local execution receipts. Real synchronous results (including background to
+synchronous fallback) are terminal execution evidence even without a top-level
+handle; they do not prove acceptance criteria or served native model identity.
+Claude tier-adjustment evidence is retained as resolved selection, not served model
+proof. CLI observed model evidence comes only from its validated bridge result.
+Malformed/partial responses, background acceptance and ambiguous exceptions remain
+`unknown` in the receipt; a top-level `{"error": ...}` payload and a typed
+`ClaudeBridgeFailure` are recorded as `failed` (`timed_out` for a CLI timeout).
+For native child entries, receipts also retain bounded `exit_reason`, `truncated`,
+ordered per-task outcomes and separate schema `verification` evidence. A normal
+completed child is `succeeded`; genuine `max_iterations` output is `failed` with
+its usable partial summary still in the unchanged host payload; interruption is
+`cancelled`; and a host `failed` entry (including `max_iterations` with no usable
+summary or a `completed` child with an empty response) is `failed`. The host's
+timeout/exception entries carry `exit_reason` but no `truncated` key: a missing
+`truncated` counts as `false` there, so `timeout` is `timed_out` and `error` is
+`failed`. A host-fabricated entry (child raised or never finished: no
+`exit_reason`/`truncated`) is classified per task from its status, with
+`exit_reason` recorded as `unknown`. Mixed batches retain their per-task outcomes
+and use `exit_reason="mixed"`; the batch status follows the precedence
+`failed` > `timed_out` > `cancelled` (`succeeded` only when all tasks succeeded).
+Batch `verification` looks only at entries reporting `schema_valid`: any `false`
+gives `failed`, otherwise any `true` gives `passed`, otherwise `unknown`; tasks
+without a schema are ignored. `schema_valid: false` never turns an otherwise
+completed execution into verified/accepted work. Contradictory pairs, an unknown
+status, a non-boolean `truncated`, or a `max_iterations` entry lacking
+`truncated` stay `unknown`.
+The older status-only synthetic result shape remains compatible with its prior
+receipt classification. Native `child.model` remains unobserved identity.
+None of them keeps the record in flight after the call returns: the host exposes no
+completion signal correlated to an accepted background handle, so the legacy
+boundary never refuses a dispatch the unchanged host would accept.
+
+The legacy boundary adds no capacity check of its own: for `delegate_task`,
+`delegate_claude` and the CLI bridge the unchanged host (its batch-width check and
+async-pool fallback) is the sole admission authority, so distinct concurrent calls on
+one parent are never refused by the plugin. One locked journal is shared by the
+native transports per active parent. Missing host delegation support refuses before
+launch. Full attempt keys prevent reuse
+across workflows; where the host supplies session/turn/tool-call IDs, the public
+boundary deduplicates that invocation and rejects changed payloads under the same
+IDs. Ownership is acquired atomically at that public boundary before account
+admission, Claude usage/effort scoping or lifecycle annotation: only the owner
+calls the raw host seam and seals the final public response. A duplicate before
+seal reports pending/unknown; a retained duplicate after seal replays the exact
+bounded final response without a second admission, scope, audit or raw dispatch.
+A legacy call with no stable invocation IDs receives observation-only IDs: a
+later new call is not invented to be the same attempt. In-flight duplicates do not
+dispatch again, and retained terminal duplicates replay instead of re-running. Each
+completion and public seal is bound to the exact claim that started it, so a late
+invocation can never overwrite, replay into or unprotect a newer claim under the same
+IDs; a public invocation's record is pinned against eviction until its final response
+is sealed or the invocation unwinds. CLI runs keep their pre-S05 concurrency (no
+plugin cap).
+
+S06 owns persistence, background completion correlation and unknown-work
+reconciliation. The receipt journal keeps in-flight and seal-pending public records
+unconditionally and
+finished records (terminal, unknown, observation-only) for one hour, bounded to 4096
+by least-recently-used eviction; a full journal evicts, it never refuses. While a
+sealed session/turn/tool-call record is retained, an identical repeat replays its
+cached response (up to 8192 characters) and an uncached or changed repeat refuses;
+after eviction a repeat is treated as a new call. Receipts do not survive restart.
+Do not automatically replay unknown work after a
+restart. No production configuration/log write, provider probe or new routing-hot-path
+subprocess is introduced. Running Hermes/dashboard processes need their normal
+restart to load the changed boundaries.
 
 ## Usage
 
@@ -1438,9 +1762,10 @@ tail -5 ~/.hermes/logs/terra-spark-orchestration.jsonl \
   | jq '{event, parent_model, skip_reason, tools_seen}'
 ```
 
-`preflight_forced` means the contract went out and the parent was asked to
-delegate; what it does next is the model's decision. `preflight_skipped` names
-the gate instead:
+`preflight_forced` records that the preflight event was emitted before the
+conductor/preflight builder is invoked. It does not by itself prove conductor creation,
+contract append/delivery, or a parent request completion; the builder can refuse.
+`preflight_skipped` names the gate instead:
 
 | `skip_reason` | Meaning |
 |---|---|
@@ -1485,26 +1810,34 @@ soft-limit policy, never a remedy for an account's hard limit.
 Usage step-down applies to workers only; it cannot change the parent model.
 
 The tests import the plugin as the `model_router` package (and a few modules by
-their bare name), and the Hermes venv ships neither pytest nor pip, so they run
-under `unittest` from a directory where the repo is linked as `model_router`.
-The full-page dashboard test requires Node.js and `jsdom`; CI must install them
-and expose `jsdom` through `NODE_PATH` before running the suite. Missing either
-dependency fails the test instead of silently skipping the visible-filter check.
-`HOME` and `HERMES_HOME` point at a scratch directory so the run never writes to
-the real Hermes logs; a copy of the Hermes config goes there because some tests
-read it. Both are needed: the plugin resolves `~/.hermes/...` through Hermes's
-home, so with `HOME` alone a machine that sets `HERMES_HOME` — every Windows
-install — would write the test run into the real one.
+bare name), and the Hermes venv ships neither pytest nor pip, so they run under
+`unittest` in a fresh scratch directory. Use the tracked harness rather than
+copying a live Hermes configuration: it writes only a sanitized `delegation`
+section, links the checkout locally, exports `PYTHONDONTWRITEBYTECODE=1`, and
+passes the Python process exit status through unchanged. It resolves the default
+Hermes venv relative to `ROUTER_TEST_PYTHON`; set that variable when the local
+validated interpreter lives elsewhere.
 
 ```bash
-AGENT=~/.hermes/hermes-agent
-RUN=$(mktemp -d)
-mkdir -p "$RUN/home/.hermes" && cp ~/.hermes/config.yaml "$RUN/home/.hermes/"
-ln -s ~/Repositories/hermes-model-router "$RUN/model_router"
-cd "$RUN" && HOME="$RUN/home" HERMES_HOME="$RUN/home/.hermes" \
-  PYTHONPATH="$RUN:$RUN/model_router:$AGENT" \
-  "$AGENT/venv/bin/python" -m unittest discover -s model_router -t . -p 'test_*.py'
+# Full suite
+ROUTER_TEST_PYTHON="$HOME/.hermes/hermes-agent/venv/bin/python" \
+  scripts/run_suite.sh --full
+
+# The execution-routing compatibility modules
+ROUTER_TEST_PYTHON="$HOME/.hermes/hermes-agent/venv/bin/python" \
+  scripts/run_suite.sh --focused
+
+# Prove user delegation depth does not change the result
+ROUTER_TEST_MAX_SPAWN_DEPTH=2 \
+ROUTER_TEST_PYTHON="$HOME/.hermes/hermes-agent/venv/bin/python" \
+  scripts/run_suite.sh --full
 ```
+
+The full-page dashboard test requires Node.js and `jsdom`; the harness exposes a
+nearby Hermes checkout's `node_modules` through `NODE_PATH`. Missing either
+dependency fails the test instead of silently skipping the visible-filter check.
+Test fixtures declare whether they require a depth-one direct-worker topology or
+a depth-two nested conductor, so no test needs the user's `~/.hermes/config.yaml`.
 
 Use a fresh `RUN` for every run. Some tests still write the default orchestration
 log inside that home, and `test_root_parent_is_pinned_when_classifier_wants_sol_worker`
@@ -1660,9 +1993,10 @@ points the agent at a working route; before, the call reached the disabled accou
 Spark, Terra and Sol. The picker offers the four shared provider levels — `low`,
 `medium`, `high` and `xhigh` — and writes only its changed tier into
 `router_config.local.yaml`; `router_config.yaml` remains the shipped default.
-Route markers and situational effort keys, including `opus5`, `sol_long` and the
-`explicit_*` keys, stay file-only because they do not mean one ordinary tier
-setting.
+Route markers and situational effort keys, including `opus5` and `sol_long`, stay
+file-only because they do not mean one ordinary tier setting. Retired `explicit_*`
+keys are detected as local migration leftovers and can be removed by their owner in
+Settings.
 
 **1.16.0** — The Luna and Sol tiers run GPT-6 Luna (`gpt-6-luna`) and GPT-6 Sol (`gpt-6-sol`) instead of GPT-5.6. The `models.luna` and `models.sol` defaults moved together, while the tier keys stay `luna` and `sol`; preference chains, fallbacks and existing logs need no rewrite. The dashboard still counts older GPT-5.6 Luna and Sol log lines under the same cards.
 
